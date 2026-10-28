@@ -28,7 +28,11 @@ extra = [0x0C02DE20,  # 2
          0x0C0C5C7E,  # 650
          0x0C05EF62,  # boot 3: 1
          0x0C07D53C,  # boot 3: 1
-         0x0C090500]  # boot 3: 16
+         0x0C090500,  # boot 3: 16
+         0x0C019360,  # headless runs: entries after another function's rts, called through
+         0x0C05EF76,  #   pointers (two of them from ADVERTISE's literal pool)
+         0x0C07D528,
+         0x0C0904B2]
 
 # Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
 # Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the
@@ -91,3 +95,18 @@ overlay = true
 # or missed entirely (0x1440, 0xF620, 0x11F00).
 entries = [0x8C900000, 0x8C900020, 0x8C900062, 0x8C9000A6, 0x8C90063E, 0x8C901440, 0x8C90F620,
            0x8C911F00]
+
+# ADVERTISE.PRS: the title screen and menus module (dumps at 12 and 24 guest s: 0x8C900000 holds
+# its header table 8C9000E8 8C9001A0 8C9001BA, matched against every module). Its untranslated
+# entries were what kept the menus, and everything they called, in the interpreter (0x8C9001BA
+# 830 times, 0x8C901568 827). Code region ends near 0xF000. Seeds: the header's three functions
+# and the prologues the runs reached; offset 0 is the table, not code.
+[[relocations]]
+file = "extracted/modules/ADVERTISE.bin"
+source = 0x0
+size = 0x10000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C9000E8, 0x8C9001A0, 0x8C9001BA, 0x8C900020, 0x8C900040, 0x8C901440, 0x8C901568,
+           0x8C901890, 0x8C90197A, 0x8C902698, 0x8C902786, 0x8C903000, 0x8C903086]
+
