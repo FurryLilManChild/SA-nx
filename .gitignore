@@ -1,0 +1,39 @@
+# Game data is never committed: the disc, anything extracted from it, saves, captures.
+assets/
+games/*/extracted/
+games/*/disc/
+games/*/dump/
+games/*/cache/
+games/*/suggested.toml
+*.gdi
+*.cdi
+*.chd
+*.iso
+*.bin
+*.BIN
+*.raw
+*.vmu
+*.vms
+*.vmi
+dc_bios*
+dc_boot*
+dc_flash*
+bios/
+sdk/
+
+# Run output: captures, dumps, traces, screenshots
+*.vram
+*.ta
+*.ppm
+*.wav
+*.hash
+capture-*
+
+# Build output, local dependencies, SD staging, logs
+build/
+build-*/
+out/
+.deps/
+*.nro
+*.nacp
+*.elf
