@@ -2,6 +2,25 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: headless runs here; the movie player kept everything interpreted
+
+- Built a headless replay build in the cloud (patch 0006: the launcher builds without the
+  renderer) and ran with scripted Start presses. `--replay` agreed on 264M calls to the title; its
+  large counts later (fn 0x0C040784 16,097, fn 0x0C057B00 1.6M) are harness artifacts: both
+  functions recurse, so the interpreter pass stops at the first nested return to the same PR.
+- `DREAM_STOP_ON_UNMAPPED=1` stopped at the first bad read (frame 2132, read16 0x00400020) with
+  no emitted frames on the stack: the drawing code was running in the interpreter.
+- First cause: the menus module ADVERTISE.PRS (header table at 0x8C900000 at 12 and 24 guest s)
+  was untranslated. Added (354 functions): untranslated calls 31,930 -> 2,636, speed 0.4x -> 0.6x,
+  but the same fault at the same frame.
+- Real cause: DREAM_TRACE_NONLOCAL showed 517 resumes to untranslated code, all at 0x8CEB03BA,
+  0x8CECFAA0 (169), 0x8CED9D26 ... A dump of 0x8CEB0000 matched SONICAD/MOVIE.BIN (code at offset
+  0x3B0; RAM equals the file for its first 0x1B000 bytes at 34 s): the Sofdec movie player, loaded
+  at 0x8CEB0000. Each resume of its task (return points after jsr in the file) left the
+  interpreter running at top level. Added the whole file as an overlay (1,196 functions) plus six
+  main-program entries the runs reached. Explains the slow black intro and why hiding the movie
+  file did not skip it too.
+
 ## 2026-10-28: boot 4, the hang is model data, not missing code
 
 - Boot 4 (closed by hand at 103.8 guest s, 0.3x): `--hide-file` active ("hiding 1 file"), intro

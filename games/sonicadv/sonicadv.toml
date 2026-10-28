@@ -32,7 +32,13 @@ extra = [0x0C02DE20,  # 2
          0x0C019360,  # headless runs: entries after another function's rts, called through
          0x0C05EF76,  #   pointers (two of them from ADVERTISE's literal pool)
          0x0C07D528,
-         0x0C0904B2]
+         0x0C0904B2,
+         0x0C04F692,  # headless run 2: entries after rts/jmp, reached through pointers
+         0x0C07EE82,  #   (0x0C07EE82 527 times)
+         0x0C0A65D6,
+         0x0C0A6770,
+         0x0C0A67C0,
+         0x0C107A36]
 
 # Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
 # Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the
@@ -109,4 +115,17 @@ dest = 0x8C900000
 overlay = true
 entries = [0x8C9000E8, 0x8C9001A0, 0x8C9001BA, 0x8C900020, 0x8C900040, 0x8C901440, 0x8C901568,
            0x8C901890, 0x8C90197A, 0x8C902698, 0x8C902786, 0x8C903000, 0x8C903086]
+
+# MOVIE.BIN: the movie player (Sofdec), loaded to 0x8CEB0000 (its code at offset 0x3B0 found in a
+# RAM dump at that address; RAM equals the file for its first 0x1B000 bytes at 34 guest s, the
+# rest is reused afterwards). Untranslated, it ran the intro through the interpreter, and every
+# resume of its task (0x8CEB03BA, 0x8CECFAA0 x169, ...: return points after jsr in this file)
+# left the interpreter running at top level, through the game loop and the model drawing, where
+# the bad reads came from. Whole file; overlay, so the check skips it once the area is reused.
+[[relocations]]
+file = "extracted/fs/SONICAD/MOVIE.BIN"
+source = 0x0
+size = 0x2D110
+dest = 0x8CEB0000
+overlay = true
 
