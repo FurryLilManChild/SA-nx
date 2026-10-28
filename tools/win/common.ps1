@@ -33,6 +33,27 @@ function Enter-DevShell {
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 }
 
+# Windows CMake and Ninja, never MSYS2 or Git-for-Windows copies (devkitPro installs MSYS2, and
+# its cmake turns C:\SA-nx into /c/SA-nx/C:/SA-nx). Visual Studio's bundled copies come first.
+function Find-WinTool([string]$Name) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $cands = @()
+    if (Test-Path $vswhere) {
+        $vs = & $vswhere -latest -products * -property installationPath
+        if ($vs) {
+            $ext = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake'
+            if ($Name -eq 'cmake') { $cands += Join-Path $ext 'CMake\bin\cmake.exe' }
+            if ($Name -eq 'ninja') { $cands += Join-Path $ext 'Ninja\ninja.exe' }
+        }
+    }
+    if ($Name -eq 'cmake') { $cands += "$env:ProgramFiles\CMake\bin\cmake.exe" }
+    $cands += (Get-Command "$Name.exe" -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path $c) -and ($c -notmatch '(?i)msys|devkitpro|\\usr\\bin|\\mingw')) { return $c }
+    }
+    throw "No Windows $Name.exe found. Run tools\win\setup_pc.ps1 (it installs one), then try again."
+}
+
 # Applies patches\dream-recomp\*.patch to the submodule, each only if it is not already in.
 function Apply-Patches {
     $sub = Join-Path $Root 'dream-recomp'
@@ -64,6 +85,7 @@ function Invoke-Logged([string]$Exe, [string[]]$ArgList, [string]$LogName, [stri
     $quoted = $ArgList | ForEach-Object { if ("$_" -match '\s') { '"' + $_ + '"' } else { "$_" } }
     $p = Start-Process -FilePath $Exe -ArgumentList $quoted -NoNewWindow -PassThru `
         -RedirectStandardOutput $out -RedirectStandardError $err -WorkingDirectory $Root
+    $null = $p.Handle  # without this, Windows PowerShell 5.1 loses the exit code
     $last = ''
     while (-not $p.HasExited) {
         Start-Sleep -Seconds 5
