@@ -54,18 +54,35 @@ function Find-WinTool([string]$Name) {
     throw "No Windows $Name.exe found. Run tools\win\setup_pc.ps1 (it installs one), then try again."
 }
 
-# Applies patches\dream-recomp\*.patch to the submodule, each only if it is not already in.
+# Applies patches\dream-recomp\*.patch to the submodule as one set, in name order. Later patches
+# may edit lines earlier ones added, so a patch cannot be checked on its own. A stamp records which
+# set is applied; when the set changes, the submodule is reset to its pinned files and the whole
+# set is applied again. Unchanged set: nothing is touched, so nothing is rebuilt.
 function Apply-Patches {
     $sub = Join-Path $Root 'dream-recomp'
-    $ErrorActionPreference = 'Continue'  # git writes to stderr on a failed check; that is expected
-    foreach ($p in Get-ChildItem (Join-Path $Root 'patches\dream-recomp\*.patch') | Sort-Object Name) {
-        & git -C $sub apply --reverse --check $p.FullName 2>$null
-        if ($LASTEXITCODE -eq 0) { continue }
-        & git -C $sub apply --whitespace=nowarn $p.FullName
-        if ($LASTEXITCODE -ne 0) { throw "Patch $($p.Name) does not apply. Tell Claude." }
-        Write-Host "Applied $($p.Name)"
+    $stamp = Join-Path $Root 'out\dream-patches.stamp'
+    $patches = @(Get-ChildItem (Join-Path $Root 'patches\dream-recomp\*.patch') | Sort-Object Name)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $all = New-Object IO.MemoryStream
+    foreach ($p in $patches) { $b = [IO.File]::ReadAllBytes($p.FullName); $all.Write($b, 0, $b.Length) }
+    $want = -join ($sha.ComputeHash($all.ToArray()) | ForEach-Object { $_.ToString('x2') })
+    $have = ''
+    if (Test-Path $stamp) { $have = (Get-Content $stamp -Raw).Trim() }
+    if ($have -eq $want) { return }
+
+    $ErrorActionPreference = 'Continue'  # git writes progress and notes to stderr
+    Write-Host 'Applying dream-recomp patches ...'
+    & git -C $sub checkout -- . 2>&1 | Out-Null
+    foreach ($p in $patches) {
+        $msg = & git -C $sub apply --whitespace=nowarn $p.FullName 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log 'build_pc.log' "patch $($p.Name) failed: $msg"
+            throw "Patch $($p.Name) does not apply. Tell Claude."
+        }
+        Write-Host "  applied $($p.Name)"
         Write-Log 'build_pc.log' "applied $($p.Name)"
     }
+    [IO.File]::WriteAllText($stamp, $want)
 }
 
 # Parallel compile jobs: one per logical core, but no more than one per 3 GB of RAM, since each
