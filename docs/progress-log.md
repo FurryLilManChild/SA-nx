@@ -2,6 +2,25 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: boot 3, calls into a function's middle (patches 0004, 0005)
+
+- Boot 3 (120 guest s = 204 host s, 0.5x): Station Square title card, then black, though ADV00
+  was translated (504 functions in the build log). The untranslated list was mostly resume misses
+  at ordinary mid-function instructions (0x8C9000AA is `sts.l pr` inside a prologue).
+- Cause: the main program calls Station Square at entry points discovery had inside other
+  functions: 0x8C900020 (from 0x0C053C0A), 0x8C9000A6 (from 0x0C053C16, three instructions into
+  fn 0x0C9000A0) and 0x8C90063E (from 0x0C0986F6). call_indirect found the containing function, its
+  resume entry had no such block start, and resume_miss went to on_resume, which interprets until
+  the next non-local return: effectively the rest of the run, so interrupts then landed at
+  arbitrary pcs and every later resume missed too.
+- Patch 0004: a miss reached from call_indirect is interpreted only until that call returns
+  (on_untranslated), still recorded. Config: those three plus 0x62, 0x1440, 0xF620, 0x11F00 as
+  ADV00 entries (now 516 functions), and the run's three main-image seeds.
+- Patch 0005: `--hide-file NAME` bumps the last character of NAME's directory record in every
+  sector read. boot_test and play hide SA1_600.SFD (62 MB, the intro) unless -KeepIntro. Mark
+  pressed Start during the black intro and nothing seemed to skip; untested whether the game
+  copes with the file missing.
+
 ## 2026-10-28: boot 2, Station Square is a PRS module
 
 - Build 3 failed instantly: Apply-Patches checked 0001 alone after 0002 had edited a line 0001

@@ -25,7 +25,10 @@ extra = [0x0C02DE20,  # 2
          0x0C02DE86,  # 2
          0x0C02DF20,  # 10
          0x0C02DF86,  # 1
-         0x0C0C5C7E]  # 650
+         0x0C0C5C7E,  # 650
+         0x0C05EF62,  # boot 3: 1
+         0x0C07D53C,  # boot 3: 1
+         0x0C090500]  # boot 3: 16
 
 # Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
 # Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the
@@ -83,3 +86,8 @@ source = 0x0
 size = 0x14000
 dest = 0x8C900000
 overlay = true
+# Entry points boot 3 called that discovery had inside other functions (0x20 from 0x0C053C0A,
+# 0xA6 from 0x0C053C16: a second entry three instructions into a prologue, 0x63E from 0x0C0986F6)
+# or missed entirely (0x1440, 0xF620, 0x11F00).
+entries = [0x8C900000, 0x8C900020, 0x8C900062, 0x8C9000A6, 0x8C90063E, 0x8C901440, 0x8C90F620,
+           0x8C911F00]

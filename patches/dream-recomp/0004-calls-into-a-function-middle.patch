@@ -1,0 +1,46 @@
+diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
+index 7d292b7..e22a8fd 100644
+--- a/runtime/src/sh4/abi_bare.cpp
++++ b/runtime/src/sh4/abi_bare.cpp
+@@ -227,7 +227,21 @@ void nonlocal_return(Ctx& c, ::dream::Memory&, std::uint32_t pc) {
+     throw NonLocalReturn{pc};
+ }
+ 
++namespace {
++// SA-nx: the target of a call_indirect that landed inside a translated function, while that
++// function's resume entry is deciding whether the target is one of its block starts. A miss there
++// is a *call* into the middle of a function (Sonic Adventure's modules have second entry points a
++// few instructions into a prologue), not a non-local return, so it should be interpreted only until
++// the call returns. Handing it to on_resume instead interpreted the rest of the run.
++thread_local std::uint32_t g_call_into = 0xFFFFFFFFu;
++}  // namespace
++
+ void resume_miss(Ctx& c, ::dream::Memory& m, std::uint32_t pc) {
++    if (g_hooks && pc == g_call_into) {
++        g_call_into = 0xFFFFFFFFu;
++        g_hooks->on_untranslated(c, m, pc);
++        return;
++    }
+     if (g_hooks) {
+         g_hooks->on_resume(c, m, pc);
+         return;
+@@ -323,8 +337,17 @@ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
+             c.pc = target;
+             // resume() dispatches on its own block starts and calls resume_miss for anything else,
+             // so a target that is inside the range but not a block start still faults honestly
+-            // rather than running from the wrong place.
+-            e->resume(c, m, target);
++            // rather than running from the wrong place. Marked as a call, so that miss is
++            // interpreted only until it returns (see g_call_into).
++            const std::uint32_t outer = g_call_into;
++            g_call_into = target;
++            try {
++                e->resume(c, m, target);
++            } catch (...) {
++                g_call_into = outer;
++                throw;
++            }
++            g_call_into = outer;
+             return;
+         }
+     }
