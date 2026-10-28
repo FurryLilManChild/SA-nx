@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: boot 4, the hang is model data, not missing code
+
+- Boot 4 (closed by hand at 103.8 guest s, 0.3x): `--hide-file` active ("hiding 1 file"), intro
+  still played black; Station Square title card, then black.
+- ADV00 is not the problem: the build has all 516 functions, the stop dump equals ADV00.bin
+  (0 of 256 halfwords differ), and a standalone test linking the ADV00 units with the runtime
+  resolves 0x8C900000/20/A0/A6/63E with ADV00 in RAM. The repeated untranslated calls to
+  0x8C9000A6 and 0x8C90063E (15 each) come from menus, when another module (likely ADVERTISE.PRS)
+  sits at 0x8C900000: the game calls fixed entry points on whichever module is loaded.
+- Every run stops in the same model-drawing routine, fn 0x0C037CDC (pc 0x0C037CFA), reading
+  unmapped 0x0040xxxx with r4 = 0x00200058 / 0x00200280 (`mov.w @r4+` vertex reads). Those look like
+  model-data offsets that were never turned into RAM pointers. Same likely cause as the wrong
+  character models at character select. Next: find where the game fixes up model pointers after
+  loading (and why that step is skipped or wrong here), and log GBR at the fault.
+- Intro: renaming the directory record did not stop the movie. Next: check whether the game
+  finds files through its own cached table rather than re-reading the directory.
+
 ## 2026-10-28: boot 3, calls into a function's middle (patches 0004, 0005)
 
 - Boot 3 (120 guest s = 204 host s, 0.5x): Station Square title card, then black, though ADV00
