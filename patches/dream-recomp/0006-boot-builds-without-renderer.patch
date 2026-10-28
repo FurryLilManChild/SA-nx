@@ -1,0 +1,24 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 4d9771c..8e6e529 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -1273,6 +1273,11 @@ int main(int argc, char** argv) {
+             shot_presented = true;
+         else if (!std::strcmp(argv[i], "--present-mode") && i + 1 < argc) {
+             const char* m = argv[++i];
++#ifndef DREAM_WITH_RENDERER
++            // SA-nx: a build without the renderer still has to compile this; it has no window.
++            (void)m;
++        } else if (false) {
++#else
+             using PM = dream::render::vk::Window::PresentMode;
+             if (!std::strcmp(m, "mailbox"))
+                 present_mode = PM::Mailbox;
+@@ -1284,6 +1289,7 @@ int main(int argc, char** argv) {
+                 std::fprintf(stderr, "unknown present mode %s: vsync, mailbox or immediate\n", m);
+                 return 2;
+             }
++#endif
+         } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
+             bindings_file = argv[++i];
+             bindings_file_set = true;
