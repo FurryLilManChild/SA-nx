@@ -33,6 +33,28 @@ function Enter-DevShell {
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 }
 
+# Applies patches\dream-recomp\*.patch to the submodule, each only if it is not already in.
+function Apply-Patches {
+    $sub = Join-Path $Root 'dream-recomp'
+    $ErrorActionPreference = 'Continue'  # git writes to stderr on a failed check; that is expected
+    foreach ($p in Get-ChildItem (Join-Path $Root 'patches\dream-recomp\*.patch') | Sort-Object Name) {
+        & git -C $sub apply --reverse --check $p.FullName 2>$null
+        if ($LASTEXITCODE -eq 0) { continue }
+        & git -C $sub apply --whitespace=nowarn $p.FullName
+        if ($LASTEXITCODE -ne 0) { throw "Patch $($p.Name) does not apply. Tell Claude." }
+        Write-Host "Applied $($p.Name)"
+        Write-Log 'build_pc.log' "applied $($p.Name)"
+    }
+}
+
+# Parallel compile jobs: one per logical core, but no more than one per 3 GB of RAM, since each
+# 10 MB piece of translated game code needs a few GB to compile.
+function Get-BuildJobs {
+    $cores = [Environment]::ProcessorCount
+    $ramGb = [math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    return [math]::Max(1, [math]::Min($cores, [math]::Floor($ramGb / 3)))
+}
+
 # Runs a program with its output going straight to a UTF-8 log, and every few seconds shows the
 # newest progress line (Ninja's [n/N]) so a long build is not a silent window.
 function Invoke-Logged([string]$Exe, [string[]]$ArgList, [string]$LogName, [string]$Pattern = '^\[\d+/\d+\]') {

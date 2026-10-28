@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: translator fixes for a large binary (patch 0001)
+
+- `dream-translate game` on Sonic's 1ST_READ.BIN never finished (killed after 40 min). gdb samples
+  all landed in `FunctionEmitter::scan_stores` on one 50-byte function (0x0c2842d0), with
+  `Image::contains` called on climbing addresses. Cause: the loop marking written literal words
+  used a 32-bit counter; a store whose address normalises into the top bytes of the address space
+  wrapped the counter past zero and walked all 4 GiB (and marked every image word written, which
+  silently disabled literal folding). Fix: 64-bit bounds. Translation now takes 11 s.
+- Output: 53,149 functions, 1,058,847 instructions, 35,055 not lowered, 122,522 FP runtime
+  branches, 74 switch tables, 158 MB of C++ in one file. Coverage 66.7% of the bytes it scanned.
+- Added `--parts N` (CMake `DREAM_TRANSLATE_PARTS`, 32 here): bodies split evenly (about 10 MB
+  each), resume entries non-static when split so the one table in part 0 links. One part compiles
+  in 2 min 36 s with clang -O1 on one core; resume symbols resolve across parts. MSVC units use
+  `/O1 /bigobj`.
+- Both live in `patches/dream-recomp/0001-large-binaries-wrap-and-split.patch`, applied by
+  `build_pc.ps1`. The wrap fix is worth offering upstream.
+
 ## 2026-10-28: kickoff
 
 - Route chosen: dream-recomp (GPL-2.0, ARM64 parity by design, Vulkan renderer). SARecomp could

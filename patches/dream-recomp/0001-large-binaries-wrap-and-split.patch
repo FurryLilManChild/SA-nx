@@ -1,0 +1,193 @@
+diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
+index 0b18bd2..c8a2f79 100644
+--- a/cmake/DreamAddGame.cmake
++++ b/cmake/DreamAddGame.cmake
+@@ -20,6 +20,8 @@
+ #            development configuration can carry on past that (ADR 2). The release configuration
+ #            aborts with the fault log by design.
+ 
++set(DREAM_TRANSLATE_PARTS 1 CACHE STRING
++    "Translation units the main binary's C++ is split into (dream-translate --parts)")
+ set(DREAM_TRANSLATE_EXTRA_FLAGS "" CACHE STRING
+     "Extra dream-translate flags for the game units (--trace, --no-irq); development trees only")
+ 
+@@ -55,6 +57,12 @@ function(dream_add_game id)
+   # somewhere else and runs from there, which has to be translated as it looks at its destination.
+   set(_units ${_gen}/${id}.cpp)
+   set(_headers ${_gen}/${id}.h)
++  if(DREAM_TRANSLATE_PARTS GREATER 1)
++    math(EXPR _last "${DREAM_TRANSLATE_PARTS} - 1")
++    foreach(k RANGE 1 ${_last})
++      list(APPEND _units ${_gen}/${id}_part${k}.cpp)
++    endforeach()
++  endif()
+   string(REGEX MATCHALL "dest = 0x[0-9A-Fa-f]+" _dests "${_toml}")
+   set(_seen "")
+   foreach(d IN LISTS _dests)
+@@ -88,7 +96,8 @@ function(dream_add_game id)
+   separate_arguments(DREAM_TRANSLATE_EXTRA_FLAGS)
+   add_custom_command(
+     OUTPUT ${_units} ${_headers}
+-    COMMAND dream-translate game --config ${_toml_path} --out-dir ${_gen} ${DREAM_TRANSLATE_EXTRA_FLAGS}
++    COMMAND dream-translate game --config ${_toml_path} --out-dir ${_gen}
++            --parts ${DREAM_TRANSLATE_PARTS} ${DREAM_TRANSLATE_EXTRA_FLAGS}
+     DEPENDS dream-translate ${_toml_path} ${_symbols} ${_bin}
+     COMMENT "Translating ${ARG_TITLE}"
+     VERBATIM)
+@@ -109,7 +118,10 @@ function(dream_add_game id)
+     target_compile_definitions(${id}_boot PRIVATE DREAM_WITH_AUDIO)
+   endif()
+   dream_target_defaults(${id}_boot)
+-  if(NOT MSVC)
++  if(MSVC)
++    # The same reasoning for MSVC (SA-nx): /O1 keeps a 160 MB translation from taking hours.
++    set_source_files_properties(${_units} PROPERTIES COMPILE_OPTIONS "/O1;/bigobj")
++  else()
+     # Tens of megabytes of generated C++: keep the optimiser modest so the edit-build-run loop
+     # stays short.
+     set_source_files_properties(${_units} PROPERTIES COMPILE_OPTIONS "-O1")
+diff --git a/translator/include/dream/translator/emit.h b/translator/include/dream/translator/emit.h
+index 86af1fe..e47a463 100644
+--- a/translator/include/dream/translator/emit.h
++++ b/translator/include/dream/translator/emit.h
+@@ -49,6 +49,10 @@ struct EmitOptions {
+     bool replay_hooks = false;
+     bool irq_checks = true;  // interrupt polls at entry and back-edges (ADR 7)
+     bool overlay = false;    // table entries carry the code words they were translated from
++    // Split the unit's function bodies over this many translation units (SA-nx). A 6.7 MB binary
++    // emits about 160 MB of C++, which no compiler handles well as one file. Part 0 also holds the
++    // registration table; the other parts land in EmitResult::extra_sources.
++    unsigned parts = 1;
+ };
+ 
+ // A run of bytes inside a function that discovery never decoded. Often a literal pool, sometimes
+@@ -58,7 +62,8 @@ struct CoverageGap {
+ };
+ 
+ struct EmitResult {
+-    std::string source;                 // one translation unit
++    std::string source;                 // one translation unit (part 0 when split)
++    std::vector<std::string> extra_sources;  // parts 1..N-1 when EmitOptions::parts > 1
+     std::string header;                 // declarations of the emitted functions
+     std::vector<std::string> warnings;  // per-instruction notes (unlowered ops etc.)
+     std::size_t instructions = 0;
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index f5f5ab4..ac0dba2 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -219,9 +219,12 @@ public:
+                     addr += *r0;
+                 }
+                 addr = normalise(addr);
+-                for (std::uint32_t w = addr & ~3u; w < addr + size; w += 4)
+-                    if (img_.contains(w, 4))
+-                        out.insert(w);
++                // 64-bit bounds: an address in the top bytes of the 32-bit space must not wrap the
++                // counter past zero, which walked all 4 GiB once per such store (Sonic Adventure).
++                const std::uint64_t end = std::uint64_t{addr} + size;
++                for (std::uint64_t w = addr & ~3u; w < end; w += 4)
++                    if (img_.contains(static_cast<std::uint32_t>(w), 4))
++                        out.insert(static_cast<std::uint32_t>(w));
+             }
+         }
+     }
+@@ -243,7 +246,9 @@ public:
+         // resume_pc = 0 by the plain function, or at a block start / call-return address after a
+         // non-local return. entry_pr is what an `rts` must return to; anything else is a non-local
+         // return.
+-        out << "static void " << name << "__resume(Ctx& c, Memory& m, std::uint32_t resume_pc) {\n";
++        // Split units reference each other's resume entries from the one registration table.
++        out << (opt_.parts > 1 ? "void " : "static void ") << name
++            << "__resume(Ctx& c, Memory& m, std::uint32_t resume_pc) {\n";
+         out << "    [[maybe_unused]] const std::uint32_t entry_pr = c.pr;\n";
+         // Poll points record the exact guest pc first: an interrupt handler that switches tasks
+         // returns through RTE to SPC, and run_guest re-enters this function there.
+@@ -1677,7 +1682,7 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
+     for (const auto& f : specs) {
+         hdr << "void " << f.name << "(dream::sh4::Ctx& c, dream::Memory& m);\n";
+         src << "void " << f.name << "(Ctx& c, Memory& m);\n";
+-        src << "static void " << f.name
++        src << (options.parts > 1 ? "void " : "static void ") << f.name
+             << "__resume(Ctx& c, Memory& m, std::uint32_t resume_pc);\n";
+     }
+     src << "\n";
+@@ -1811,10 +1816,43 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
+                     (f.fpscr_entry & ~(1u << 20)) | (static_cast<std::uint32_t>(e.sz) << 20);
+         }
+     }
+-    for (const auto& f : specs) {
+-        FunctionEmitter fe(image, f, options, known, summaries, result);
+-        fe.set_written(&written);
+-        src << fe.run() << "\n";
++    if (options.parts <= 1) {
++        for (const auto& f : specs) {
++            FunctionEmitter fe(image, f, options, known, summaries, result);
++            fe.set_written(&written);
++            src << fe.run() << "\n";
++        }
++    } else {
++        // Every part starts with the same prelude (includes and every declaration), then takes a
++        // contiguous share of the bodies, balanced by emitted size.
++        const std::string prelude = src.str();
++        std::vector<std::string> bodies;
++        bodies.reserve(specs.size());
++        std::size_t total = 0;
++        for (const auto& f : specs) {
++            FunctionEmitter fe(image, f, options, known, summaries, result);
++            fe.set_written(&written);
++            bodies.push_back(fe.run());
++            total += bodies.back().size() + 1;
++        }
++        const std::size_t share = total / options.parts + 1;
++        std::vector<std::ostringstream> parts(options.parts);
++        for (auto& p : parts) p << prelude;
++        std::size_t k = 0, used = 0;
++        for (auto& b : bodies) {
++            if (used >= share && k + 1 < options.parts) {
++                ++k;
++                used = 0;
++            }
++            parts[k] << b << "\n";
++            used += b.size() + 1;
++        }
++        src.str("");
++        src << parts[0].str();
++        for (unsigned i = 1; i < options.parts; ++i) {
++            parts[i] << "}  // namespace dream::gen\n";
++            result.extra_sources.push_back(parts[i].str());
++        }
+     }
+     src << "namespace {\n";
+     if (options.overlay) {
+diff --git a/translator/src/main.cpp b/translator/src/main.cpp
+index e451638..0689884 100644
+--- a/translator/src/main.cpp
++++ b/translator/src/main.cpp
+@@ -417,6 +417,10 @@ int translate_view(const dream::translator::GameConfig& cfg, const dream::transl
+     {
+         std::ofstream o(base.string() + ".cpp");
+         o << res.source;
++        for (std::size_t i = 0; i < res.extra_sources.size(); ++i) {
++            std::ofstream op(base.string() + "_part" + std::to_string(i + 1) + ".cpp");
++            op << res.extra_sources[i];
++        }
+         std::ofstream h(base.string() + ".h");
+         h << res.header;
+     }
+@@ -459,6 +463,8 @@ int cmd_game(int argc, char** argv) {
+             opt.trace = true;
+         else if (!std::strcmp(argv[i], "--no-irq"))
+             opt.irq_checks = false;
++        else if (!std::strcmp(argv[i], "--parts") && i + 1 < argc)
++            opt.parts = static_cast<unsigned>(std::max(1, std::atoi(argv[++i])));
+         else
+             return usage(2);
+     }
+@@ -513,6 +519,7 @@ int cmd_game(int argc, char** argv) {
+         if (rel.no_fold)
+             view_opt.fold_literals = false;
+         view_opt.overlay = rel.overlay;
++        view_opt.parts = 1;  // relocated views are small; only the main unit is split
+         rc |= translate_view(cfg, view, seeds_r, stem, out_dir, view_opt,
+                              cfg.symbols ? &syms : nullptr);
+     }
