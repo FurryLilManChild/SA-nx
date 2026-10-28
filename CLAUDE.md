@@ -59,5 +59,8 @@ Switch phase starts once the PC build plays: libnx, NVK Vulkan (switch-port-base
 
 - Tracks match SARecomp's published SHA-256s. `1ST_READ.BIN` is 6,735,296 bytes, stored plain,
   SHA-1 `7ca46c7d78f9bd869fdf5d8b6fa93da516dffded`.
-- `2_DP.BIN` (2.8 MB) is also SH-4 code, loaded at run time: it needs its own relocation or
-  overlay entry. `MAIGO.BIN` and `SG_DPLDR.BIN` (14.8 KB each) look like code too.
+- Areas, stages, bosses, the Chao garden and minigames are PRS-compressed code modules loaded to
+  0x8C900000 (37 found in `SONICAD/`). `tools/prs_extract.py` writes them decompressed to
+  `games/sonicadv/extracted/modules/`. Each is configured as an overlay `[[relocations]]` with
+  `file =`, sized to its code region only (data follows the code). ADV00 = Station Square.
+- `2_DP.BIN` is not loaded in normal play (probably Dream Passport); not configured.

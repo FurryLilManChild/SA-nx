@@ -2,6 +2,20 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: boot 2, Station Square is a PRS module
+
+- Build 3 failed instantly: Apply-Patches checked 0001 alone after 0002 had edited a line 0001
+  adds. Now the patch set is stamped and reapplied whole when it changes.
+- Boot 2 (60 guest s = 126 host s, 0.4x): reached the Station Square title card, then black.
+  The dump at 0x8C900000 began e6 2f d6 2f, not 2_DP.BIN's nop padding: the overlay check had
+  rightly refused 2_DP.BIN. Searching every file, raw and PRS-decompressed, then comparing the
+  full 512-byte dump: ADV00.PRS decompressed matches 256 of 256 halfwords (others at most 48).
+- 37 PRS files are code modules linked at 0x8C900000 (self-pointer and rts counts): ADV00-03,
+  STG00-12, the bosses, AL_MAIN, MINICART, SHOOTING, SBOARD, SUMMARY and more. Their code sits at
+  the start, data after (ADV00: dense code to about 0x13000 of 0x23871B).
+- Config: dropped 2_DP.BIN; added ADV00 (first 0x14000 bytes) as an overlay. Translates to 504
+  functions, 30,048 instructions, 0 not lowered. Other modules get added as play reaches them.
+
 ## 2026-10-28: build 2 failed on a duplicate label (patch 0003)
 
 - MSVC C2045 "L_0c9ca5ba: label redefined" in sonicadv_reloc_8c900000_part3.cpp, function
