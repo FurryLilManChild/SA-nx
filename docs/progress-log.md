@@ -2,6 +2,25 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: first PC build and boot (patch 0002)
+
+- First build: 4 min 37 s on Mark's PC, 3 jobs, Vulkan renderer and SDL3 audio on. Before it,
+  `build_pc.ps1` had picked devkitPro's MSYS2 cmake (`/c/SA-nx/C:/SA-nx`); it now uses VS's.
+- Boot 1 (60 guest s = 143 host s, 0.4x): no-save prompt, SEGA logo, intro movie black (2,419,712
+  YUV words went to the PVR, nothing shown: the YUV path is not drawn), title, Adventure, character
+  select (models visibly wrong), picked Sonic, then ran into untranslated code until the limit.
+- Interrupts: 14,903 delivered, every one to VBR+0x600 (0x8C000600) through the interpreter. The
+  startup copies two 0x34-byte stubs from 0x0C65E6E4 (EXPEVT, to +0x100 and +0x400) and
+  0x0C65E718 (INTEVT, to +0x600); each patches its own pool word, so the 0x600 copy never matched
+  the image. Added all three as no_fold relocations.
+- 2_DP.BIN: untranslated returns at 0x8C900096 and 0x8C9000A0 sit right after jsr instructions in
+  the file. Added `file = ` to `[[relocations]]` (translator + DreamAddGame, patch 0002) and
+  configured 2_DP.BIN at 0x8C900000 as an overlay, split in 8 parts: 10,455 functions, 866,859
+  instructions, 10 not lowered. boot_test now dumps 0x8C900000 at the stop to confirm.
+- Also merged the run's 5 seeds (0x0C0C5C7E was called 650 times) and 4 exact-copy relocations.
+- Still open: no sound (AICA mixer: 0 key-ons; the driver gets no commands), movie not drawn,
+  model rendering, 0x00400020 reads (unmapped) at pc 0x0C037CFA from frame 2775.
+
 ## 2026-10-28: translator fixes for a large binary (patch 0001)
 
 - `dream-translate game` on Sonic's 1ST_READ.BIN never finished (killed after 40 min). gdb samples

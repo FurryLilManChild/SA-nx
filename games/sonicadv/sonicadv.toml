@@ -19,5 +19,64 @@ entry = 0x8C010000           # the first instruction
 
 # Addresses discovery does not reach, and regions the program copies and runs elsewhere, both go
 # here. Run the launcher with --suggest-config FILE and it writes them for you.
-# [functions]
-# extra = []
+[functions]
+# Call targets the 2026-10-28 boot test reached that discovery had missed (count in brackets).
+extra = [0x0C02DE20,  # 2
+         0x0C02DE86,  # 2
+         0x0C02DF20,  # 10
+         0x0C02DF86,  # 1
+         0x0C0C5C7E]  # 650
+
+# Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
+# Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the
+# copies must read every literal at run time (no_fold). 0x100 and 0x400 are copies of the same
+# EXPEVT stub (found by the 2026-10-28 boot test); 0x600 is the INTEVT stub right after it, which
+# the run reached 14,903 times through the interpreter because its patched word hid the match.
+[[relocations]]
+source = 0x0C65E6E4
+size = 0x34
+dest = 0x8C000100
+no_fold = true
+
+[[relocations]]
+source = 0x0C65E6E4
+size = 0x34
+dest = 0x8C000400
+no_fold = true
+
+[[relocations]]
+source = 0x0C65E718
+size = 0x34
+dest = 0x8C000600
+no_fold = true
+
+# Other run-time copies the 2026-10-28 boot test found (exact byte matches).
+[[relocations]]
+source = 0x0C14EF84
+size = 0x30
+dest = 0x8C00B39C
+
+[[relocations]]
+source = 0x0C67BF50
+size = 0x44
+dest = 0x8C00D824
+
+[[relocations]]
+source = 0x0C1BF008
+size = 0x34
+dest = 0x8C00EF74
+
+[[relocations]]
+source = 0x0C67C100
+size = 0x48
+dest = 0x8C00F3F8
+
+# 2_DP.BIN: a second code file loaded to 0x8C900000 after character select (calls returned to
+# 0x8C900096 and 0x8C9000A0, just past jsr instructions in this file). Overlay, so the
+# translation runs only while RAM holds these bytes.
+[[relocations]]
+file = "extracted/fs/2_DP.BIN"
+source = 0x0
+size = 0x2B6924
+dest = 0x8C900000
+overlay = true

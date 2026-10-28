@@ -1,0 +1,135 @@
+diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
+index c8a2f79..4393f57 100644
+--- a/cmake/DreamAddGame.cmake
++++ b/cmake/DreamAddGame.cmake
+@@ -63,11 +63,19 @@ function(dream_add_game id)
+       list(APPEND _units ${_gen}/${id}_part${k}.cpp)
+     endforeach()
+   endif()
+-  string(REGEX MATCHALL "dest = 0x[0-9A-Fa-f]+" _dests "${_toml}")
++  # Each [[relocations]] block, in order. One with `file = "..."` is a code file the program loads
++  # from disc (SA-nx): it is a dependency of the translation and is split into 8 parts.
++  set(_extra_deps "")
++  string(REPLACE ";" "," _blocks "${_toml}")
++  string(REPLACE "[[relocations]]" ";" _blocks "${_blocks}")
++  list(POP_FRONT _blocks)
+   set(_seen "")
+-  foreach(d IN LISTS _dests)
+-    string(REGEX REPLACE "dest = 0x" "" d "${d}")
+-    string(TOLOWER "${d}" d)
++  foreach(_b IN LISTS _blocks)
++    string(REGEX MATCH "dest[ \t]*=[ \t]*0x([0-9A-Fa-f]+)" _dm "${_b}")
++    if(NOT CMAKE_MATCH_1)
++      continue()
++    endif()
++    string(TOLOWER "${CMAKE_MATCH_1}" d)
+     # Several [[relocations]] may share a destination (overlays: the same address holding different
+     # code at different times). Their later units are named _2, _3, ... exactly as
+     # `dream-translate game` names them, or the build would expect files it never produces.
+@@ -83,6 +91,13 @@ function(dream_add_game id)
+     endif()
+     list(APPEND _units ${_gen}/${id}_reloc_${d}.cpp)
+     list(APPEND _headers ${_gen}/${id}_reloc_${d}.h)
++    string(REGEX MATCH "file[ \t]*=[ \t]*\"([^\"]+)\"" _fm "${_b}")
++    if(CMAKE_MATCH_1)
++      list(APPEND _extra_deps ${_dir}/${CMAKE_MATCH_1})
++      foreach(k RANGE 1 7)
++        list(APPEND _units ${_gen}/${id}_reloc_${d}_part${k}.cpp)
++      endforeach()
++    endif()
+   endforeach()
+ 
+   # A symbol table only names the emitted functions, so it is optional: a title with no Ghidra
+@@ -98,7 +113,7 @@ function(dream_add_game id)
+     OUTPUT ${_units} ${_headers}
+     COMMAND dream-translate game --config ${_toml_path} --out-dir ${_gen}
+             --parts ${DREAM_TRANSLATE_PARTS} ${DREAM_TRANSLATE_EXTRA_FLAGS}
+-    DEPENDS dream-translate ${_toml_path} ${_symbols} ${_bin}
++    DEPENDS dream-translate ${_toml_path} ${_symbols} ${_bin} ${_extra_deps}
+     COMMENT "Translating ${ARG_TITLE}"
+     VERBATIM)
+ 
+diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
+index b348fe7..2c5ed17 100644
+--- a/translator/include/dream/translator/config/game_config.h
++++ b/translator/include/dream/translator/config/game_config.h
+@@ -20,6 +20,9 @@ struct Relocation {
+     bool no_fold =
+         false;  // read every literal at run time: the copy is a template the program patches
+     bool overlay = false;  // other code occupies `dest` at other times: dispatch checks the bytes
++    // SA-nx: a code file the program loads from disc at run time, instead of a copy out of the
++    // main binary. `source` is then a byte offset into this file (resolved against the config).
++    std::filesystem::path file;
+ };
+ 
+ struct GameConfig {
+diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
+index 86e46f0..295ca6f 100644
+--- a/translator/src/config/game_config.cpp
++++ b/translator/src/config/game_config.cpp
+@@ -147,6 +147,11 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+                 return false;
+             r.no_fold = rv["no_fold"].value_or(false);
+             r.overlay = rv["overlay"].value_or(false);
++            std::string file;
++            if (!get_str(rv["file"], "relocations.file", file, error, false))
++                return false;
++            if (!file.empty())
++                r.file = dir / file;
+             c.relocations.push_back(r);
+         }
+     }
+diff --git a/translator/src/main.cpp b/translator/src/main.cpp
+index 0689884..4ef6d21 100644
+--- a/translator/src/main.cpp
++++ b/translator/src/main.cpp
+@@ -495,15 +495,31 @@ int cmd_game(int argc, char** argv) {
+     // CMakeLists derives the same names from the TOML.
+     std::map<std::uint32_t, int> dest_count;
+     for (const auto& rel : cfg.relocations) {
+-        const std::uint32_t off = rel.source - img.base;
+-        if (rel.source < img.base || off + rel.size > img.bytes.size()) {
+-            std::fprintf(stderr, "relocation source 0x%08x+0x%x is outside the image\n", rel.source,
+-                         rel.size);
+-            return 2;
+-        }
+         dream::translator::Image view;
+         view.base = (rel.dest & 0x1FFFFFFFu) | (cfg.link_address & 0xE0000000u);
+-        view.bytes.assign(img.bytes.begin() + off, img.bytes.begin() + off + rel.size);
++        if (!rel.file.empty()) {
++            // A separate code file loaded at run time: `source` is an offset into it.
++            dream::translator::Image whole;
++            if (!load_image(rel.file.string(), 0, whole)) {
++                std::fprintf(stderr, "cannot read relocation file %s\n", rel.file.string().c_str());
++                return 2;
++            }
++            if (std::uint64_t{rel.source} + rel.size > whole.bytes.size()) {
++                std::fprintf(stderr, "relocation 0x%x+0x%x is outside %s\n", rel.source, rel.size,
++                             rel.file.string().c_str());
++                return 2;
++            }
++            view.bytes.assign(whole.bytes.begin() + rel.source,
++                              whole.bytes.begin() + rel.source + rel.size);
++        } else {
++            const std::uint32_t off = rel.source - img.base;
++            if (rel.source < img.base || off + rel.size > img.bytes.size()) {
++                std::fprintf(stderr, "relocation source 0x%08x+0x%x is outside the image\n",
++                             rel.source, rel.size);
++                return 2;
++            }
++            view.bytes.assign(img.bytes.begin() + off, img.bytes.begin() + off + rel.size);
++        }
+         char stem[80];
+         const int nth = ++dest_count[rel.dest];
+         if (nth == 1)
+@@ -519,7 +535,9 @@ int cmd_game(int argc, char** argv) {
+         if (rel.no_fold)
+             view_opt.fold_literals = false;
+         view_opt.overlay = rel.overlay;
+-        view_opt.parts = 1;  // relocated views are small; only the main unit is split
++        // Copies out of the main binary are small. A whole code file loaded from disc can be
++        // megabytes, so it is split like the main unit; cmake/DreamAddGame.cmake expects 8 parts.
++        view_opt.parts = rel.file.empty() ? 1 : 8;
+         rc |= translate_view(cfg, view, seeds_r, stem, out_dir, view_opt,
+                              cfg.symbols ? &syms : nullptr);
+     }
