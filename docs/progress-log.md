@@ -2,6 +2,18 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: build 2 failed on a duplicate label (patch 0003)
+
+- MSVC C2045 "L_0c9ca5ba: label redefined" in sonicadv_reloc_8c900000_part3.cpp, function
+  fn_0c9c5678. 0x0c9ca5ba is the `nop` delay slot of `bra 0xc9ca892` at 0x0c9ca5b8, and it is both
+  a branch target (a slot label) and a block start (in the resume switch), so the emitter wrote
+  the slot copy and the block under one label.
+- Fix: when the slot is already a block, skip the copy; the owning branch's not-taken path jumps
+  to pc+4 (made a block by the existing after-slot rule), so the slot runs once. Retranslated all
+  47 units: zero duplicate labels; the failing part compiles with clang. Upstream rule says every
+  emitter change gets a differential test: still owed (needs an SH-4 test program for
+  "bt/s whose slot is also a branch target").
+
 ## 2026-10-28: first PC build and boot (patch 0002)
 
 - First build: 4 min 37 s on Mark's PC, 3 jobs, Vulkan renderer and SDL3 audio on. Before it,

@@ -1,0 +1,23 @@
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index ac0dba2..97db228 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -1037,7 +1037,17 @@ private:
+                 break;
+         }
+         out << "    }\n";
+-        if (slot_labels_.count(pc + 2)) {
++        if (slot_labels_.count(pc + 2) && blocks_.count(pc + 2)) {
++            // The slot is also a block of its own (SA-nx: Sonic Adventure's 2_DP.BIN at
++            // 0x0c9ca5ba). That block already is the "enter through the slot" path, so a second
++            // copy would define its label twice. The owning branch's not-taken path continues
++            // after the pair, past that block's first instruction, which it has executed.
++            if (blocks_.count(pc + 4))
++                out << "    goto " << label(pc + 4) << ";\n";
++            else
++                note(pc, ins, "slot is a block start and nothing labels pc+4: not-taken path "
++                              "re-executes the slot");
++        } else if (slot_labels_.count(pc + 2)) {
+             // Another branch targets this slot: entering here executes the slot instruction as an
+             // ordinary instruction and falls through to pc+4. The not-taken path of the owning
+             // branch skips this copy.
