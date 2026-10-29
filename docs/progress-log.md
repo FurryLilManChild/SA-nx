@@ -2,6 +2,35 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: per-pixel translucency (patch 0018): Sonic's eyes
+
+- Captures 12 and 13 (end of Emerald Coast, character select): Sonic's irises partly or wholly
+  missing. The irises (tcw 8804d128) and eye whites (0804d118) are all in the translucent list.
+  The renderer sorted translucent strips by their nearest vertex; the PowerVR sorts per pixel
+  (ISP_FEED_CFG = 0x00800408 in every capture: bit 0, presort, clear). Two eye-white strips
+  have a corner nearer than the irises, sort after them and cover them.
+- Scored against a per-pixel reference (scratch rasteriser over the captured vertices): the
+  per-strip sort put the wrong translucent surface on top in 1.3% (capture 13) to 21% (capture
+  12) of translucent pixels; strip centroid, strip farthest and per-triangle keys were each
+  still 1% to 19% wrong somewhere. No sort key fixes it.
+- Patch 0018: translucent fragments are appended to per-pixel lists in a gather pass (depth
+  tested in the shader against the opaque pass's depth, by each polygon's own depth mode), then
+  a resolve pass sorts each list (farthest first, submission order on ties, at most 32 kept)
+  and applies the hardware's blend instructions over a copy of the opaque image. Needs
+  fragmentStoresAndAtomics (already enabled by the context); DREAM_NO_OIT=1 or a GPU without it
+  falls back to the per-strip sort. Shading moved to shaders/shade.glsl, shared with
+  geometry.frag.
+- Checked offline with the new tools/rcap (re-renders an F11 capture through the real renderer
+  on lavapipe): its render of capture 13 with the old renderer matches the screenshot Mark's PC
+  took (mean difference 0.04 per channel, no pixel off by more than 8); the refactored opaque
+  shader renders byte-identical; synchronization validation is clean after one fix (the load
+  of the colour attachment). Results: both irises in captures 12 and 13; in capture 12 the
+  lives icon is opaque (its colour is ffffffff and its texture has no alpha) where before a sea
+  strip at 60% alpha with one vertex at 1/w = 1.0 sorted last and was drawn over it, and over
+  Tails' leg; the same sea strip had been drawn over the capsule in capture 11.
+- Noted, not changed: background.cpp reads the cheap-shadow bit from 0x098 (ISP_FEED_CFG), while
+  KallistiOS lists cheap shadow at 0x074; Sonic Adventure leaves it 0 either way.
+
 ## 2026-10-29: patch 0017 confirmed: full speed in Emerald Coast
 
 - Play run on Mark's PC: "readback memory: host-cached", guest 403.0 s in host 403.3 s (0.9x

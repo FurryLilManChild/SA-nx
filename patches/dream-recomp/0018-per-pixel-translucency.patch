@@ -1,0 +1,1230 @@
+diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
+index c4852a1..8dfec0a 100644
+--- a/render/CMakeLists.txt
++++ b/render/CMakeLists.txt
+@@ -51,7 +51,12 @@ endif()
+ set(_spv_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+ file(MAKE_DIRECTORY ${_spv_dir})
+ set(_spv_headers)
+-foreach(_shader triangle.vert triangle.frag geometry.vert geometry.frag present.vert present.frag)
++# SA-nx: oit_* are the per-pixel translucency passes; shade.glsl and oit_common.glsl are included
++# by them and by geometry.frag (glslc resolves #include relative to the including file).
++set(_shader_includes ${CMAKE_CURRENT_SOURCE_DIR}/shaders/shade.glsl
++                     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/oit_common.glsl)
++foreach(_shader triangle.vert triangle.frag geometry.vert geometry.frag present.vert present.frag
++                oit_gather.frag oit_resolve.vert oit_resolve.frag)
+   string(REPLACE "." "_" _sym ${_shader})
+   set(_out ${_spv_dir}/${_sym}.h)
+   # glslc -mfmt=c emits a bare initialiser list; wrap it in a declaration so the header can just
+@@ -62,7 +67,7 @@ foreach(_shader triangle.vert triangle.frag geometry.vert geometry.frag present.
+             -mfmt=c -o ${_out}.inc ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}
+     COMMAND ${CMAKE_COMMAND} -DIN=${_out}.inc -DOUT=${_out} -DSYM=${_sym}
+             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/wrap_spirv.cmake
+-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}
++    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader} ${_shader_includes}
+             ${CMAKE_CURRENT_SOURCE_DIR}/cmake/wrap_spirv.cmake
+     COMMENT "glslc ${_shader}"
+     VERBATIM)
+diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
+index c21ee2f..65db176 100644
+--- a/render/include/dream/render/vk/offscreen.h
++++ b/render/include/dream/render/vk/offscreen.h
+@@ -49,6 +49,10 @@ public:
+     // The last rendered frame as RGBA8888, width() * height() pixels, row 0 at the top. Null
+     // before the first successful render().
+     const std::uint32_t* pixels() const noexcept;
++    // SA-nx: whether translucent surfaces are sorted per pixel, as the hardware does (needs
++    // fragmentStoresAndAtomics; DREAM_NO_OIT=1 turns it off to compare against the per-strip
++    // sort). False until the first render() has set it up.
++    bool per_pixel_translucency() const noexcept { return oit_bound_ != nullptr; }
+     // SA-nx: whether the readback buffer got host-cached memory (fast CPU reads).
+     bool readback_cached() const noexcept { return readback_.cached(); }
+ 
+@@ -66,6 +70,20 @@ private:
+     VkFence fence_ = VK_NULL_HANDLE;
+     HostBuffer readback_;
+     bool have_pixels_ = false;
++    // Per-pixel translucency (SA-nx).
++    bool create_oit();
++    void destroy_oit();
++    bool bind_oit(Renderer& renderer);
++    bool oit_available_ = false;
++    const Renderer* oit_bound_ = nullptr;
++    std::uint32_t oit_capacity_ = 0;
++    DeviceBuffer oit_counter_, oit_heads_, oit_nodes_;
++    AttachmentImage opaque_copy_;
++    VkSampler oit_sampler_ = VK_NULL_HANDLE;
++    VkRenderPass oit_pass_ = VK_NULL_HANDLE;
++    VkFramebuffer oit_framebuffer_ = VK_NULL_HANDLE;
++    VkDescriptorPool oit_pool_ = VK_NULL_HANDLE;
++    VkDescriptorSet oit_set_ = VK_NULL_HANDLE;
+     std::string error_;
+ };
+ 
+diff --git a/render/include/dream/render/vk/renderer.h b/render/include/dream/render/vk/renderer.h
+index 0c50b14..fdf8825 100644
+--- a/render/include/dream/render/vk/renderer.h
++++ b/render/include/dream/render/vk/renderer.h
+@@ -46,8 +46,27 @@ public:
+     // pass and set the viewport and scissor.
+     // `upload` is a command buffer outside a render pass, where textures are uploaded; it may be
+     // the same buffer as `cmd` provided draw() is called before the render pass begins.
++    //
++    // `lists` (SA-nx) splits the frame for per-pixel translucency: Opaque draws the opaque and
++    // punch-through lists only, TranslucentGather records the translucent list into the
++    // per-pixel fragment lists (needs prepare_oit() and set_oit()), and All draws everything with
++    // the translucent list sorted per strip, as before.
++    enum class Lists { All, Opaque, TranslucentGather };
+     void draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry& geometry,
+-              VkExtent2D target);
++              VkExtent2D target, Lists lists = Lists::All);
++    // Per-pixel translucency (SA-nx). The set layout the caller allocates its descriptor set
++    // from: binding 0 counter, 1 list heads, 2 nodes (storage buffers), 3 opaque depth and
++    // 4 opaque colour (combined image samplers).
++    VkDescriptorSetLayout oit_set_layout() const noexcept { return oit_set_layout_; }
++    // Builds the gather (subpass 0) and resolve (subpass 1) pipelines against `pass`.
++    bool prepare_oit(VkRenderPass pass);
++    void set_oit(VkDescriptorSet set, std::uint32_t width, std::uint32_t capacity) noexcept {
++        oit_set_ = set;
++        oit_width_ = width;
++        oit_capacity_ = capacity;
++    }
++    // Records the resolve: one full-screen triangle in subpass 1 of the pass prepare_oit() saw.
++    void draw_resolve(VkCommandBuffer cmd);
+     // Decodes and uploads every texture the frame needs. Call outside the render pass.
+     void prepare(VkCommandBuffer upload, const Frame& frame);
+     // Bring-up aid: draw every list with blending off, to see the geometry a frame contains
+@@ -80,10 +99,33 @@ private:
+     };
+ 
+     VkPipeline pipeline_for(const PipelineKey& key);
++    // Everything a pipeline here can differ in.
++    struct PipelineDesc {
++        VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
++        bool vertex_input = true;
++        VkCullModeFlags cull = VK_CULL_MODE_NONE;
++        bool depth_test = true, depth_write = false;
++        VkCompareOp depth_op = VK_COMPARE_OP_ALWAYS;
++        bool colour_write = true, blend = false;
++        VkBlendFactor src = VK_BLEND_FACTOR_ONE, dst = VK_BLEND_FACTOR_ZERO;
++        VkRenderPass pass = VK_NULL_HANDLE;
++        std::uint32_t subpass = 0;
++    };
++    VkPipeline build_pipeline(const PipelineDesc& d);
++    VkPipeline gather_pipeline(std::uint32_t cull_mode);
+ 
+     Context* ctx_ = nullptr;
+     VkRenderPass render_pass_ = VK_NULL_HANDLE;
+     VkShaderModule vs_ = VK_NULL_HANDLE, fs_ = VK_NULL_HANDLE;
++    // Per-pixel translucency (SA-nx).
++    VkShaderModule gather_fs_ = VK_NULL_HANDLE, resolve_vs_ = VK_NULL_HANDLE,
++                   resolve_fs_ = VK_NULL_HANDLE;
++    VkDescriptorSetLayout oit_set_layout_ = VK_NULL_HANDLE;
++    VkRenderPass oit_pass_ = VK_NULL_HANDLE;
++    std::unordered_map<std::uint32_t, VkPipeline> gather_pipelines_;
++    VkPipeline resolve_pipeline_ = VK_NULL_HANDLE;
++    VkDescriptorSet oit_set_ = VK_NULL_HANDLE;
++    std::uint32_t oit_width_ = 0, oit_capacity_ = 0;
+     VkPipelineLayout layout_ = VK_NULL_HANDLE;
+     std::unordered_map<PipelineKey, VkPipeline, KeyHash> pipelines_;
+     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+diff --git a/render/include/dream/render/vk/resources.h b/render/include/dream/render/vk/resources.h
+index 04d866b..7d4a9a1 100644
+--- a/render/include/dream/render/vk/resources.h
++++ b/render/include/dream/render/vk/resources.h
+@@ -17,6 +17,26 @@ class Context;
+ std::uint32_t find_memory_type(VkPhysicalDevice physical, std::uint32_t type_bits,
+                                VkMemoryPropertyFlags want);
+ 
++// A buffer only the GPU touches (SA-nx: the per-pixel translucency lists). Device-local, so the
++// fragment shader's atomics do not cross the bus.
++class DeviceBuffer {
++public:
++    DeviceBuffer() = default;
++    ~DeviceBuffer() { destroy(); }
++    DeviceBuffer(const DeviceBuffer&) = delete;
++    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
++    bool create(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags usage);
++    void destroy();
++    VkBuffer handle() const noexcept { return buffer_; }
++    VkDeviceSize size() const noexcept { return size_; }
++
++private:
++    VkDevice device_ = VK_NULL_HANDLE;
++    VkBuffer buffer_ = VK_NULL_HANDLE;
++    VkDeviceMemory memory_ = VK_NULL_HANDLE;
++    VkDeviceSize size_ = 0;
++};
++
+ // A host-visible buffer that is written every frame and read by the GPU.
+ class HostBuffer {
+ public:
+diff --git a/render/shaders/geometry.frag b/render/shaders/geometry.frag
+index a0a66b9..4e43480 100644
+--- a/render/shaders/geometry.frag
++++ b/render/shaders/geometry.frag
+@@ -9,6 +9,8 @@
+ // multiplies it, and the two "alpha" variants also use the vertex colour's alpha.
+ #version 450
+ 
++#extension GL_GOOGLE_include_directive : require
++
+ layout(push_constant) uniform Push {
+     vec2 scale;
+     vec2 offset;
+@@ -26,35 +28,10 @@ layout(location = 2) in vec3 v_uv;
+ 
+ layout(location = 0) out vec4 o_colour;
+ 
+-void main() {
+-    const float inv_w = v_uv.z;
+-    vec4 base = v_base / inv_w;
+-    vec4 offset_colour = v_offset / inv_w;
+-    // "Use alpha" clear means the surface is opaque however its colours are encoded: the vertex
+-    // alpha is data for something else and must not reach the blender. Crazy Taxi's title logo is
+-    // in the translucent list with this clear on every polygon, and honouring the alpha instead
+-    // blends the whole logo into the background.
+-    if ((push.mode & 64) == 0)
+-        base.a = 1.0;
+-    vec4 colour = base;
++#include "shade.glsl"
+ 
+-    if ((push.mode & 4) != 0) {
+-        vec4 texel = texture(tex, v_uv.xy / inv_w);
+-        if ((push.mode & 8) != 0)
+-            texel.a = 1.0;
+-        const int shading = push.mode & 3;
+-        if (shading == 0) {  // decal
+-            colour = vec4(texel.rgb, texel.a);
+-        } else if (shading == 1) {  // modulate
+-            colour = vec4(texel.rgb * base.rgb, texel.a);
+-        } else if (shading == 2) {  // decal, blended by the texture's alpha
+-            colour = vec4(mix(base.rgb, texel.rgb, texel.a), base.a);
+-        } else {  // modulate, alphas multiplied
+-            colour = vec4(texel.rgb * base.rgb, texel.a * base.a);
+-        }
+-    }
+-    if ((push.mode & 16) != 0)
+-        colour.rgb += offset_colour.rgb;
++void main() {
++    vec4 colour = shade_fragment();
+ 
+     // Punch-through polygons are opaque geometry with holes in it: the hardware keeps or discards
+     // a pixel outright rather than blending, so the list can be drawn with depth writes on and in
+@@ -63,7 +40,5 @@ void main() {
+         discard;
+ 
+     o_colour = clamp(colour, 0.0, 1.0);
+-
+-    const float w = 100000.0 * inv_w;
+-    gl_FragDepth = log2(1.0 + max(w, -0.999999)) / 34.0;
++    gl_FragDepth = pvr_depth(v_uv.z);
+ }
+diff --git a/render/shaders/oit_common.glsl b/render/shaders/oit_common.glsl
+new file mode 100644
+index 0000000..cc295fb
+--- /dev/null
++++ b/render/shaders/oit_common.glsl
+@@ -0,0 +1,40 @@
++// Per-pixel translucency (SA-nx). Declarations shared by the gather and resolve passes.
++//
++// The PowerVR sorts translucent surfaces per pixel ("auto sort", ISP_FEED_CFG bit 0 clear), which
++// a per-strip sort cannot reproduce: a small decal (Sonic's iris) sits on a larger strip (the eye
++// white) whose nearest corner is nearer than the decal, so the strip sorts after it and covers
++// it. Instead every translucent fragment that passes its depth test is appended to a list for its
++// pixel, and the resolve pass sorts each list by depth and blends it, back to front.
++
++layout(push_constant) uniform Push {
++    vec2 scale;
++    vec2 offset;
++    int mode;  // as geometry.frag; gather also: bits 7-9 depth mode, 10-12 src, 13-15 dst instr
++    float alpha_ref;
++    uint width;     // pixels per row of the list heads
++    uint capacity;  // fragments the node buffer holds
++    uint poly;      // submission order of the polygon, to break depth ties
++}
++push;
++
++struct Node {
++    uint colour;  // packUnorm4x8
++    float depth;  // pvr_depth(): larger is nearer
++    uint info;    // bits 0-2 src instr, 3-5 dst instr, 6-31 submission order
++    uint next;    // index of the next node for this pixel, 0xFFFFFFFF at the end
++};
++
++layout(set = 1, binding = 0) buffer Counter {
++    uint count;
++}
++counter;
++layout(set = 1, binding = 1) buffer Heads {
++    uint heads[];
++};
++layout(set = 1, binding = 2) buffer Nodes {
++    Node nodes[];
++};
++layout(set = 1, binding = 3) uniform sampler2D opaque_depth;
++layout(set = 1, binding = 4) uniform sampler2D opaque_colour;
++
++const uint kEnd = 0xFFFFFFFFu;
+diff --git a/render/shaders/oit_gather.frag b/render/shaders/oit_gather.frag
+new file mode 100644
+index 0000000..69d6924
+--- /dev/null
++++ b/render/shaders/oit_gather.frag
+@@ -0,0 +1,46 @@
++// Translucent gather pass (SA-nx): shade, test against the opaque depth, append to the pixel's
++// list. Nothing is written to the colour attachment; oit_resolve.frag does the blending.
++#version 450
++#extension GL_GOOGLE_include_directive : require
++
++layout(set = 0, binding = 0) uniform sampler2D tex;
++
++layout(location = 0) in vec4 v_base;
++layout(location = 1) in vec4 v_offset;
++layout(location = 2) in vec3 v_uv;
++
++#include "oit_common.glsl"
++#include "shade.glsl"
++
++// The hardware's eight depth comparisons, in its own order, new value against stored value. The
++// fixed-function test is not used here: a fragment that fails it would still have appended
++// itself, since the shader writes gl_FragDepth and so runs before the late depth test.
++bool depth_passes(int m, float d, float stored) {
++    switch (m) {
++        case 0: return false;
++        case 1: return d < stored;
++        case 2: return d == stored;
++        case 3: return d <= stored;
++        case 4: return d > stored;
++        case 5: return d != stored;
++        case 6: return d >= stored;
++        default: return true;
++    }
++}
++
++void main() {
++    const vec4 colour = clamp(shade_fragment(), 0.0, 1.0);
++    const float d = pvr_depth(v_uv.z);
++    const ivec2 p = ivec2(gl_FragCoord.xy);
++    if (!depth_passes((push.mode >> 7) & 7, d, texelFetch(opaque_depth, p, 0).r))
++        discard;
++    const uint i = atomicAdd(counter.count, 1u);
++    if (i >= push.capacity)
++        discard;  // out of room: this fragment is lost, the rest of the frame is not
++    const uint slot = uint(p.y) * push.width + uint(p.x);
++    const uint prev = atomicExchange(heads[slot], i);
++    nodes[i].colour = packUnorm4x8(colour);
++    nodes[i].depth = d;
++    nodes[i].info = (uint(push.mode >> 10) & 63u) | (push.poly << 6);
++    nodes[i].next = prev;
++}
+diff --git a/render/shaders/oit_resolve.frag b/render/shaders/oit_resolve.frag
+new file mode 100644
+index 0000000..f3bf4ab
+--- /dev/null
++++ b/render/shaders/oit_resolve.frag
+@@ -0,0 +1,90 @@
++// Translucent resolve pass (SA-nx): sort each pixel's fragments by depth and blend them over the
++// opaque image, back to front, with the hardware's blend instructions.
++#version 450
++#extension GL_GOOGLE_include_directive : require
++
++#include "oit_common.glsl"
++
++layout(location = 0) out vec4 o_colour;
++
++// Fragments kept per pixel. Past this many the farthest are dropped, which costs the least.
++const int kMax = 32;
++
++// The hardware's eight blend factors. 2 and 3 are "the other colour": the destination for the
++// source factor, the source for the destination factor.
++vec4 factor(uint code, vec4 src, vec4 dst, bool is_src) {
++    const vec4 other = is_src ? dst : src;
++    switch (code) {
++        case 0u: return vec4(0.0);
++        case 1u: return vec4(1.0);
++        case 2u: return other;
++        case 3u: return vec4(1.0) - other;
++        case 4u: return vec4(src.a);
++        case 5u: return vec4(1.0 - src.a);
++        case 6u: return vec4(dst.a);
++        default: return vec4(1.0 - dst.a);
++    }
++}
++
++// Drawn first is the farther (smaller 1/w); at equal depth the earlier submitted.
++bool before(float da, uint oa, float db, uint ob) {
++    return da < db || (da == db && oa < ob);
++}
++
++void main() {
++    const ivec2 p = ivec2(gl_FragCoord.xy);
++    vec4 dst = texelFetch(opaque_colour, p, 0);
++
++    uint idx[kMax];
++    float dep[kMax];
++    uint ord[kMax];
++    int n = 0;
++    uint i = heads[uint(p.y) * push.width + uint(p.x)];
++    // Bounded, so a damaged list cannot hang the GPU.
++    for (int guard = 0; i != kEnd && guard < 4096; ++guard) {
++        const float d = nodes[i].depth;
++        const uint o = nodes[i].info >> 6;
++        if (n < kMax) {
++            idx[n] = i;
++            dep[n] = d;
++            ord[n] = o;
++            ++n;
++        } else {
++            // Full: replace the farthest kept fragment if this one is nearer.
++            int far = 0;
++            for (int k = 1; k < kMax; ++k)
++                if (before(dep[k], ord[k], dep[far], ord[far]))
++                    far = k;
++            if (before(dep[far], ord[far], d, o)) {
++                idx[far] = i;
++                dep[far] = d;
++                ord[far] = o;
++            }
++        }
++        i = nodes[i].next;
++    }
++    // Insertion sort, farthest first.
++    for (int a = 1; a < n; ++a) {
++        const uint ti = idx[a];
++        const float td = dep[a];
++        const uint to = ord[a];
++        int b = a - 1;
++        while (b >= 0 && before(td, to, dep[b], ord[b])) {
++            idx[b + 1] = idx[b];
++            dep[b + 1] = dep[b];
++            ord[b + 1] = ord[b];
++            --b;
++        }
++        idx[b + 1] = ti;
++        dep[b + 1] = td;
++        ord[b + 1] = to;
++    }
++    for (int k = 0; k < n; ++k) {
++        const vec4 src = unpackUnorm4x8(nodes[idx[k]].colour);
++        const uint info = nodes[idx[k]].info;
++        dst = clamp(src * factor(info & 7u, src, dst, true) +
++                        dst * factor((info >> 3) & 7u, src, dst, false),
++                    0.0, 1.0);
++    }
++    o_colour = dst;
++}
+diff --git a/render/shaders/oit_resolve.vert b/render/shaders/oit_resolve.vert
+new file mode 100644
+index 0000000..cfb192e
+--- /dev/null
++++ b/render/shaders/oit_resolve.vert
+@@ -0,0 +1,7 @@
++// Full-screen triangle for the translucent resolve pass (SA-nx).
++#version 450
++
++void main() {
++    const vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
++    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
++}
+diff --git a/render/shaders/shade.glsl b/render/shaders/shade.glsl
+new file mode 100644
+index 0000000..1fab091
+--- /dev/null
++++ b/render/shaders/shade.glsl
+@@ -0,0 +1,45 @@
++// Shading shared by the opaque pass (geometry.frag) and the translucent gather pass
++// (oit_gather.frag). The includer declares `push`, `tex` and the three inputs first.
++
++// The hardware's depth is 1/w; this spreads it over the depth buffer's precision the way the
++// PowerVR does. Both passes must compute it identically: the gather pass compares its own value
++// with what the opaque pass stored.
++float pvr_depth(float inv_w) {
++    const float w = 100000.0 * inv_w;
++    return log2(1.0 + max(w, -0.999999)) / 34.0;
++}
++
++// The polygon's colour before any blending: vertex colour, texture by the TSP shading
++// instruction, then the offset colour.
++vec4 shade_fragment() {
++    const float inv_w = v_uv.z;
++    vec4 base = v_base / inv_w;
++    vec4 offset_colour = v_offset / inv_w;
++    // "Use alpha" clear means the surface is opaque however its colours are encoded: the vertex
++    // alpha is data for something else and must not reach the blender. Crazy Taxi's title logo is
++    // in the translucent list with this clear on every polygon, and honouring the alpha instead
++    // blends the whole logo into the background.
++    if ((push.mode & 64) == 0)
++        base.a = 1.0;
++    vec4 colour = base;
++
++    if ((push.mode & 4) != 0) {
++        vec4 texel = texture(tex, v_uv.xy / inv_w);
++        if ((push.mode & 8) != 0)
++            texel.a = 1.0;
++        const int shading = push.mode & 3;
++        if (shading == 0) {  // decal
++            colour = vec4(texel.rgb, texel.a);
++        } else if (shading == 1) {  // modulate
++            colour = vec4(texel.rgb * base.rgb, texel.a);
++        } else if (shading == 2) {  // decal, blended by the texture's alpha
++            colour = vec4(mix(base.rgb, texel.rgb, texel.a), base.a);
++        } else {  // modulate, alphas multiplied
++            colour = vec4(texel.rgb * base.rgb, texel.a * base.a);
++        }
++    }
++    if ((push.mode & 16) != 0)
++        colour.rgb += offset_colour.rgb;
++
++    return colour;
++}
+diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
+index 6333908..9c24009 100644
+--- a/render/src/vk/offscreen.cpp
++++ b/render/src/vk/offscreen.cpp
+@@ -1,6 +1,8 @@
+ // See offscreen.h.
+ #include "dream/render/vk/offscreen.h"
+ 
++#include <cstdlib>
++
+ namespace dream::render::vk {
+ 
+ Offscreen::~Offscreen() {
+@@ -25,7 +27,9 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+         return false;
+     }
+     const VkFormat depth_format = pick_depth_format(ctx.physical_device());
+-    if (!depth_.create(ctx, depth_format, extent_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
++    // SAMPLED (SA-nx): the translucency gather pass tests against it in the shader.
++    if (!depth_.create(ctx, depth_format, extent_,
++                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                        VK_IMAGE_ASPECT_DEPTH_BIT)) {
+         error_ = "could not create the offscreen depth attachment";
+         return false;
+@@ -43,11 +47,11 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+     attachments[1].format = depth_format;
+     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+     attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // read by the translucency pass
+     attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+     attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+     attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+-    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
++    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+ 
+     const VkAttachmentReference colour_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+     const VkAttachmentReference depth_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+@@ -65,6 +69,16 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+     after.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+     after.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+     after.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++    // And the translucency gather pass samples the depth it wrote (SA-nx).
++    VkSubpassDependency depth_after{};
++    depth_after.srcSubpass = 0;
++    depth_after.dstSubpass = VK_SUBPASS_EXTERNAL;
++    depth_after.srcStageMask =
++        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
++    depth_after.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
++    depth_after.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++    depth_after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++    const VkSubpassDependency deps[2] = {after, depth_after};
+ 
+     VkRenderPassCreateInfo rpci{};
+     rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+@@ -72,8 +86,8 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+     rpci.pAttachments = attachments;
+     rpci.subpassCount = 1;
+     rpci.pSubpasses = &subpass;
+-    rpci.dependencyCount = 1;
+-    rpci.pDependencies = &after;
++    rpci.dependencyCount = 2;
++    rpci.pDependencies = deps;
+     if (vkCreateRenderPass(ctx.device(), &rpci, nullptr, &render_pass_) != VK_SUCCESS) {
+         error_ = "vkCreateRenderPass failed for the offscreen target";
+         return false;
+@@ -121,10 +135,193 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+         error_ = "could not allocate the readback buffer";
+         return false;
+     }
++    const char* no_oit = std::getenv("DREAM_NO_OIT");
++    oit_available_ = ctx.caps().fragment_stores_and_atomics && !(no_oit && *no_oit == '1') &&
++                     create_oit();
++    return true;
++}
++
++// Per-pixel translucency (SA-nx), see oit_common.glsl. The colour attachment is drawn in two
++// render passes: the main one (opaque and punch-through) and this one, whose subpass 0 gathers
++// the translucent fragments and subpass 1 resolves them over a copy of the opaque image.
++bool Offscreen::create_oit() {
++    Context& ctx = *ctx_;
++    const VkDeviceSize pixels = static_cast<VkDeviceSize>(extent_.width) * extent_.height;
++    // Translucent depth complexity in Sonic Adventure stays well under four layers on average
++    // over the whole screen; six per pixel leaves room, and an overflow drops fragments rather
++    // than failing the frame.
++    oit_capacity_ = static_cast<std::uint32_t>(pixels * 6);
++    constexpr VkBufferUsageFlags usage =
++        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
++        VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++    if (!oit_counter_.create(ctx, 16, usage) || !oit_heads_.create(ctx, pixels * 4, usage) ||
++        !oit_nodes_.create(ctx, static_cast<VkDeviceSize>(oit_capacity_) * 16, usage))
++        return false;
++    if (!opaque_copy_.create(ctx, VK_FORMAT_R8G8B8A8_UNORM, extent_,
++                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++                             VK_IMAGE_ASPECT_COLOR_BIT))
++        return false;
++    VkSamplerCreateInfo sci{};
++    sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
++    sci.magFilter = VK_FILTER_NEAREST;
++    sci.minFilter = VK_FILTER_NEAREST;
++    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
++    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++    if (vkCreateSampler(ctx.device(), &sci, nullptr, &oit_sampler_) != VK_SUCCESS)
++        return false;
++
++    VkAttachmentDescription colour{};
++    colour.format = VK_FORMAT_R8G8B8A8_UNORM;
++    colour.samples = VK_SAMPLE_COUNT_1_BIT;
++    colour.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++    colour.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++    colour.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++    colour.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++    colour.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;  // as the main pass left it
++    colour.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;    // for the readback copy
++    const VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
++    VkSubpassDescription subpasses[2]{};
++    for (auto& sp : subpasses) {
++        sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++        sp.colorAttachmentCount = 1;
++        sp.pColorAttachments = &ref;
++    }
++    VkSubpassDependency deps[3]{};
++    // In: the copy of the colour image into opaque_copy_ has read it before it is drawn again.
++    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
++    deps[0].dstSubpass = 0;
++    deps[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
++    deps[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    deps[0].dstStageMask =
++        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    deps[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
++                            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |  // loadOp LOAD
++                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    // Gather to resolve: every list is complete before any pixel is resolved.
++    deps[1].srcSubpass = 0;
++    deps[1].dstSubpass = 1;
++    deps[1].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++    deps[1].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
++    deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++    // Out: the readback copy.
++    deps[2].srcSubpass = 1;
++    deps[2].dstSubpass = VK_SUBPASS_EXTERNAL;
++    deps[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    deps[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    deps[2].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
++    deps[2].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++    VkRenderPassCreateInfo rpci{};
++    rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
++    rpci.attachmentCount = 1;
++    rpci.pAttachments = &colour;
++    rpci.subpassCount = 2;
++    rpci.pSubpasses = subpasses;
++    rpci.dependencyCount = 3;
++    rpci.pDependencies = deps;
++    if (vkCreateRenderPass(ctx.device(), &rpci, nullptr, &oit_pass_) != VK_SUCCESS)
++        return false;
++    const VkImageView view = colour_.view();
++    VkFramebufferCreateInfo fbci{};
++    fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
++    fbci.renderPass = oit_pass_;
++    fbci.attachmentCount = 1;
++    fbci.pAttachments = &view;
++    fbci.width = extent_.width;
++    fbci.height = extent_.height;
++    fbci.layers = 1;
++    if (vkCreateFramebuffer(ctx.device(), &fbci, nullptr, &oit_framebuffer_) != VK_SUCCESS)
++        return false;
++
++    VkDescriptorPoolSize sizes[2]{};
++    sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++    sizes[0].descriptorCount = 3;
++    sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++    sizes[1].descriptorCount = 2;
++    VkDescriptorPoolCreateInfo dpci{};
++    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
++    dpci.maxSets = 1;
++    dpci.poolSizeCount = 2;
++    dpci.pPoolSizes = sizes;
++    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
++    return vkCreateDescriptorPool(ctx.device(), &dpci, nullptr, &oit_pool_) == VK_SUCCESS;
++}
++
++// The descriptor set needs the renderer's set layout, so it is made on first use with that
++// renderer, and the renderer gets the pipelines for this pass.
++bool Offscreen::bind_oit(Renderer& renderer) {
++    if (oit_bound_ == &renderer)
++        return true;
++    VkDevice dev = ctx_->device();
++    if (oit_set_) {
++        vkFreeDescriptorSets(dev, oit_pool_, 1, &oit_set_);
++        oit_set_ = VK_NULL_HANDLE;
++    }
++    const VkDescriptorSetLayout layout = renderer.oit_set_layout();
++    VkDescriptorSetAllocateInfo dsai{};
++    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
++    dsai.descriptorPool = oit_pool_;
++    dsai.descriptorSetCount = 1;
++    dsai.pSetLayouts = &layout;
++    if (!layout || vkAllocateDescriptorSets(dev, &dsai, &oit_set_) != VK_SUCCESS)
++        return false;
++    const VkDescriptorBufferInfo bufs[3] = {{oit_counter_.handle(), 0, VK_WHOLE_SIZE},
++                                            {oit_heads_.handle(), 0, VK_WHOLE_SIZE},
++                                            {oit_nodes_.handle(), 0, VK_WHOLE_SIZE}};
++    const VkDescriptorImageInfo imgs[2] = {
++        {oit_sampler_, depth_.view(), VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
++        {oit_sampler_, opaque_copy_.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
++    VkWriteDescriptorSet w[5]{};
++    for (std::uint32_t b = 0; b < 5; ++b) {
++        w[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++        w[b].dstSet = oit_set_;
++        w[b].dstBinding = b;
++        w[b].descriptorCount = 1;
++        if (b < 3) {
++            w[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++            w[b].pBufferInfo = &bufs[b];
++        } else {
++            w[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++            w[b].pImageInfo = &imgs[b - 3];
++        }
++    }
++    vkUpdateDescriptorSets(dev, 5, w, 0, nullptr);
++    if (!renderer.prepare_oit(oit_pass_))
++        return false;
++    renderer.set_oit(oit_set_, extent_.width, oit_capacity_);
++    oit_bound_ = &renderer;
+     return true;
+ }
+ 
++void Offscreen::destroy_oit() {
++    if (ctx_ && ctx_->device()) {
++        VkDevice dev = ctx_->device();
++        if (oit_pool_)
++            vkDestroyDescriptorPool(dev, oit_pool_, nullptr);
++        if (oit_framebuffer_)
++            vkDestroyFramebuffer(dev, oit_framebuffer_, nullptr);
++        if (oit_pass_)
++            vkDestroyRenderPass(dev, oit_pass_, nullptr);
++        if (oit_sampler_)
++            vkDestroySampler(dev, oit_sampler_, nullptr);
++    }
++    oit_pool_ = VK_NULL_HANDLE;
++    oit_set_ = VK_NULL_HANDLE;
++    oit_framebuffer_ = VK_NULL_HANDLE;
++    oit_pass_ = VK_NULL_HANDLE;
++    oit_sampler_ = VK_NULL_HANDLE;
++    oit_counter_.destroy();
++    oit_heads_.destroy();
++    oit_nodes_.destroy();
++    opaque_copy_.destroy();
++    oit_bound_ = nullptr;
++    oit_available_ = false;
++}
++
+ void Offscreen::destroy() {
++    if (ctx_ && ctx_->device())
++        vkDeviceWaitIdle(ctx_->device());
++    destroy_oit();
+     if (ctx_ && ctx_->device()) {
+         VkDevice dev = ctx_->device();
+         if (fence_)
+@@ -161,6 +358,19 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     }
+ 
+     renderer.prepare(cmd_, frame);  // texture uploads happen outside the render pass
++    const bool oit = oit_available_ && bind_oit(renderer);
++    if (oit) {
++        // Empty lists: no fragments, every head at the end marker.
++        vkCmdFillBuffer(cmd_, oit_counter_.handle(), 0, VK_WHOLE_SIZE, 0);
++        vkCmdFillBuffer(cmd_, oit_heads_.handle(), 0, VK_WHOLE_SIZE, 0xFFFFFFFFu);
++        VkMemoryBarrier mb{};
++        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++        vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0,
++                             nullptr);
++    }
+ 
+     VkClearValue clears[2]{};
+     clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+@@ -179,9 +389,54 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     const VkRect2D scissor{{0, 0}, extent_};
+     vkCmdSetViewport(cmd_, 0, 1, &viewport);
+     vkCmdSetScissor(cmd_, 0, 1, &scissor);
+-    renderer.draw(cmd_, frame, geometry, extent_);
++    renderer.draw(cmd_, frame, geometry, extent_,
++                  oit ? Renderer::Lists::Opaque : Renderer::Lists::All);
+     vkCmdEndRenderPass(cmd_);
+ 
++    if (oit) {
++        // The resolve reads the opaque image while writing the colour attachment, so it reads a
++        // copy. The colour image is a transfer source after the main pass.
++        VkImageMemoryBarrier to_dst{};
++        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++        to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++        to_dst.image = opaque_copy_.image();
++        to_dst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++        to_dst.srcAccessMask = 0;
++        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++        vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
++                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_dst);
++        VkImageCopy ic{};
++        ic.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++        ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++        ic.extent = {extent_.width, extent_.height, 1};
++        vkCmdCopyImage(cmd_, colour_.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                       opaque_copy_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
++        VkImageMemoryBarrier to_read = to_dst;
++        to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++        to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++        to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++        to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++        vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
++                             &to_read);
++
++        VkRenderPassBeginInfo obi{};
++        obi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
++        obi.renderPass = oit_pass_;
++        obi.framebuffer = oit_framebuffer_;
++        obi.renderArea.extent = extent_;
++        vkCmdBeginRenderPass(cmd_, &obi, VK_SUBPASS_CONTENTS_INLINE);
++        vkCmdSetViewport(cmd_, 0, 1, &viewport);
++        vkCmdSetScissor(cmd_, 0, 1, &scissor);
++        renderer.draw(cmd_, frame, geometry, extent_, Renderer::Lists::TranslucentGather);
++        vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
++        renderer.draw_resolve(cmd_);
++        vkCmdEndRenderPass(cmd_);
++    }
++
+     // The render pass left the colour image as a transfer source, so the copy needs no barrier of
+     // its own; the subpass dependency above orders it.
+     VkBufferImageCopy copy{};
+diff --git a/render/src/vk/renderer.cpp b/render/src/vk/renderer.cpp
+index 39ee904..f0298ec 100644
+--- a/render/src/vk/renderer.cpp
++++ b/render/src/vk/renderer.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include "geometry_frag.h"
+ #include "geometry_vert.h"
++#include "oit_gather_frag.h"
++#include "oit_resolve_frag.h"
++#include "oit_resolve_vert.h"
+ 
+ namespace dream::render::vk {
+ 
+@@ -89,6 +92,8 @@ struct PushConstants {
+     float offset[2];
+     std::int32_t mode;
+     float alpha_ref;
++    // Per-pixel translucency (SA-nx); ignored by geometry.frag.
++    std::uint32_t oit_width = 0, oit_capacity = 0, poly = 0;
+ };
+ 
+ // What identifies a texture within one frame: the control word, the TSP size bits and the TSP
+@@ -160,7 +165,10 @@ bool Renderer::create(Context& ctx, VkRenderPass render_pass) {
+     render_pass_ = render_pass;
+     vs_ = make_module(ctx.device(), geometry_vert, sizeof geometry_vert);
+     fs_ = make_module(ctx.device(), geometry_frag, sizeof geometry_frag);
+-    if (!vs_ || !fs_) {
++    gather_fs_ = make_module(ctx.device(), oit_gather_frag, sizeof oit_gather_frag);
++    resolve_vs_ = make_module(ctx.device(), oit_resolve_vert, sizeof oit_resolve_vert);
++    resolve_fs_ = make_module(ctx.device(), oit_resolve_frag, sizeof oit_resolve_frag);
++    if (!vs_ || !fs_ || !gather_fs_ || !resolve_vs_ || !resolve_fs_) {
+         error_ = "failed to create the geometry shader modules";
+         return false;
+     }
+@@ -184,13 +192,34 @@ bool Renderer::create(Context& ctx, VkRenderPass render_pass) {
+         return false;
+     }
+ 
++    // Set 1: the per-pixel translucency buffers and the opaque pass's depth and colour (SA-nx).
++    // Created whether or not the caller uses it, so there is one pipeline layout for everything.
++    VkDescriptorSetLayoutBinding oit[5]{};
++    for (std::uint32_t b = 0; b < 5; ++b) {
++        oit[b].binding = b;
++        oit[b].descriptorType = b < 3 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
++                                      : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++        oit[b].descriptorCount = 1;
++        oit[b].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
++    }
++    VkDescriptorSetLayoutCreateInfo oci{};
++    oci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
++    oci.bindingCount = 5;
++    oci.pBindings = oit;
++    if (vkCreateDescriptorSetLayout(ctx.device(), &oci, nullptr, &oit_set_layout_) !=
++        VK_SUCCESS) {
++        error_ = "vkCreateDescriptorSetLayout failed (translucency)";
++        return false;
++    }
++
+     VkPushConstantRange range{};
+     range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+     range.size = sizeof(PushConstants);
++    const VkDescriptorSetLayout set_layouts[2] = {set_layout_, oit_set_layout_};
+     VkPipelineLayoutCreateInfo plci{};
+     plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+-    plci.setLayoutCount = 1;
+-    plci.pSetLayouts = &set_layout_;
++    plci.setLayoutCount = 2;
++    plci.pSetLayouts = set_layouts;
+     plci.pushConstantRangeCount = 1;
+     plci.pPushConstantRanges = &range;
+     if (vkCreatePipelineLayout(ctx.device(), &plci, nullptr, &layout_) != VK_SUCCESS) {
+@@ -203,15 +232,34 @@ bool Renderer::create(Context& ctx, VkRenderPass render_pass) {
+ VkPipeline Renderer::pipeline_for(const PipelineKey& key) {
+     if (auto it = pipelines_.find(key); it != pipelines_.end())
+         return it->second;
++    PipelineDesc d;
++    d.vs = vs_;
++    d.fs = fs_;
++    d.cull = cull_flags(key.cull_mode);
++    d.depth_test = true;
++    d.depth_write = key.depth_write != 0;
++    d.depth_op = depth_compare(key.depth_mode);
++    d.blend = key.blend != 0;
++    d.src = src_factor(key.src_blend);
++    d.dst = dst_factor(key.dst_blend);
++    d.pass = render_pass_;
++    VkPipeline pipeline = build_pipeline(d);
++    if (!pipeline)
++        return VK_NULL_HANDLE;
++    pipelines_.emplace(key, pipeline);
++    pipelines = static_cast<std::uint32_t>(pipelines_.size());
++    return pipeline;
++}
+ 
++VkPipeline Renderer::build_pipeline(const PipelineDesc& d) {
+     VkPipelineShaderStageCreateInfo stages[2]{};
+     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+-    stages[0].module = vs_;
++    stages[0].module = d.vs;
+     stages[0].pName = "main";
+     stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+-    stages[1].module = fs_;
++    stages[1].module = d.fs;
+     stages[1].pName = "main";
+ 
+     VkVertexInputBindingDescription binding{};
+@@ -226,14 +274,17 @@ VkPipeline Renderer::pipeline_for(const PipelineKey& key) {
+     }};
+     VkPipelineVertexInputStateCreateInfo vi{};
+     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+-    vi.vertexBindingDescriptionCount = 1;
+-    vi.pVertexBindingDescriptions = &binding;
+-    vi.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+-    vi.pVertexAttributeDescriptions = attributes.data();
++    if (d.vertex_input) {
++        vi.vertexBindingDescriptionCount = 1;
++        vi.pVertexBindingDescriptions = &binding;
++        vi.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
++        vi.pVertexAttributeDescriptions = attributes.data();
++    }
+ 
+     VkPipelineInputAssemblyStateCreateInfo ia{};
+     ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++    ia.topology = d.vertex_input ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
++                                 : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+ 
+     VkPipelineViewportStateCreateInfo vp{};
+     vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+@@ -243,7 +294,7 @@ VkPipeline Renderer::pipeline_for(const PipelineKey& key) {
+     VkPipelineRasterizationStateCreateInfo rs{};
+     rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+     rs.polygonMode = VK_POLYGON_MODE_FILL;
+-    rs.cullMode = cull_flags(key.cull_mode);
++    rs.cullMode = d.cull;
+     rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+     rs.lineWidth = 1.0f;
+ 
+@@ -253,17 +304,18 @@ VkPipeline Renderer::pipeline_for(const PipelineKey& key) {
+ 
+     VkPipelineDepthStencilStateCreateInfo ds{};
+     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+-    ds.depthTestEnable = VK_TRUE;
+-    ds.depthWriteEnable = key.depth_write ? VK_TRUE : VK_FALSE;
+-    ds.depthCompareOp = depth_compare(key.depth_mode);
++    ds.depthTestEnable = d.depth_test ? VK_TRUE : VK_FALSE;
++    ds.depthWriteEnable = d.depth_write ? VK_TRUE : VK_FALSE;
++    ds.depthCompareOp = d.depth_op;
+ 
+     VkPipelineColorBlendAttachmentState blend{};
+-    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+-                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+-    if (key.blend) {
++    if (d.colour_write)
++        blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
++                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
++    if (d.blend) {
+         blend.blendEnable = VK_TRUE;
+-        blend.srcColorBlendFactor = src_factor(key.src_blend);
+-        blend.dstColorBlendFactor = dst_factor(key.dst_blend);
++        blend.srcColorBlendFactor = d.src;
++        blend.dstColorBlendFactor = d.dst;
+         blend.colorBlendOp = VK_BLEND_OP_ADD;
+         blend.srcAlphaBlendFactor = blend.srcColorBlendFactor;
+         blend.dstAlphaBlendFactor = blend.dstColorBlendFactor;
+@@ -293,7 +345,8 @@ VkPipeline Renderer::pipeline_for(const PipelineKey& key) {
+     gpci.pColorBlendState = &cb;
+     gpci.pDynamicState = &dy;
+     gpci.layout = layout_;
+-    gpci.renderPass = render_pass_;
++    gpci.renderPass = d.pass;
++    gpci.subpass = d.subpass;
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+     if (vkCreateGraphicsPipelines(ctx_->device(), VK_NULL_HANDLE, 1, &gpci, nullptr, &pipeline) !=
+@@ -301,11 +354,63 @@ VkPipeline Renderer::pipeline_for(const PipelineKey& key) {
+         error_ = "vkCreateGraphicsPipelines failed";
+         return VK_NULL_HANDLE;
+     }
+-    pipelines_.emplace(key, pipeline);
+-    pipelines = static_cast<std::uint32_t>(pipelines_.size());
+     return pipeline;
+ }
+ 
++// Per-pixel translucency (SA-nx). The gather pipelines differ only in culling: depth is tested in
++// the shader against the opaque pass's depth, blending happens in the resolve.
++bool Renderer::prepare_oit(VkRenderPass pass) {
++    if (pass == oit_pass_ && resolve_pipeline_)
++        return true;
++    for (auto& [k, pl] : gather_pipelines_) vkDestroyPipeline(ctx_->device(), pl, nullptr);
++    gather_pipelines_.clear();
++    if (resolve_pipeline_) {
++        vkDestroyPipeline(ctx_->device(), resolve_pipeline_, nullptr);
++        resolve_pipeline_ = VK_NULL_HANDLE;
++    }
++    oit_pass_ = pass;
++    PipelineDesc d;
++    d.vs = resolve_vs_;
++    d.fs = resolve_fs_;
++    d.vertex_input = false;
++    d.depth_test = false;
++    d.pass = pass;
++    d.subpass = 1;
++    resolve_pipeline_ = build_pipeline(d);
++    return resolve_pipeline_ != VK_NULL_HANDLE;
++}
++
++VkPipeline Renderer::gather_pipeline(std::uint32_t cull_mode) {
++    if (auto it = gather_pipelines_.find(cull_mode); it != gather_pipelines_.end())
++        return it->second;
++    PipelineDesc d;
++    d.vs = vs_;
++    d.fs = gather_fs_;
++    d.cull = cull_flags(cull_mode);
++    d.depth_test = false;
++    d.colour_write = false;
++    d.pass = oit_pass_;
++    d.subpass = 0;
++    VkPipeline pl = build_pipeline(d);
++    if (pl)
++        gather_pipelines_.emplace(cull_mode, pl);
++    return pl;
++}
++
++void Renderer::draw_resolve(VkCommandBuffer cmd) {
++    if (!resolve_pipeline_ || !oit_set_)
++        return;
++    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline_);
++    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &oit_set_, 0,
++                            nullptr);
++    PushConstants push{};
++    push.oit_width = oit_width_;
++    push.oit_capacity = oit_capacity_;
++    vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
++                       sizeof push, &push);
++    vkCmdDraw(cmd, 3, 1, 0, 0);
++}
++
+ void Renderer::set_memory(const std::uint8_t* vram, std::size_t vram_size,
+                           const std::uint32_t* palette_ram, PaletteFormat palette_format) {
+     textures_.set_memory(vram, vram_size, palette_ram, palette_format);
+@@ -341,7 +446,10 @@ void Renderer::prepare(VkCommandBuffer upload, const Frame& frame) {
+ }
+ 
+ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry& geometry,
+-                    VkExtent2D target) {
++                    VkExtent2D target, Lists lists) {
++    const bool gather = lists == Lists::TranslucentGather;
++    if (gather && (!oit_set_ || !oit_pass_))
++        return;
+     drawn_polygons = 0;
+     drawn_vertices = 0;
+     textured_polygons = 0;
+@@ -364,9 +472,14 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
+         out += kFloatsPerVertex;
+     }
+     const VkDeviceSize bytes = staging_.size() * sizeof(float);
+-    if (!vertices_.ensure(*ctx_, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+-        return;
+-    vertices_.write(staging_.data(), static_cast<std::size_t>(bytes));
++    // The gather pass runs after the opaque pass of the same frame and reuses its vertices. The
++    // buffer is written when the commands are recorded, so writing it a second time would be
++    // harmless but is a frame's worth of copying for nothing.
++    if (!gather) {
++        if (!vertices_.ensure(*ctx_, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
++            return;
++        vertices_.write(staging_.data(), static_cast<std::size_t>(bytes));
++    }
+ 
+     // The guest draws to its own framebuffer size; the window may be any size, and the viewport
+     // the caller set already stretches one to the other.
+@@ -407,16 +520,31 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
+             items.push_back({&p, nearest, blended, alpha_test});
+         }
+     };
+-    add_list(ListType::Opaque, false, false);
+-    add_list(ListType::PunchThrough, false, true);
++    if (!gather) {
++        add_list(ListType::Opaque, false, false);
++        add_list(ListType::PunchThrough, false, true);
++    }
+     const std::size_t translucent_start = items.size();
+-    add_list(ListType::Translucent, true, false);
++    if (lists != Lists::Opaque)
++        add_list(ListType::Translucent, true, false);
++    // Submission order, for the gather pass's tie-break: the sort below reorders the items.
++    std::vector<std::uint32_t> order;
++    if (gather) {
++        order.resize(items.size());
++        for (std::size_t k = 0; k < items.size(); ++k) order[k] = static_cast<std::uint32_t>(k);
++    }
+     // Back to front: the farthest surface has the smallest 1/w and must be drawn first.
+-    std::stable_sort(items.begin() + static_cast<std::ptrdiff_t>(translucent_start), items.end(),
+-                     [](const Item& a, const Item& b) { return a.depth < b.depth; });
++    if (!gather)
++        std::stable_sort(items.begin() + static_cast<std::ptrdiff_t>(translucent_start),
++                         items.end(),
++                         [](const Item& a, const Item& b) { return a.depth < b.depth; });
++    if (gather)
++        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &oit_set_, 0,
++                                nullptr);
+ 
+     VkPipeline bound = VK_NULL_HANDLE;
+-    for (const Item& item : items) {
++    for (std::size_t item_index = 0; item_index < items.size(); ++item_index) {
++        const Item& item = items[item_index];
+         const Polygon& p = *item.poly;
+         PipelineKey key{};
+         key.depth_mode = isp_depth_mode(p.isp) & 7u;
+@@ -428,7 +556,7 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
+         key.src_blend = tsp_src_instr(p.tsp) & 7u;
+         key.dst_blend = tsp_dst_instr(p.tsp) & 7u;
+         key.padding = 0;
+-        VkPipeline pipeline = pipeline_for(key);
++        VkPipeline pipeline = gather ? gather_pipeline(key.cull_mode) : pipeline_for(key);
+         if (!pipeline)
+             continue;
+         if (pipeline != bound) {
+@@ -466,6 +594,13 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
+         if (item.blended)
+             ++blended_polygons;
+         push.alpha_ref = geometry.alpha_ref;
++        if (gather) {
++            push.mode |= static_cast<std::int32_t>((key.depth_mode << 7) | (key.src_blend << 10) |
++                                                   (key.dst_blend << 13));
++            push.oit_width = oit_width_;
++            push.oit_capacity = oit_capacity_;
++            push.poly = order[item_index];
++        }
+         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof push, &push);
+         vkCmdDraw(cmd, p.count, 1, p.first, 0);
+@@ -480,6 +615,24 @@ void Renderer::destroy() {
+     vkDeviceWaitIdle(ctx_->device());
+     for (auto& [key, pipeline] : pipelines_) vkDestroyPipeline(ctx_->device(), pipeline, nullptr);
+     pipelines_.clear();
++    for (auto& [key, pipeline] : gather_pipelines_)
++        vkDestroyPipeline(ctx_->device(), pipeline, nullptr);
++    gather_pipelines_.clear();
++    if (resolve_pipeline_) {
++        vkDestroyPipeline(ctx_->device(), resolve_pipeline_, nullptr);
++        resolve_pipeline_ = VK_NULL_HANDLE;
++    }
++    oit_pass_ = VK_NULL_HANDLE;
++    oit_set_ = VK_NULL_HANDLE;
++    if (oit_set_layout_) {
++        vkDestroyDescriptorSetLayout(ctx_->device(), oit_set_layout_, nullptr);
++        oit_set_layout_ = VK_NULL_HANDLE;
++    }
++    for (VkShaderModule* m : {&gather_fs_, &resolve_vs_, &resolve_fs_})
++        if (*m) {
++            vkDestroyShaderModule(ctx_->device(), *m, nullptr);
++            *m = VK_NULL_HANDLE;
++        }
+     textures_.destroy();
+     if (set_layout_) {
+         vkDestroyDescriptorSetLayout(ctx_->device(), set_layout_, nullptr);
+diff --git a/render/src/vk/resources.cpp b/render/src/vk/resources.cpp
+index ad4c30d..c511b72 100644
+--- a/render/src/vk/resources.cpp
++++ b/render/src/vk/resources.cpp
+@@ -19,6 +19,49 @@ std::uint32_t find_memory_type(VkPhysicalDevice physical, std::uint32_t type_bit
+     return UINT32_MAX;
+ }
+ 
++bool DeviceBuffer::create(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags usage) {
++    destroy();
++    device_ = ctx.device();
++    VkBufferCreateInfo bci{};
++    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
++    bci.size = bytes;
++    bci.usage = usage;
++    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    if (vkCreateBuffer(device_, &bci, nullptr, &buffer_) != VK_SUCCESS)
++        return false;
++    VkMemoryRequirements req{};
++    vkGetBufferMemoryRequirements(device_, buffer_, &req);
++    const std::uint32_t type = find_memory_type(ctx.physical_device(), req.memoryTypeBits,
++                                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++    if (type == UINT32_MAX) {
++        destroy();
++        return false;
++    }
++    VkMemoryAllocateInfo mai{};
++    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++    mai.allocationSize = req.size;
++    mai.memoryTypeIndex = type;
++    if (vkAllocateMemory(device_, &mai, nullptr, &memory_) != VK_SUCCESS) {
++        destroy();
++        return false;
++    }
++    vkBindBufferMemory(device_, buffer_, memory_, 0);
++    size_ = bytes;
++    return true;
++}
++
++void DeviceBuffer::destroy() {
++    if (!device_)
++        return;
++    if (buffer_)
++        vkDestroyBuffer(device_, buffer_, nullptr);
++    if (memory_)
++        vkFreeMemory(device_, memory_, nullptr);
++    buffer_ = VK_NULL_HANDLE;
++    memory_ = VK_NULL_HANDLE;
++    size_ = 0;
++}
++
+ HostBuffer::~HostBuffer() {
+     destroy();
+ }
