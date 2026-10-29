@@ -1,0 +1,70 @@
+diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
+index 199d91f..6511df5 100644
+--- a/tests/sh4/test_programs.cpp
++++ b/tests/sh4/test_programs.cpp
+@@ -142,6 +142,45 @@ TEST_CASE("p13_tailpr: a bra into a shared epilogue returns locally, not non-loc
+     CHECK_FALSE(dream::sh4::g_tail_entry_set);
+ }
+ 
++namespace {
++// Records the pc of every poll and switches polling off, so a body runs through once.
++struct PollRecorder : dream::sh4::Hooks {
++    std::vector<std::uint32_t> pcs;
++    void on_poll(Ctx& c, dream::Memory&) override {
++        pcs.push_back(c.pc);
++        c.next_event = ~std::uint64_t{0};
++    }
++    void on_trapa(Ctx&, dream::Memory&, std::uint32_t) override { FAIL("trapa"); }
++    void on_rte(Ctx&, dream::Memory&) override { FAIL("rte"); }
++    void on_untranslated(Ctx&, dream::Memory&, std::uint32_t t) override {
++        FAIL("untranslated " << t);
++    }
++};
++}  // namespace
++
++TEST_CASE("p13_tailpr: an interrupt polled on a resume records the resume pc") {
++    // A task switch taken at that poll re-enters the body at c.pc. Recording the entry instead ran
++    // the prologue a second time on a frame that was already built (Sonic Adventure, patch 0010).
++    dream::BareMemory m;
++    load_image(m, "p13_tailpr.bin", 0x8C040000);
++    Ctx c = fresh();
++    c.pr = 0x8C00FFF0;
++    c.r[1] = 10;
++    const std::uint32_t sp = c.r[15];
++    // The frame _main built before its bsr: PR saved, then resumed at the call's return address.
++    c.r[15] = sp - 4;
++    m.write32(c.r[15], 0x8C00FFF0);
++    c.next_event = 0;  // an interrupt is due
++    PollRecorder rec;
++    dream::sh4::set_hooks(&rec);
++    dream::sh4::resume_at(c, m, 0x8C040006);
++    dream::sh4::set_hooks(nullptr);
++    REQUIRE_FALSE(rec.pcs.empty());
++    CHECK(rec.pcs.front() == 0x8C040006u);
++    CHECK(c.r[1] == 12u);  // only the epilogue ran (+2): no second pass through the body
++    CHECK(c.r[15] == sp);
++}
++
+ TEST_CASE("p4_calls: bsr/jsr/rts, delay-slot hazards, bra with slot") {
+     dream::BareMemory m;
+     load_image(m, "p4_calls.bin", 0x8C010000);
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index d821679..dce45c3 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -254,9 +254,13 @@ public:
+             << hexu(spec_.entry) << ");\n";
+         // Poll points record the exact guest pc first: an interrupt handler that switches tasks
+         // returns through RTE to SPC, and run_guest re-enters this function there.
++        // A resumed body polls at its resume address, not the entry: an interrupt that switches
++        // tasks here is later re-entered at c.pc, and re-entering at the entry would run the
++        // prologue a second time on a frame that is already built (SA-nx, Sonic Adventure's
++        // 35 s crash: fn 0x0C04EA4A resumed at 0x0C04EA94).
+         if (opt_.irq_checks)
+-            out << "    if (c.cycles >= c.next_event) { c.pc = " << hexu(spec_.entry)
+-                << "; deliver_irq(c, m); }\n";
++            out << "    if (c.cycles >= c.next_event) { c.pc = resume_pc ? resume_pc : "
++                << hexu(spec_.entry) << "; deliver_irq(c, m); }\n";
+         out << "    if (resume_pc) {\n        switch (resume_pc) {\n";
+         for (std::uint32_t b : blocks_)
+             out << "            case " << hexu(b) << ": goto " << label(b) << ";\n";

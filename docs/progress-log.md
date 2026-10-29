@@ -4,6 +4,18 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 
 ## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
 
+- trace_run on Mark's PC (returns after cycle 7,043,000,000, translated vs interpreted): identical
+  through fn 0x0C04E714's return to 0x0C04EA94 (r15 0x8C00F34C); then the interpreted run continues
+  in fn 0x0C04EA4A (next call at 0x0C04EB14), the translated one returns from 0x0C04F7EA with r15
+  0x8C00F2E8 called from 0x0C0912EC. That return is where run_guest resumes fn 0x0C04EA4A at
+  0x0C04EA94, and the resume body's first statement is the interrupt poll, which set c.pc to the
+  function's ENTRY before delivering. The handler switched tasks; the task came back through RTE to
+  SPC = 0x0C04EA4A and ran the prologue again on its built frame: the later rts popped stack data.
+- Patch 0010: a resumed body polls with c.pc = resume_pc. Test: resume tailpr_main at its call's
+  return with an interrupt due; the poll must see 0x8C040006 and only the epilogue may run.
+- (My mistake: trace_run had no end cycle, so the interpreted run wrote 1.9 GB until stopped; the
+  file was cut to the window.)
+
 - Boot 6 on Mark's PC (0008 + wider 0007): crash at the same pc as headless (0x8C754CEE, 36.8 s
   in the window), unmapped reads 0 (130M before). Character select: Sonic mostly right, one shoe
   stretched into a long grey spike. Crash: fn 0x0C04E714 runs with r15 = 0x8C00F36C and PR =
