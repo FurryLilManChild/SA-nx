@@ -1,5 +1,5 @@
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index e22a8fd..37166b8 100644
+index e22a8fd..47f688b 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
 @@ -2,6 +2,7 @@
@@ -10,16 +10,19 @@ index e22a8fd..37166b8 100644
  #include <stdexcept>
  #include <string>
  #include <utility>
-@@ -397,16 +398,28 @@ void unimplemented(Ctx& c, std::uint32_t raw, std::uint32_t pc) {
+@@ -397,16 +398,35 @@ void unimplemented(Ctx& c, std::uint32_t raw, std::uint32_t pc) {
  // DREAM_TRACE_RETURNS=path: one line per guest return with the rts address and the register
  // state, from translated code built with --trace and from the dev interpreter alike, so the two
  // runs of a title can be diffed to the first divergent return (docs/runtime-devinterp.md).
-+// SA-nx: DREAM_TRACE_RETURNS_FROM=CYCLES skips returns before that guest cycle count, so a trace of
-+// the moments before a fault stays small; each line then ends with the cycle count, and is flushed
-+// at once so a run that faults keeps everything it wrote.
++// SA-nx: DREAM_TRACE_RETURNS_FROM / _TO=CYCLES limit the trace to a window of guest cycles, so a
++// trace of the moments before a fault stays small; each line then ends with the cycle count and is
++// flushed at once, so a run that faults keeps everything it wrote. DREAM_TRACE_RETURNS=- writes to
++// stderr, interleaved in order with DREAM_TRACE_NONLOCAL's interrupt, resume and switch lines.
  void trace_return(Ctx& c, ::dream::Memory&, std::uint32_t rts_pc) {
      static FILE* out = [] {
          const char* path = std::getenv("DREAM_TRACE_RETURNS");
++        if (path && path[0] == '-' && path[1] == 0)
++            return stderr;
          return path ? std::fopen(path, "w") : nullptr;
      }();
 -    if (!out)
@@ -27,9 +30,14 @@ index e22a8fd..37166b8 100644
 +        const char* v = std::getenv("DREAM_TRACE_RETURNS_FROM");
 +        return v ? std::strtoull(v, nullptr, 0) : 0ull;
 +    }();
-+    if (!out || c.cycles < from)
++    static const std::uint64_t to = [] {
++        const char* v = std::getenv("DREAM_TRACE_RETURNS_TO");
++        return v ? std::strtoull(v, nullptr, 0) : ~0ull;
++    }();
++    if (!out || c.cycles < from || c.cycles > to)
          return;
-     std::fprintf(out, "%08x", rts_pc);
+-    std::fprintf(out, "%08x", rts_pc);
++    std::fprintf(out, "ret %08x", rts_pc);
      for (int i = 0; i < 16; ++i) std::fprintf(out, " %08x", c.r[i]);
 -    std::fprintf(out, " %08x %08x\n", c.pr, read_sr(c));
 +    std::fprintf(out, " %08x %08x", c.pr, read_sr(c));
