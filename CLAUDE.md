@@ -50,6 +50,12 @@ docs/progress-log.md   newest first, one entry per session with evidence
 
 1. Claude changes config or code, commits, pushes.
 2. Mark: `git pull`, `tools\win\build_pc.ps1`, then `tools\win\boot_test.ps1` or `play.ps1`.
+   Always give him the commands in exactly this form (his PowerShell blocks bare `.ps1` scripts):
+   ```
+   git pull
+   powershell -ExecutionPolicy Bypass -File tools\win\build_pc.ps1
+   powershell -ExecutionPolicy Bypass -File tools\win\play.ps1
+   ```
 3. Claude reads `out\logs\*` through the bridge (boot.log, boot-report.txt, suggested.toml),
    merges suggested seeds into `sonicadv.toml` with evidence in the progress log, repeats.
 
