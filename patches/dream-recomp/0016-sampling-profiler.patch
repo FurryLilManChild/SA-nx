@@ -1,0 +1,361 @@
+diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
+index 4393f57..08a8560 100644
+--- a/cmake/DreamAddGame.cmake
++++ b/cmake/DreamAddGame.cmake
+@@ -117,7 +117,8 @@ function(dream_add_game id)
+     COMMENT "Translating ${ARG_TITLE}"
+     VERBATIM)
+ 
+-  add_executable(${id}_boot ${DREAM_ROOT}/runtime/boot/boot_main.cpp ${_units})
++  add_executable(${id}_boot ${DREAM_ROOT}/runtime/boot/boot_main.cpp
++    ${DREAM_ROOT}/runtime/boot/profiler.cpp ${_units})  # SA-nx: profiler.cpp (--profile)
+   target_link_libraries(${id}_boot PRIVATE dream::runtime dream::translator)
+   # --window needs the Vulkan backend, which is optional (render/CMakeLists.txt returns early when
+   # Vulkan, SDL3 or glslc are missing). Without it the launcher still builds and runs headless, and
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 75c92ad..57f7e07 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -22,6 +22,8 @@
+ #include <unordered_map>
+ #include <vector>
+ 
++#include "profiler.h"  // SA-nx: --profile
++
+ #include "dream/runtime/aica/aica.h"
+ #include "dream/runtime/aica/rtc.h"
+ #include "dream/runtime/gdrom/disc.h"
+@@ -1094,6 +1096,7 @@ void usage(const char* argv0, std::FILE* out) {
+         "Reproducing a run:\n"
+         "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
+         "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
++        "  --profile FILE        sample where the game thread spends its time; report at exit\n"
+         "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
+         "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
+         "                         up down left right), to get past screens that wait for input\n"
+@@ -1219,6 +1222,7 @@ int main(int argc, char** argv) {
+     // down left right.
+     std::string presses;
+     std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
++    std::string profile_path;  // SA-nx: --profile FILE
+     std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
+     // --window: open a window and play. Without it the run is headless exactly as before.
+     // --scale N draws the geometry at N times the guest's resolution; the frame is resampled back
+@@ -1319,6 +1323,8 @@ int main(int argc, char** argv) {
+             dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
+         else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
+             presses = argv[++i];
++        else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
++            profile_path = argv[++i];
+         else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
+             boot_sr = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+         else if (!std::strcmp(argv[i], "--hide-file") && i + 1 < argc) {
+@@ -1983,6 +1989,9 @@ int main(int argc, char** argv) {
+     const char* stop = "returned from the entry function";
+     int rc = 0;
+     const auto t0 = std::chrono::steady_clock::now();
++    sanx::Profiler profiler;
++    if (!profile_path.empty())
++        profiler.start();
+     try {
+ #ifdef DREAM_DEV_INTERPRETER
+         if (interpret_all) {
+@@ -2028,6 +2037,8 @@ int main(int argc, char** argv) {
+     }
+     const double host_s =
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++    if (!profile_path.empty())
++        profiler.finish(profile_path);
+ #ifdef DREAM_DEV_INTERPRETER
+     if (dream::devinterp::replay()) {
+         dream::devinterp::set_replay(nullptr);
+diff --git a/runtime/boot/profiler.cpp b/runtime/boot/profiler.cpp
+new file mode 100644
+index 0000000..57a95ad
+--- /dev/null
++++ b/runtime/boot/profiler.cpp
+@@ -0,0 +1,252 @@
++// SA-nx: a sampling profiler for the launcher (--profile FILE). Windows only.
++//
++// A background thread wakes about once a millisecond, suspends the thread that runs the guest,
++// reads its registers and unwinds its stack with the image's own unwind tables, then lets it go.
++// Each sample counts once for the function that was executing ("self") and once for every
++// distinct function on the stack ("inclusive"). At the end the addresses are named from the
++// build's PDB, so translated guest code shows as fn_XXXXXXXX and the runtime by its C++ names.
++//
++// Nothing is allocated while the target is suspended: it may hold the heap lock, and the sampler
++// would deadlock waiting for it. The stack is copied into a fixed array first, the target is
++// resumed, and only then are the counters updated.
++#include "profiler.h"
++
++#ifdef _WIN32
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++#include <dbghelp.h>
++#include <timeapi.h>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <thread>
++#include <unordered_map>
++#include <utility>
++#include <vector>
++
++#pragma comment(lib, "dbghelp.lib")
++#pragma comment(lib, "winmm.lib")
++
++namespace sanx {
++
++class ProfilerImpl {
++public:
++    // Starts sampling the calling thread.
++    bool start() {
++        if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &target_,
++                             THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
++                             FALSE, 0))
++            return false;
++        timeBeginPeriod(1);
++        t0_ = std::chrono::steady_clock::now();
++        worker_ = std::thread([this] { loop(); });
++        return true;
++    }
++
++    // Stops sampling and writes the report. Safe to call when start() failed or was never called.
++    void finish(const std::string& path) {
++        if (!worker_.joinable())
++            return;
++        stop_ = true;
++        worker_.join();
++        timeEndPeriod(1);
++        const double secs =
++            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
++        write(path, secs);
++        CloseHandle(target_);
++    }
++
++private:
++    static constexpr int kMaxDepth = 96;
++
++    void loop() {
++        DWORD64 frames[kMaxDepth];
++        while (!stop_) {
++            Sleep(1);
++            if (SuspendThread(target_) == static_cast<DWORD>(-1))
++                continue;
++            int depth = 0;
++            CONTEXT ctx{};
++            ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
++            if (GetThreadContext(target_, &ctx))
++                depth = unwind(ctx, frames);
++            ResumeThread(target_);
++            if (depth == 0) {
++                ++failed_;
++                continue;
++            }
++            ++samples_;
++            ++self_[frames[0]];
++            // A function that recurses (or a translated function that calls itself through a
++            // resume) is counted once per sample, or inclusive time would exceed 100%.
++            for (int i = 0; i < depth; ++i) {
++                bool seen = false;
++                for (int j = 0; j < i && !seen; ++j) seen = frames[j] == frames[i];
++                if (!seen)
++                    ++inclusive_[frames[i]];
++            }
++        }
++    }
++
++    // Fills `out` with the start address of each function on the stack, innermost first.
++    static int unwind(CONTEXT ctx, DWORD64* out) {
++        int n = 0;
++        for (int guard = 0; n < kMaxDepth && guard < kMaxDepth + 4; ++guard) {
++            if (ctx.Rip == 0)
++                break;
++            DWORD64 base = 0;
++            PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
++            if (!rf) {
++                // A leaf function has no unwind data: its return address is on top of the stack.
++                // Only trust that for the innermost frame; deeper down it means we are lost.
++                if (n != 0)
++                    break;
++                out[n++] = ctx.Rip;
++                ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp);
++                ctx.Rsp += 8;
++                continue;
++            }
++            out[n++] = base + rf->BeginAddress;
++            void* handler_data = nullptr;
++            DWORD64 establisher = 0;
++            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data,
++                             &establisher, nullptr);
++        }
++        return n;
++    }
++
++    struct Named {
++        std::string name, module;
++    };
++
++    Named name_of(HANDLE proc, DWORD64 addr) {
++        Named r;
++        alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 512];
++        auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
++        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
++        sym->MaxNameLen = 511;
++        DWORD64 disp = 0;
++        if (SymFromAddr(proc, addr, &disp, sym))
++            r.name = sym->Name;
++        else {
++            char hex[32];
++            std::snprintf(hex, sizeof hex, "0x%llx", static_cast<unsigned long long>(addr));
++            r.name = hex;
++        }
++        IMAGEHLP_MODULE64 mod{};
++        mod.SizeOfStruct = sizeof(mod);
++        if (SymGetModuleInfo64(proc, addr, &mod))
++            r.module = mod.ModuleName;
++        return r;
++    }
++
++    // Translated guest code, the rest of the launcher, or another DLL (drivers, the OS).
++    static const char* group_of(const Named& n, const std::string& exe_module) {
++        if (n.module != exe_module)
++            return "other DLLs (driver, OS)";
++        if (n.name.find("fn_") != std::string::npos)
++            return "translated guest code";
++        return "launcher runtime (memory, renderer, hooks, interpreter)";
++    }
++
++    void write(const std::string& path, double secs) {
++        HANDLE proc = GetCurrentProcess();
++        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
++        SymInitialize(proc, nullptr, TRUE);
++        std::string exe_module;
++        {
++            char exe[MAX_PATH] = {};
++            GetModuleFileNameA(nullptr, exe, MAX_PATH);
++            IMAGEHLP_MODULE64 mod{};
++            mod.SizeOfStruct = sizeof(mod);
++            if (SymGetModuleInfo64(proc, reinterpret_cast<DWORD64>(GetModuleHandleA(nullptr)),
++                                   &mod))
++                exe_module = mod.ModuleName;
++        }
++
++        std::unordered_map<DWORD64, Named> names;
++        auto named = [&](DWORD64 a) -> const Named& {
++            auto it = names.find(a);
++            if (it == names.end())
++                it = names.emplace(a, name_of(proc, a)).first;
++            return it->second;
++        };
++
++        FILE* f = std::fopen(path.c_str(), "w");
++        if (!f) {
++            SymCleanup(proc);
++            return;
++        }
++        const double total = samples_ ? static_cast<double>(samples_) : 1.0;
++        std::fprintf(f, "profile: %llu samples over %.1f s (%.0f per second), %llu unreadable\n",
++                     static_cast<unsigned long long>(samples_), secs, samples_ / secs,
++                     static_cast<unsigned long long>(failed_));
++        std::fprintf(f, "Each sample is one look at what the game thread was doing.\n\n");
++
++        std::unordered_map<std::string, std::uint64_t> groups;
++        for (const auto& [a, c] : self_) groups[group_of(named(a), exe_module)] += c;
++        std::fprintf(f, "== where the time goes (self)\n");
++        for (const auto& [g, c] : groups)
++            std::fprintf(f, "%6.2f%%  %s\n", 100.0 * c / total, g.c_str());
++
++        auto top = [&](const std::unordered_map<DWORD64, std::uint64_t>& m, const char* title,
++                       std::size_t count) {
++            std::vector<std::pair<DWORD64, std::uint64_t>> v(m.begin(), m.end());
++            std::sort(v.begin(), v.end(), [](auto& x, auto& y) { return x.second > y.second; });
++            std::fprintf(f, "\n== %s\n", title);
++            for (std::size_t i = 0; i < v.size() && i < count; ++i) {
++                const Named& n = named(v[i].first);
++                std::fprintf(f, "%6.2f%%  %-60s %s\n", 100.0 * v[i].second / total, n.name.c_str(),
++                             n.module.c_str());
++            }
++        };
++        top(self_, "top functions by self time (the function that was executing)", 80);
++        top(inclusive_, "top functions by inclusive time (on the stack at all)", 80);
++        std::fclose(f);
++        SymCleanup(proc);
++    }
++
++    HANDLE target_ = nullptr;
++    std::thread worker_;
++    std::atomic<bool> stop_{false};
++    std::chrono::steady_clock::time_point t0_;
++    std::uint64_t samples_ = 0, failed_ = 0;
++    std::unordered_map<DWORD64, std::uint64_t> self_, inclusive_;
++};
++
++Profiler::Profiler() = default;
++Profiler::~Profiler() = default;
++bool Profiler::start() {
++    impl_ = std::make_unique<ProfilerImpl>();
++    if (impl_->start())
++        return true;
++    impl_.reset();
++    return false;
++}
++void Profiler::finish(const std::string& path) {
++    if (impl_)
++        impl_->finish(path);
++}
++
++}  // namespace sanx
++
++#else
++
++#include <cstdio>
++
++namespace sanx {
++class ProfilerImpl {};
++Profiler::Profiler() = default;
++Profiler::~Profiler() = default;
++bool Profiler::start() {
++    std::fprintf(stderr, "--profile: only supported on Windows builds\n");
++    return false;
++}
++void Profiler::finish(const std::string&) {}
++}  // namespace sanx
++
++#endif
+diff --git a/runtime/boot/profiler.h b/runtime/boot/profiler.h
+new file mode 100644
+index 0000000..28b092d
+--- /dev/null
++++ b/runtime/boot/profiler.h
+@@ -0,0 +1,26 @@
++// SA-nx: a sampling profiler for the launcher (--profile FILE). Windows only; elsewhere start()
++// says so and returns false. The implementation lives in profiler.cpp so that <windows.h> stays out
++// of boot_main.cpp.
++#pragma once
++
++#include <memory>
++#include <string>
++
++namespace sanx {
++
++class ProfilerImpl;
++
++class Profiler {
++public:
++    Profiler();
++    ~Profiler();
++    // Starts sampling the calling thread.
++    bool start();
++    // Stops sampling and writes the report to `path`. Does nothing if start() failed.
++    void finish(const std::string& path);
++
++private:
++    std::unique_ptr<ProfilerImpl> impl_;
++};
++
++}  // namespace sanx

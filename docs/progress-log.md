@@ -2,6 +2,20 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: sampling profiler (patch 0016)
+
+- Speed is 0.6x to 0.7x real time and the untranslated calls (a few thousand per run) cannot
+  explain it, so the next step is measurement. Patch 0016 adds `--profile FILE`
+  (runtime/boot/profiler.cpp, Windows only): a thread samples the game thread about 1,000 times a
+  second (SuspendThread, GetThreadContext, RtlVirtualUnwind over the image's unwind tables; no
+  allocation while the target is suspended), counting self and inclusive time per function, and
+  names them from the PDB at exit. The report groups self time into translated guest code
+  (fn_XXXXXXXX), the launcher runtime, and other DLLs (driver, OS). play.ps1 always passes it
+  (out\logs\profile.txt).
+- Checked here with a MinGW cross build under Wine: 3,601 samples in 6 s while throwing an
+  exception every thousand calls, every stack unwound to RtlUserThreadStart, no stalls. Names did
+  not resolve there (MinGW writes DWARF, not PDB); the MSVC build writes a PDB.
+
 ## 2026-10-29: graphics pass 1 confirmed on Mark's PC; captures stop overwriting (0015)
 
 - Play run with 0013 and 0014 (87 guest s, 0.6x real time): Mark reports big improvements. His
