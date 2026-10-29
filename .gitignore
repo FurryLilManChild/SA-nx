@@ -37,3 +37,4 @@ out/
 *.nro
 *.nacp
 *.elf
+__pycache__/

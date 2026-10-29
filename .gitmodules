@@ -1,3 +1,4 @@
 [submodule "dream-recomp"]
 	path = dream-recomp
 	url = https://github.com/phobos665/dream-recomp.git
+	ignore = dirty
