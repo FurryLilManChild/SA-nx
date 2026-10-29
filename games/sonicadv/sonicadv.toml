@@ -132,3 +132,265 @@ size = 0x2D110
 dest = 0x8CEB0000
 overlay = true
 
+
+# Every other code module (2026-10-29): stages (STG*), adventure fields (ADV01-03), bosses (B_*),
+# the Chao garden (AL_MAIN), minigames and the summary screen. All load at 0x8C900000 like ADV00.
+# Sizes: the last 4 KB window with dense code (6+ rts, 4+ sts.l pr) plus one window. Seeds: the
+# module start, or the leading pointer table where a module begins with one (SUMMARY). Untranslated
+# entry points the runs reach go in from suggested.toml.
+
+[[relocations]]
+file = "extracted/modules/ADV0100.bin"
+source = 0x0
+size = 0x10000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/ADV0130.bin"
+source = 0x0
+size = 0xD000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/ADV02.bin"
+source = 0x0
+size = 0x17000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/ADV03.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/AL_MAIN.bin"
+source = 0x0
+size = 0x1B000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_CHAOS0.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_CHAOS2.bin"
+source = 0x0
+size = 0x8000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_CHAOS4.bin"
+source = 0x0
+size = 0x8000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_CHAOS6.bin"
+source = 0x0
+size = 0x8000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_CHAOS7.bin"
+source = 0x0
+size = 0x1F000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_E101.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_E101_R.bin"
+source = 0x0
+size = 0x8000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_EGM1.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_EGM2.bin"
+source = 0x0
+size = 0x9000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_EGM3.bin"
+source = 0x0
+size = 0xC000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/B_ROBO.bin"
+source = 0x0
+size = 0xA000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/MINICART.bin"
+source = 0x0
+size = 0x18000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/SBOARD.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/SHOOTING.bin"
+source = 0x0
+size = 0xA000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG00.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG01.bin"
+source = 0x0
+size = 0x10000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG02.bin"
+source = 0x0
+size = 0xE000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG03.bin"
+source = 0x0
+size = 0x17000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG04.bin"
+source = 0x0
+size = 0x12000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG05.bin"
+source = 0x0
+size = 0x73000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG06.bin"
+source = 0x0
+size = 0x1D000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG07.bin"
+source = 0x0
+size = 0xD000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG08.bin"
+source = 0x0
+size = 0x15000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG09.bin"
+source = 0x0
+size = 0x25000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG10.bin"
+source = 0x0
+size = 0x18000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/STG12.bin"
+source = 0x0
+size = 0x19000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900000]
+
+[[relocations]]
+file = "extracted/modules/SUMMARY.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8C900000
+overlay = true
+entries = [0x8C900040, 0x8C900260, 0x8C900166, 0x8C900B60, 0x8C900DC0, 0x8C900C62, 0x8C901BE0, 0x8C901E20, 0x8C901CC6]

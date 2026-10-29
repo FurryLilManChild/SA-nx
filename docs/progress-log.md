@@ -16,6 +16,14 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   holds SONICADV_INT, the same file name the PAL build writes, plus Chao data and an SA2 save.
   Installed as out\saves\vmu_A1.bin (first 128 KB); the game accepts it as a complete save, so
   stages can be started from Trial mode.
+- The 0x8CB80000 module is cutscene code: the 236 EV*.PRS event files are linked there, each with
+  its own code (hashes of the busiest functions differ per file), 2.3 MB of code in all. Left for
+  later: stages matter more for playability.
+- Added the other 32 code modules (stages, fields, bosses, Chao garden, minigames, summary) as
+  overlays at 0x8C900000, each sized to its dense code (last 4 KB window with 6+ rts and 4+
+  sts.l pr, plus one window) and seeded at 0 or, for SUMMARY, its leading pointer table (0x20 is
+  not a shared entry: data in several modules). Translated here in 17 s, no errors: 34 module units,
+  10,692 functions, about 101 MB of C++ beside the main program's 309 MB.
 
 ## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
 
