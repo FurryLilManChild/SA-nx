@@ -6,7 +6,11 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 
 - Play run on Mark's PC: "readback memory: host-cached", guest 403.0 s in host 403.3 s (0.9x
   overall including loads; Mark: "phenomenal"). Profile (207,752 samples): 35% of the game
-  thread now waits in ZwWaitForMultipleObjects, the wait for the display, which is spare time.
+  thread now waits in ZwWaitForMultipleObjects. Inclusive time places it under
+  Live::render > Offscreen::render > the AMD driver: the CPU waits for the GPU to finish each
+  frame, because the offscreen render is submit-and-wait. Not vsync, not spare time: the guest
+  cannot run during it. Rendering one frame behind (overlapping GPU and CPU) is the next large
+  speedup, and matters most on the Switch.
   The memcpy is down from 43.8% to about 1%; resolve() from 9.9% to 0.7%.
 - Remaining real work: DcMemory load/store (about 16%), AICA ARM7 plus DSP (about 11%),
   find_function plus call_indirect (about 4%), translated code 11%. Headroom for the Switch,
