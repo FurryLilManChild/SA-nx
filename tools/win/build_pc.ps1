@@ -1,9 +1,12 @@
 # Builds the PC version of Sonic Adventure (dream-recomp, development interpreter on).
 #   powershell -ExecutionPolicy Bypass -File tools\win\build_pc.ps1           incremental build
 #   powershell -ExecutionPolicy Bypass -File tools\win\build_pc.ps1 -Clean    reconfigure first
+#   powershell -ExecutionPolicy Bypass -File tools\win\build_pc.ps1 -Trace    diagnostic build in
+#       build-trace (every translated return can be logged; see trace_run.ps1); build-pc is untouched
 # Log: out\logs\build_pc.log
-param([switch]$Clean)
+param([switch]$Clean, [switch]$Trace)
 . "$PSScriptRoot\common.ps1"
+if ($Trace) { Use-TraceBuild }
 Start-Log 'build_pc.log' 'build_pc' | Out-Null
 Enter-DevShell
 
@@ -25,6 +28,7 @@ if (-not (Test-Path (Join-Path $BuildDir 'build.ninja'))) {
         '-DCMAKE_BUILD_TYPE=RelWithDebInfo',
         '-DDREAM_DEV_INTERPRETER=ON', '-DDREAM_BUILD_TESTS=OFF', '-DDREAM_WERROR=OFF',
         '-DDREAM_TRANSLATE_PARTS=32',
+        "-DDREAM_TRANSLATE_EXTRA_FLAGS=$(if ($Trace) { '--trace' } else { '' })",
         "-DCMAKE_PREFIX_PATH=$Sdl3Dir",
         '-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc /bigobj')
     $rc = Invoke-Logged $Cmake $cfg 'build_pc' '^--'

@@ -4,6 +4,13 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 
 ## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
 
+- Boot 6 on Mark's PC (0008 + wider 0007): crash at the same pc as headless (0x8C754CEE, 36.8 s
+  in the window), unmapped reads 0 (130M before). Character select: Sonic mostly right, one shoe
+  stretched into a long grey spike. Crash: fn 0x0C04E714 runs with r15 = 0x8C00F36C and PR =
+  0x8C754CEC (a value from the stack), during a resume chain after false non-local returns.
+- Patch 0009 (DREAM_TRACE_RETURNS_FROM) and `build_pc.ps1 -Trace` / `trace_run.ps1`: a separate
+  trace build on Mark's PC logs every return after a cycle count, translated and interpreted, to diff.
+
 - Boot 5 on Mark's PC (patch 0007): same as before the break on screen, black after the Station
   Square title card; 0.6x in the window (was 0.3x), stop pc 0x0C037CFA, 130M unmapped reads. The
   0007 freeze only existed in the headless runs with MOVIE.BIN translated.

@@ -12,6 +12,12 @@ $GameToml = Join-Path $Root "games\$GameId\$GameId.toml"
 $GameExe = Join-Path $BuildDir "games\$GameId\${GameId}_boot.exe"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+# The diagnostic build (build_pc.ps1 -Trace, trace_run.ps1) lives in its own folder.
+function Use-TraceBuild {
+    $script:BuildDir = Join-Path $Root 'build-trace'
+    $script:GameExe = Join-Path $script:BuildDir "games\$GameId\${GameId}_boot.exe"
+}
+
 function Write-Log([string]$File, [string]$Text) {
     [IO.File]::AppendAllText((Join-Path $LogDir $File), $Text + "`r`n", (New-Object Text.UTF8Encoding $false))
 }
