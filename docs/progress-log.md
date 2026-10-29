@@ -2,6 +2,16 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: patch 0017 confirmed: full speed in Emerald Coast
+
+- Play run on Mark's PC: "readback memory: host-cached", guest 403.0 s in host 403.3 s (0.9x
+  overall including loads; Mark: "phenomenal"). Profile (207,752 samples): 35% of the game
+  thread now waits in ZwWaitForMultipleObjects, the wait for the display, which is spare time.
+  The memcpy is down from 43.8% to about 1%; resolve() from 9.9% to 0.7%.
+- Remaining real work: DcMemory load/store (about 16%), AICA ARM7 plus DSP (about 11%),
+  find_function plus call_indirect (about 4%), translated code 11%. Headroom for the Switch,
+  where the CPU is far slower; not needed on this PC.
+
 ## 2026-10-29: first profile; cached frame readback and a main RAM fast path (patch 0017)
 
 - Profile of a full Emerald Coast run on Mark's PC (473 host s, 303 guest s, 0.6x real time,
