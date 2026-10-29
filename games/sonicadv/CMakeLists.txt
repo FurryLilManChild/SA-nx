@@ -12,7 +12,8 @@ endif()
 # The Switch (SA-nx): Horizon's own main() around the launcher, and the NRO the homebrew menu
 # runs. switch/build.sh configures this with devkitPro's toolchain.
 if(NINTENDO_SWITCH)
-  target_sources(sonicadv_boot PRIVATE ${CMAKE_SOURCE_DIR}/switch/src/switch_main.cpp)
+  target_sources(sonicadv_boot PRIVATE ${CMAKE_SOURCE_DIR}/switch/src/switch_main.cpp
+    ${CMAKE_SOURCE_DIR}/switch/src/egl_stubs.c)
   target_link_libraries(sonicadv_boot PRIVATE nx)
   set(SANX_VERSION "0.1.0" CACHE STRING "Version shown in the homebrew menu")
   nx_generate_nacp(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sonicadv.nacp

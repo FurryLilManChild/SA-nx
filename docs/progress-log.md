@@ -2,7 +2,18 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
-## 2026-10-29: Switch phase started (patch 0022, switch/), first build in progress
+## 2026-10-29: first Switch NRO built (switch-test1)
+
+- All 319 game parts and the libraries compile for the Switch. Two fixes to link:
+  switch_main.cpp lacked <cstdint>; devkitPro's libSDL2.a pulls SDL_egl.o in through its video
+  code and wanted EGL. Linking switch-mesa's libEGL would bring Mesa's GL stack next to NVK, so
+  switch/src/egl_stubs.c fails every EGL call instead (SDL's video is never initialised; audio
+  only).
+- NRO 98,287,647 bytes, sha256 7a66df38dd8224ca676ec332c4907f58670130feb375812c807326d6b159b5b0.
+  The matching ELF (for crash offsets) is kept with it.
+- Patch set 0001-0022 checked: applied to 51a148c it reproduces the submodule tree exactly.
+
+## 2026-10-29: Switch phase started (patch 0022, switch/)
 
 - Mark: with 0021 the intro plays as real video, a bit slow (0.8x in its profile: DcMemory stores
   about a third, the YUV converter writing word by word, textures re-created each frame).
