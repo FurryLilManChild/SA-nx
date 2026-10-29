@@ -1,0 +1,93 @@
+diff --git a/render/src/texture.cpp b/render/src/texture.cpp
+index 960be92..8cc63c1 100644
+--- a/render/src/texture.cpp
++++ b/render/src/texture.cpp
+@@ -204,7 +204,12 @@ void unpack_palette(const std::uint32_t* palette_ram, PaletteFormat format, std:
+ namespace {
+ 
+ // Where the base level of a mipmapped texture starts. The hardware stores the chain smallest
+-// first, each level a quarter of the next, with a small fixed offset the size of one texel.
++// first, each level a quarter of the next. For the 16-bit formats the 1x1 level sits three texels
++// (6 bytes) in, not one: Sonic Adventure's mipmapped textures match the disc byte for byte at that
++// offset, and read two texels early every 2x2 block of the twiddled image is scrambled, which shows
++// as a speckled sky and blocky shadow blobs. The 4-bit formula below gives the same three-texel
++// rule; VQ uses its own (one index byte per 2x2 block, one byte in). 8-bit palette textures keep
++// the one-byte offset until a capture shows otherwise.
+ u32 mipmap_base_offset(const TextureInfo& info) {
+     if (!info.mipmapped)
+         return 0;
+@@ -219,8 +224,13 @@ u32 mipmap_base_offset(const TextureInfo& info) {
+             texels *= 2;
+         offset += texels;
+     }
+-    // The chain begins after a single texel's worth of padding.
+-    return offset + (info.vq ? 1u : (info.format == PixelFormat::Palette8 ? 1u : 2u));
++    if (info.vq)
++        return offset + 1u;
++    if (info.format == PixelFormat::Palette8)
++        return offset + 1u;
++    if (info.format == PixelFormat::Palette4)
++        return offset + 2u;
++    return offset + 6u;  // 16-bit: three texels of padding before the 1x1 level
+ }
+ 
+ u32 unpack_16(PixelFormat format, u16 p) {
+diff --git a/render/tests/test_texture.cpp b/render/tests/test_texture.cpp
+index 3a1131b..928bd75 100644
+--- a/render/tests/test_texture.cpp
++++ b/render/tests/test_texture.cpp
+@@ -270,3 +270,54 @@ TEST_CASE("texture: the size a texture occupies bounds the cache's invalidation
+     info.format = PixelFormat::Rgb565;
+     CHECK(info.size_bytes() == 256u * 8u + 64u * 64u / 4u);  // codebook plus one index per block
+ }
++
++TEST_CASE("texture: a 16-bit mip chain starts three texels in") {
++    // Layout of a mipmapped 16-bit texture: 6 bytes of padding, then the 1x1, 2x2, 4x4 ... levels,
++    // the base level last. For 8x8 that puts the base at 6 + 2 * (1 + 4 + 16) = 48 bytes. Every
++    // texel of the base level gets its own value, so reading from the wrong offset cannot pass.
++    for (unsigned format : {0u, 1u, 2u}) {  // 1555, 565, 4444
++        auto v = vram();
++        TextureInfo info;
++        REQUIRE(describe_texture(make_tcw(0x100, format, true, false, /*mipmapped=*/true),
++                                 make_tsp(0, 0), 0, info));
++        REQUIRE(info.mipmapped);
++        const u32 base = 0x100 + 48;
++        // Junk in the padding and the smaller levels, so a short offset reads something else.
++        for (u32 i = 0; i < 48; i += 2) put16(v, 0x100 + i, 0x1234u);
++        // Texel (x, y) gets the value 0x0100 * y + 0x10 * x + 1, stored at its twiddled index.
++        for (u32 y = 0; y < 8; ++y)
++            for (u32 x = 0; x < 8; ++x)
++                put16(v, base + 2 * twiddle_index(x, y, 8, 8),
++                      static_cast<std::uint16_t>(0x0100u * y + 0x10u * x + 1u));
++        std::vector<u32> pixels, expect;
++        std::uint32_t palette[1024] = {};
++        REQUIRE(decode_texture(info, v.data(), v.size(), palette, pixels));
++        // The same texels laid out linearly, decoded the same way, are the reference.
++        auto lin = vram();
++        for (u32 y = 0; y < 8; ++y)
++            for (u32 x = 0; x < 8; ++x)
++                put16(lin, 2 * (y * 8 + x), static_cast<std::uint16_t>(0x0100u * y + 0x10u * x + 1u));
++        TextureInfo flat;
++        REQUIRE(describe_texture(make_tcw(0, format, /*twiddled=*/false), make_tsp(0, 0), 0, flat));
++        REQUIRE(decode_texture(flat, lin.data(), lin.size(), palette, expect));
++        REQUIRE(pixels.size() == expect.size());
++        CHECK(pixels == expect);
++    }
++}
++
++TEST_CASE("texture: a VQ mip chain keeps its one-byte offset") {
++    // VQ stores one index byte per 2x2 block after a 2 KB codebook; the chain starts one byte in.
++    // For 16x16 the base level's indices start at 2048 + 1 + (0 + 1 + 4 + 16) = 2070 bytes.
++    auto v = vram();
++    TextureInfo info;
++    REQUIRE(describe_texture(make_tcw(0, 1, true, /*vq=*/true, /*mipmapped=*/true), make_tsp(1, 1),
++                             0, info));
++    // Codebook entry 7 is four texels of 0xF800 (red); every other entry is black.
++    for (u32 i = 0; i < 4; ++i) put16(v, 7 * 8 + 2 * i, 0xF800u);
++    for (u32 i = 0; i < 64; ++i) v[2070 + i] = 7;  // the base level: 8x8 blocks, all entry 7
++    std::vector<u32> pixels;
++    std::uint32_t palette[1024] = {};
++    REQUIRE(decode_texture(info, v.data(), v.size(), palette, pixels));
++    REQUIRE(pixels.size() == 256);
++    for (u32 p : pixels) CHECK(p == 0xFF0000FFu);
++}

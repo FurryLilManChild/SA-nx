@@ -18,6 +18,15 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   bits) to tsp.h, used by both keys, with a unit test from the captured words. Cost: a texture
   used two ways is decoded twice. Expected to fix at least some of the streaked rock walls; not
   yet seen on Mark's PC.
+- Patch 0014: the decoder read every mipmapped 16-bit texture from 2 bytes past the 1x1 level's
+  padding start too early: the chain begins 6 bytes (three texels) in, not 2. Evidence: the sky
+  texture in capture 4 matches BG_BEACH.PRS byte for byte at the 6-byte offset; across 115
+  mipmapped 565 textures in captures 4 and 5, 111 are smoother at 6 than at 2 (mean roughness
+  13.9 vs 8.6); Sonic's 16x16 4444 shadow decodes as a round blob at 6 and a blocky cross at 2.
+  Read 2 texels early, every 2x2 block of a twiddled texture is scrambled: the speckled sky,
+  the blocky shadows, and grainy world textures. Tests: a 16-bit chain in all three formats
+  (fails on the old offset) and a VQ chain (unchanged). 8-bit palette chains left as they were;
+  no capture has one yet.
 - Seeds from the Emerald Coast run (suggested.toml): 19 targets. Eight of them are the tails of a
   trig lookup at 0x0C085990 that ends in `braf r1` through a halfword table at 0x0C085A38; all
   eight table targets are now seeds. They total about 3,400 calls in 138 guest s, so they are
