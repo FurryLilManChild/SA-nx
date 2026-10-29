@@ -1,0 +1,21 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index f741182..75c92ad 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -567,7 +567,15 @@ struct Live {
+     // picture nobody else can see.
+     void capture() {
+         char stem[64];
+-        std::snprintf(stem, sizeof stem, "capture-%03u", captures++);
++        // Numbering continues past captures an earlier run left in the folder, so a second play
++        // session does not overwrite the first one's.
++        for (;;) {
++            std::snprintf(stem, sizeof stem, "capture-%03u", captures++);
++            FILE* existing = std::fopen((std::string(stem) + ".ppm").c_str(), "rb");
++            if (!existing)
++                break;
++            std::fclose(existing);
++        }
+         screenshot_to(std::string(stem) + ".ppm");
+         if (!last_stream.empty()) {
+             if (FILE* f = std::fopen((std::string(stem) + ".ta").c_str(), "wb")) {

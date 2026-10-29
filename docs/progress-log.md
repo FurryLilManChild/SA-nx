@@ -2,6 +2,16 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: graphics pass 1 confirmed on Mark's PC; captures stop overwriting (0015)
+
+- Play run with 0013 and 0014 (87 guest s, 0.6x real time): Mark reports big improvements. His
+  six F11 shots show a clean sky, textured grass, rock walls without streaks, round shadows and
+  clean sand and water. One remaining oddity under the rock arch is the game's lens flare drawn
+  over the rock (translucent list, VQ 1555 flare textures), likely correct; not checked against
+  hardware.
+- F11 numbering restarted at 000 each run and overwrote the earlier captures. Patch 0015 skips
+  numbers whose .ppm already exists.
+
 ## 2026-10-29: graphics pass 1 (patch 0013, one sampler per texture); Emerald Coast seeds
 
 - Mark's F11 captures worked: 7 captures of Emerald Coast (capture-NNN.{ppm,ta,vram,regs,txt}).
