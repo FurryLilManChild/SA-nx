@@ -2,6 +2,21 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: sound: 32-bit key-on writes (patch 0019)
+
+- Mark: patch 0018 "perfect"; the Station Square glows in the Adventure intro look right.
+- Last play report: the AICA's ARM7 ran 165,695,113 instructions and wrote 20,554 channel
+  registers, but 0 key-ons and 0 of 2,540,771 samples non-zero. SH-4 wrote 9 AICA registers.
+- Cause: AICA registers are 16 bits on a 32-bit stride. Aica::reg_write passed the access size
+  through to the mixer, whose key-on check (KYONEX, bit 15 of channel +0x00) fired only for
+  16-bit writes or byte writes of +0x01. The driver on the disc (SONICAD/MASARU.DRV,
+  disassembled with arm-none-eabi-objdump) keys voices with 32-bit stores: at 0x11F0
+  `orreq r0, r0, #0xC000` then `str r0, [r8]` (key on), and at 0x17BC/0x180C
+  `orr r1, r1, #0x8000` then `str r1, [r8]` (key off), r8 = 0x00800000 + channel * 0x80.
+- Fix: a 32-bit channel register write reaches the mixer as a 16-bit write of that register.
+  Test: key-on and key-off by 32-bit writes from the SH-4 side and the ARM side (fails without
+  the fix, 8 of 8 assertions).
+
 ## 2026-10-29: per-pixel translucency (patch 0018): Sonic's eyes
 
 - Captures 12 and 13 (end of Emerald Coast, character select): Sonic's irises partly or wholly

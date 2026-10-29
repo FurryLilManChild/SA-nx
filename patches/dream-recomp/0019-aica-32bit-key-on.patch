@@ -1,0 +1,49 @@
+diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
+index 5af4efc..c8d4401 100644
+--- a/runtime/src/aica/aica.cpp
++++ b/runtime/src/aica/aica.cpp
+@@ -58,7 +58,12 @@ void Aica::reg_write(std::uint32_t offset, std::uint32_t value, unsigned size) {
+     if (offset < 0x2000u) {  // 64 channels x 0x80 bytes
+         ++channel_writes;
+         store(offset, value, size);
+-        mixer.channel_reg_written(offset >> 7, offset & 0x7Fu, size);
++        // SA-nx: AICA registers are 16 bits wide on a 32-bit stride, so a 32-bit write is a
++        // write of the whole 16-bit register (the upper half is padding). Sound drivers on the
++        // ARM write them that way; the mixer only acted on a key-on (KYONEX, bit 15 of +0x00)
++        // for 16-bit writes and byte writes of +0x01, so Sonic Adventure's driver set up 20,554
++        // channel registers and never started a voice.
++        mixer.channel_reg_written(offset >> 7, offset & 0x7Fu, size == 4 ? 2u : size);
+         return;
+     }
+     if (offset >= 0x3000u) {  // DSP coefficients, programme and data
+diff --git a/runtime/tests/test_mixer.cpp b/runtime/tests/test_mixer.cpp
+index d269d4f..e0fa5d3 100644
+--- a/runtime/tests/test_mixer.cpp
++++ b/runtime/tests/test_mixer.cpp
+@@ -120,3 +120,26 @@ TEST_CASE("mixer: identical inputs give identical output") {
+         REQUIRE(a.aica.last_left == b.aica.last_left);
+     }
+ }
++
++TEST_CASE("mixer: a 32-bit register write keys a channel on, from either CPU") {
++    // SA-nx: the registers are 16 bits on a 32-bit stride and drivers write whole words.
++    for (bool from_arm : {false, true}) {
++        Rig r;
++        r.square_wave(0x1000, 64, 8000);
++        r.program_channel(0x1000, 64);
++        const std::uint32_t on = r.ctrl | (1u << 14) | (1u << 15);
++        if (from_arm)
++            r.aica.arm_reg_write(0x00, on, 4);
++        else
++            r.w(0x00, on, 4);
++        CHECK(r.aica.mixer.key_ons == 1);
++        CHECK(r.aica.mixer.active_channels() == 1);
++        for (int i = 0; i < 2000; ++i) r.aica.sample_tick();
++        CHECK(r.aica.mixer.nonzero_samples > 1000);
++        if (from_arm)
++            r.aica.arm_reg_write(0x00, r.ctrl | (1u << 15), 4);
++        else
++            r.w(0x00, r.ctrl | (1u << 15), 4);
++        CHECK(r.aica.mixer.key_offs == 1);
++    }
++}
