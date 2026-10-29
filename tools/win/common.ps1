@@ -73,6 +73,7 @@ function Apply-Patches {
     $ErrorActionPreference = 'Continue'  # git writes progress and notes to stderr
     Write-Host 'Applying dream-recomp patches ...'
     & git -C $sub checkout -- . 2>&1 | Out-Null
+    & git -C $sub clean -fdq 2>&1 | Out-Null  # files a patch adds must not exist when it applies
     foreach ($p in $patches) {
         $msg = & git -C $sub apply --whitespace=nowarn $p.FullName 2>&1
         if ($LASTEXITCODE -ne 0) {

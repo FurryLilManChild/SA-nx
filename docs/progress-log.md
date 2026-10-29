@@ -2,6 +2,31 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: the stall after translating MOVIE.BIN was a false non-local return (patch 0007)
+
+- With MOVIE.BIN translated, every headless run stopped asking for disc data at exactly 761
+  sectors. `DREAM_INTERP_RANGE` over the whole file: 5,644 sectors, so the cause was in its
+  translations. Quarters, eighths, then `DREAM_INTERP_FUNCS` halving (tools in the scratch build)
+  gave three functions, any one of which unstalls the run when interpreted: 0x0CECF91C (times a
+  movie step with the timer at 0x8C60254E), 0x0CED38C4 and 0x0CEDA59E, all on one call path.
+- RAM equals the file at the stall (63 words differ, all data), so not stale code.
+  `DREAM_TRACE_NONLOCAL` showed about 147,000 cycles of: "nonlocal: rts from 0x0CED1206 to
+  0x0CED0F52", then a resume of every frame of the chain, one at a time.
+- Cause: discovery keeps shared epilogues as functions of their own (0x0CED1206..0x0CED1210 and
+  0x0CED12D0..0x0CED12DA here). A `bra` into one is emitted as a direct tail call, and the
+  callee took `entry_pr = c.pr`, which still held the last `jsr`'s return address. The epilogue
+  restores the real PR and returns correctly, but the check called it non-local, threw, and
+  run_guest rebuilt the chain. Results stay right (which is why the golden tests, run through
+  run_guest, never caught it), but the movie player's task never got anywhere.
+- Patch 0007: direct tail jumps (bra, bt/bf, bt/s, bf/s and falling into the next function) hand
+  over the jumping function's entry PR through a thread-local that the next prologue takes
+  (`take_entry_pr`). Differential test: tests/sh4/programs/p13_tailpr (hand-encoded, checked
+  with `dream-translate disasm`), called directly so a throw fails it.
+- `Apply-Patches` now also runs `git clean` in the submodule, since 0007 adds files.
+- Seeds: 0x0C6446D4 (147,793 untranslated calls), 0x0C6446DA, 0x0C65C148.
+- Pushed for a PC build before the headless rebuild here finished; the 761-sector stall is not
+  yet confirmed gone.
+
 ## 2026-10-28: headless runs here; the movie player kept everything interpreted
 
 - Built a headless replay build in the cloud (patch 0006: the launcher builds without the
