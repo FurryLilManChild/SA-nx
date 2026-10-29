@@ -1,0 +1,108 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 033f141..f741182 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -1160,6 +1160,10 @@ private:
+ }  // namespace
+ 
+ int main(int argc, char** argv) {
++    // SA-nx: trace runs write hundreds of thousands of lines to stderr, which is unbuffered and very
++    // slow line by line on Windows. Buffer it; the stdio buffers are flushed when main returns.
++    if (std::getenv("DREAM_TRACE_RETURNS") || std::getenv("DREAM_TRACE_NONLOCAL"))
++        std::setvbuf(stderr, nullptr, _IOFBF, 1 << 20);
+     std::string config, report, sample_file, dump;
+     bool stop_on_ta = false;
+     // No limit unless one is asked for. A run that stops on its own after a number of frames
+diff --git a/runtime/include/dream/runtime/sh4/abi.h b/runtime/include/dream/runtime/sh4/abi.h
+index 02897e6..a925089 100644
+--- a/runtime/include/dream/runtime/sh4/abi.h
++++ b/runtime/include/dream/runtime/sh4/abi.h
+@@ -133,6 +133,9 @@ Hooks* hooks() noexcept;
+ // Optional trace hook, emitted under DREAM_TRACE at every function return; the harness uses it
+ // to compare against the interpreter.
+ void trace_return(Ctx& c, ::dream::Memory& m, std::uint32_t fn_address);
++// SA-nx: emitted under --trace at every function entry, plain or resumed (resume_pc != 0).
++void trace_entry(Ctx& c, ::dream::Memory& m, std::uint32_t fn, std::uint32_t entry_pr,
++                 std::uint32_t resume_pc);
+ 
+ // Brackets one guest function call so it can be compared against the interpreter
+ // (devinterp/replay.h). Emitted around the plain entry point under --replay-hooks, never around the
+diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
+index 47f688b..d19b486 100644
+--- a/runtime/src/sh4/abi_bare.cpp
++++ b/runtime/src/sh4/abi_bare.cpp
+@@ -399,16 +399,20 @@ void unimplemented(Ctx& c, std::uint32_t raw, std::uint32_t pc) {
+ // state, from translated code built with --trace and from the dev interpreter alike, so the two
+ // runs of a title can be diffed to the first divergent return (docs/runtime-devinterp.md).
+ // SA-nx: DREAM_TRACE_RETURNS_FROM / _TO=CYCLES limit the trace to a window of guest cycles, so a
+-// trace of the moments before a fault stays small; each line then ends with the cycle count and is
+-// flushed at once, so a run that faults keeps everything it wrote. DREAM_TRACE_RETURNS=- writes to
+-// stderr, interleaved in order with DREAM_TRACE_NONLOCAL's interrupt, resume and switch lines.
+-void trace_return(Ctx& c, ::dream::Memory&, std::uint32_t rts_pc) {
++// trace of the moments before a fault stays small; each line then ends with the cycle count.
++// DREAM_TRACE_RETURNS=- writes to stderr, in order with DREAM_TRACE_NONLOCAL's interrupt, resume
++// and switch lines (the launcher buffers stderr when tracing). Entries are logged too (trace_entry).
++namespace {
++FILE* trace_out() {
+     static FILE* out = [] {
+         const char* path = std::getenv("DREAM_TRACE_RETURNS");
+         if (path && path[0] == '-' && path[1] == 0)
+             return stderr;
+         return path ? std::fopen(path, "w") : nullptr;
+     }();
++    return out;
++}
++bool trace_window(const Ctx& c) {
+     static const std::uint64_t from = [] {
+         const char* v = std::getenv("DREAM_TRACE_RETURNS_FROM");
+         return v ? std::strtoull(v, nullptr, 0) : 0ull;
+@@ -417,16 +421,27 @@ void trace_return(Ctx& c, ::dream::Memory&, std::uint32_t rts_pc) {
+         const char* v = std::getenv("DREAM_TRACE_RETURNS_TO");
+         return v ? std::strtoull(v, nullptr, 0) : ~0ull;
+     }();
+-    if (!out || c.cycles < from || c.cycles > to)
++    return c.cycles >= from && c.cycles <= to;
++}
++}  // namespace
++
++void trace_return(Ctx& c, ::dream::Memory&, std::uint32_t rts_pc) {
++    FILE* out = trace_out();
++    if (!out || !trace_window(c))
+         return;
+     std::fprintf(out, "ret %08x", rts_pc);
+     for (int i = 0; i < 16; ++i) std::fprintf(out, " %08x", c.r[i]);
+-    std::fprintf(out, " %08x %08x", c.pr, read_sr(c));
+-    if (from)
+-        std::fprintf(out, " c%llu", static_cast<unsigned long long>(c.cycles));
+-    std::fprintf(out, "\n");
+-    if (from)
+-        std::fflush(out);
++    std::fprintf(out, " %08x %08x c%llu\n", c.pr, read_sr(c),
++                 static_cast<unsigned long long>(c.cycles));
++}
++
++void trace_entry(Ctx& c, ::dream::Memory&, std::uint32_t fn, std::uint32_t entry_pr,
++                 std::uint32_t resume_pc) {
++    FILE* out = trace_out();
++    if (!out || !trace_window(c))
++        return;
++    std::fprintf(out, "ent %08x pr %08x epr %08x res %08x r15 %08x c%llu\n", fn, c.pr, entry_pr,
++                 resume_pc, c.r[15], static_cast<unsigned long long>(c.cycles));
+ }
+ 
+ }  // namespace dream::sh4
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index dce45c3..be1273d 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -254,6 +254,10 @@ public:
+             << hexu(spec_.entry) << ");\n";
+         // Poll points record the exact guest pc first: an interrupt handler that switches tasks
+         // returns through RTE to SPC, and run_guest re-enters this function there.
++        // SA-nx --trace: every entry (plain or resume) is logged with the PR the caller left and
++        // the entry PR this body will compare its rts against.
++        if (opt_.trace)
++            out << "    trace_entry(c, m, " << hexu(spec_.entry) << ", entry_pr, resume_pc);\n";
+         // A resumed body polls at its resume address, not the entry: an interrupt that switches
+         // tasks here is later re-entered at c.pc, and re-entering at the entry would run the
+         // prologue a second time on a frame that is already built (SA-nx, Sonic Adventure's

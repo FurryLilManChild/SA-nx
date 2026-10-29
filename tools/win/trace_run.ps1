@@ -1,9 +1,9 @@
 # Diagnostic: runs the trace build (build_pc.ps1 -Trace) without a window, with the same scripted
 # Start presses Claude uses, and logs every guest function return between guest cycles $From and
-# $To, interleaved with the runtime's interrupt, resume and task-switch lines, into one log.
+# $To (entries and returns), interleaved with the runtime's interrupt, resume and task-switch lines, into one log.
 #   powershell -ExecutionPolicy Bypass -File tools\win\trace_run.ps1 [-Modes T,I] [-From N] [-To N]
 # T = translated (default), I = fully interpreted (slow). Writes out\logs\trace-T.log / trace-I.log.
-param([string[]]$Modes = @('T'), [long]$From = 7043000000, [long]$To = 7045000000, [int]$Seconds = 40)
+param([string[]]$Modes = @('T'), [long]$From = 7040000000, [long]$To = 7044600000, [int]$Seconds = 40)
 . "$PSScriptRoot\common.ps1"
 Use-TraceBuild
 if (-not (Test-Path $GameExe)) { throw 'No trace build yet. Run tools\win\build_pc.ps1 -Trace first.' }
