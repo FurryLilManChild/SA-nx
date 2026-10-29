@@ -1,27 +1,32 @@
 diff --git a/runtime/include/dream/runtime/sh4/abi.h b/runtime/include/dream/runtime/sh4/abi.h
-index 0837731..38a8d6b 100644
+index 0837731..02897e6 100644
 --- a/runtime/include/dream/runtime/sh4/abi.h
 +++ b/runtime/include/dream/runtime/sh4/abi.h
-@@ -62,6 +62,25 @@ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target);
+@@ -62,6 +62,30 @@ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target);
  // run_guest runs the program from `entry` until control returns to the PR it was started with,
  // re-entering translated code through resume_at after every non-local return.
  [[noreturn]] void nonlocal_return(Ctx& c, ::dream::Memory& m, std::uint32_t pc);
 +
-+// SA-nx: a direct tail jump (bra, bt/bf or a fall-through into another function: discovery keeps
-+// shared epilogues as functions of their own) leaves PR at whatever the last call set, not at the
-+// address the jumping function must return to. The callee would take that stale PR as its entry
-+// PR and treat its own correct `rts` as a non-local return. Emitted code hands the jumping
-+// function's entry PR over immediately before such a call, and every prologue takes it.
++// SA-nx: a tail jump (bra, bt/bf, a fall-through into another function, or a computed jmp/braf;
++// discovery keeps shared epilogues as functions of their own) leaves PR at whatever the last call
++// set, not at the address the jumping function must return to. The callee would take that stale
++// PR as its entry PR and treat its own correct `rts` as a non-local return. Emitted code hands the
++// jumping function's entry PR over, with the target, immediately before the jump; a prologue takes
++// it only when the target is its own entry, so a handoff that lands in a runtime hook or the
++// interpreter cannot leak into a later, unrelated prologue. Taking always clears it.
 +inline thread_local bool g_tail_entry_set = false;
 +inline thread_local std::uint32_t g_tail_entry_pr = 0;
-+inline void set_tail_entry_pr(std::uint32_t pr) noexcept {
++inline thread_local std::uint32_t g_tail_entry_target = 0;
++inline void set_tail_entry_pr(std::uint32_t pr, std::uint32_t target) noexcept {
 +    g_tail_entry_pr = pr;
++    g_tail_entry_target = target & 0x1FFFFFFFu;
 +    g_tail_entry_set = true;
 +}
-+inline std::uint32_t take_entry_pr(const Ctx& c) noexcept {
++inline std::uint32_t take_entry_pr(const Ctx& c, std::uint32_t self) noexcept {
 +    if (g_tail_entry_set) {
 +        g_tail_entry_set = false;
-+        return g_tail_entry_pr;
++        if (g_tail_entry_target == (self & 0x1FFFFFFFu))
++            return g_tail_entry_pr;
 +    }
 +    return c.pr;
 +}
@@ -30,30 +35,32 @@ index 0837731..38a8d6b 100644
  void run_guest(Ctx& c, ::dream::Memory& m, std::uint32_t entry);
 diff --git a/tests/sh4/programs/p13_tailpr.bin b/tests/sh4/programs/p13_tailpr.bin
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c1a0fb60d22cd765b83c91996e914073f61f64a
+index 0000000000000000000000000000000000000000..d2c54bfc474c8688f348a7545ce69b0cd17a9174
 GIT binary patch
-literal 20
-bcmY%LXWGEYz_fsqft!J`P|cs4fvFGxBtip7
+literal 36
+rcmY%LXWGEYz_fsqft!J`P|cs4fvHf*|Hpn#2F6R;PMi#U3@kkWg2o46
 
 literal 0
 HcmV?d00001
 
 diff --git a/tests/sh4/programs/p13_tailpr.s b/tests/sh4/programs/p13_tailpr.s
 new file mode 100644
-index 0000000..c7bbacd
+index 0000000..f55c22b
 --- /dev/null
 +++ b/tests/sh4/programs/p13_tailpr.s
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,35 @@
 +! A function that saves PR, calls, then jumps (bra) into a shared epilogue that discovery keeps as
 +! a function of its own. At the jump PR still holds the inner call's return address; the epilogue
 +! restores the caller's PR and returns there. That `rts` is an ordinary return, not a non-local
 +! one: Sonic Adventure's movie player does this on every frame, and treating it as non-local threw
 +! and resumed the whole call chain each time. r1 counts: inner adds 1, the epilogue adds 2.
-+! Hand-encoded (p13_tailpr.bin, 20 bytes), checked with `dream-translate disasm`.
++! _main2 does the same through a computed jump (jmp @r2), which goes through call_indirect.
++! Hand-encoded (p13_tailpr.bin, 36 bytes), checked with `dream-translate disasm`.
 +	.text
 +	.global _main
 +	.global _inner
 +	.global _tail
++	.global _main2
 +_main:
 +	sts.l	pr,@-r15
 +	bsr	_inner
@@ -67,8 +74,18 @@ index 0000000..c7bbacd
 +	lds.l	@r15+,pr
 +	rts
 +	add	#2,r1
++_main2:
++	sts.l	pr,@-r15
++	bsr	_inner
++	nop
++	mov.l	.Ltail,r2
++	jmp	@r2
++	nop
++	.align 2
++.Ltail:
++	.long	_tail
 diff --git a/tests/sh4/programs/programs.cmake b/tests/sh4/programs/programs.cmake
-index 84b2240..5cb280f 100644
+index 84b2240..137cb81 100644
 --- a/tests/sh4/programs/programs.cmake
 +++ b/tests/sh4/programs/programs.cmake
 @@ -16,6 +16,8 @@ set(DREAM_SH4_PROGRAMS
@@ -76,12 +93,12 @@ index 84b2240..5cb280f 100644
    "p11_condfall|p11_condfall.bin|0x8c010000|0x8c010000:0x8c010006:loop 0x8c010006:0x8c01000c:done"
    "p12_selfcmp|p12_selfcmp.bin|0x8c010000|0x8c010000:0x8c01005c:selfcmp"
 +  # Own base: position independent, kept out of the shared function table like p10.
-+  "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail"
++  "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail 0x8c040014:0x8c040020:tailpr_main2"
    # GCC-compiled C unit (tests/sh4/cprogs, `make specs` prints this line)
    "c1_idioms|../cprogs/c1_idioms.bin|0x8c010000|0x8c010000:0x8c010024:div_mod 0x8c010028:0x8c010072:udiv_mix 0x8c010080:0x8c0100e4:dense_switch 0x8c0100e8:0x8c010100:mul64 0x8c010100:0x8c010132:sub64 0x8c010134:0x8c010178:pack_bytes 0x8c010180:0x8c0101d6:vec_transform 0x8c0101d8:0x8c010222:sort_words 0x8c010224:0x8c010246:dot3 0x8c010248:0x8c01026a:clamp_scale 0x8c010270:0x8c01027c:float_to_fixed 0x8c010280:0x8c010526:fib 0x8c01052c:0x8c010552:str_len 0x8c010554:0x8c010574:mem_copy 0x8c010578:0x8c0106b8:udivsi3_i4i 0x8c01059e:0x8c0105d4:udivsi3_i4i_059e 0x8c0105cc:0x8c0105d4:udivsi3_i4i_05cc 0x8c0105d4:0x8c010648:udivsi3_i4i_05d4 0x8c010648:0x8c010796:sdivsi3_i4i 0x8c010674:0x8c0106b8:sdivsi3_i4i_0674 0x8c01069a:0x8c0106b8:sdivsi3_i4i_069a"
  )
 diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
-index 548e9fd..99c3be6 100644
+index 548e9fd..199d91f 100644
 --- a/tests/sh4/test_programs.cpp
 +++ b/tests/sh4/test_programs.cpp
 @@ -6,6 +6,7 @@
@@ -92,7 +109,7 @@ index 548e9fd..99c3be6 100644
  #include "dream/runtime/sh4/ctx.h"
  #include "dream/runtime/sh4/ops.h"
  
-@@ -112,6 +113,26 @@ TEST_CASE("p12_selfcmp: a register compared with itself gives the hardware's con
+@@ -112,6 +113,35 @@ TEST_CASE("p12_selfcmp: a register compared with itself gives the hardware's con
      CHECK(m.read8(buf + 9) == 0u);  // cmp/gt
  }
  
@@ -114,26 +131,36 @@ index 548e9fd..99c3be6 100644
 +    CHECK(c.r[15] == sp);
 +    // Nothing is left for the next prologue to take.
 +    CHECK_FALSE(dream::sh4::g_tail_entry_set);
++    // The same through a computed jump: jmp @r2 goes through call_indirect.
++    Ctx c2 = fresh();
++    c2.pr = 0x8C00FFF0;
++    c2.r[1] = 10;
++    CHECK_NOTHROW(dream::gen::tailpr_main2(c2, m));
++    CHECK(c2.r[1] == 13u);
++    CHECK(c2.pr == 0x8C00FFF0u);
++    CHECK(c2.r[15] == sp);
++    CHECK_FALSE(dream::sh4::g_tail_entry_set);
 +}
 +
  TEST_CASE("p4_calls: bsr/jsr/rts, delay-slot hazards, bra with slot") {
      dream::BareMemory m;
      load_image(m, "p4_calls.bin", 0x8C010000);
 diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
-index 97db228..dc0b363 100644
+index 97db228..d821679 100644
 --- a/translator/src/emit/emit.cpp
 +++ b/translator/src/emit/emit.cpp
-@@ -249,7 +249,8 @@ public:
+@@ -249,7 +249,9 @@ public:
          // Split units reference each other's resume entries from the one registration table.
          out << (opt_.parts > 1 ? "void " : "static void ") << name
              << "__resume(Ctx& c, Memory& m, std::uint32_t resume_pc) {\n";
 -        out << "    [[maybe_unused]] const std::uint32_t entry_pr = c.pr;\n";
 +        // A direct tail jump hands over the jumping function's entry PR (abi.h, take_entry_pr).
-+        out << "    [[maybe_unused]] const std::uint32_t entry_pr = take_entry_pr(c);\n";
++        out << "    [[maybe_unused]] const std::uint32_t entry_pr = take_entry_pr(c, "
++            << hexu(spec_.entry) << ");\n";
          // Poll points record the exact guest pc first: an interrupt handler that switches tasks
          // returns through RTE to SPC, and run_guest re-enters this function there.
          if (opt_.irq_checks)
-@@ -285,7 +286,7 @@ public:
+@@ -285,7 +287,7 @@ public:
                          // landing one instruction into a prologue, or shared code): control
                          // continues in that function, so tail-call it.
                          out << "    // falls through into the function at " << hex(stop) << "\n";
@@ -142,23 +169,24 @@ index 97db228..dc0b363 100644
                      } else {
                          // Control continues at `stop`, which no function of this unit starts at:
                          // hand it to the runtime (the miss handler interprets it in dev builds
-@@ -868,6 +869,15 @@ private:
+@@ -868,6 +870,16 @@ private:
          return "call_indirect(c, m, " + hexu(target) + ");";
      }
  
 +    // A jump (not a call) into another function of this unit. PR still holds whatever the last
-+    // call set, so the callee is told the entry PR it must return to: ours. Only for direct
-+    // targets, whose prologue is the next thing to run and takes the value.
++    // call set, so the callee is told the entry PR it must return to: ours. Computed jumps do the
++    // same through call_indirect (emit_delayed, JMP/BRAF); the target check in take_entry_pr makes
++    // a handoff that lands anywhere else harmless.
 +    std::string tail_call_expr(std::uint32_t target) const {
 +        if (known_.count(normalise(target)))
-+            return "set_tail_entry_pr(entry_pr); " + call_target_expr(target);
++            return "set_tail_entry_pr(entry_pr, " + hexu(target) + "); " + call_target_expr(target);
 +        return call_target_expr(target);
 +    }
 +
      std::string irq_check_if_backedge(std::uint32_t target, std::uint32_t pc) const {
          // Braced: GCC's -Wmisleading-indentation rejects `if (x) f(); goto L;` on one line.
          return (opt_.irq_checks && target <= pc)
-@@ -896,7 +906,7 @@ private:
+@@ -896,7 +908,7 @@ private:
                  out << "    if (" << cond << ") { c.cycles += 1; " << irq_check_if_backedge(t, pc)
                      << "goto " << label(t) << "; }\n";
              } else {
@@ -167,7 +195,7 @@ index 97db228..dc0b363 100644
                      << " return; }\n";
              }
              return pc + 2;
-@@ -934,7 +944,7 @@ private:
+@@ -934,7 +946,7 @@ private:
                      out << "        if (taken) { " << irq_check_if_backedge(t, pc) << "goto "
                          << label(t) << "; }\n";
                  } else {
@@ -176,12 +204,31 @@ index 97db228..dc0b363 100644
                  }
                  break;
              }
-@@ -945,7 +955,7 @@ private:
+@@ -945,7 +957,7 @@ private:
                      out << "        " << irq_check_if_backedge(t, pc) << "goto " << label(t)
                          << ";\n";
                  } else {
 -                    out << "        " << call_target_expr(t) << " return;\n";
 +                    out << "        " << tail_call_expr(t) << " return;\n";
+                 }
+                 break;
+             }
+@@ -1002,14 +1014,16 @@ private:
+                             << irq_check_if_backedge(t, pc) << "goto " << label(t) << ";\n";
+                     }
+                     out << "            default: c.pc = " << hexu(pc)
+-                        << "; call_indirect(c, m, target); return;\n";
++                        << "; set_tail_entry_pr(entry_pr, target); call_indirect(c, m, target); "
++                           "return;\n";
+                     out << "        }\n";
+                 } else {
+                     if (ins.op == Op::BRAF)
+                         note(pc, ins,
+                              "computed jump with no recovered table: emitted as tail call");
+                     out << "        c.pc = " << hexu(pc)
+-                        << "; call_indirect(c, m, target); return;\n";
++                        << "; set_tail_entry_pr(entry_pr, target); call_indirect(c, m, target); "
++                           "return;\n";
                  }
                  break;
              }

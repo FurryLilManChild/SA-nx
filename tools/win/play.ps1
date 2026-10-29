@@ -9,6 +9,9 @@ Start-Log 'play.log' 'play' | Out-Null
 $a = @('--config', $GameToml, '--window',
        '--report', (Join-Path $LogDir 'play-report.txt'),
        '--suggest-config', (Join-Path $LogDir 'suggested.toml'))
+# Sonic Adventure's renderer runs on CPU register bank 1 (SR.RB = 1); starting on bank 0 made
+# it lose model pointers (black Station Square, wrong character-select models).
+$a += @('--boot-sr', '0x600000F1')
 if (-not $KeepIntro) { $a += @('--hide-file', 'SA1_600.SFD') }
 $rc = Invoke-Logged $GameExe $a 'play' '^frame'
 Write-Host "Game closed (exit $rc). Logs are in out\logs."

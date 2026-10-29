@@ -1,0 +1,84 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 8e6e529..033f141 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -1086,6 +1086,7 @@ void usage(const char* argv0, std::FILE* out) {
+         "Reproducing a run:\n"
+         "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
+         "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
++        "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
+         "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
+         "                         up down left right), to get past screens that wait for input\n"
+         "\n"
+@@ -1206,6 +1207,7 @@ int main(int argc, char** argv) {
+     // down left right.
+     std::string presses;
+     std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
++    std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
+     // --window: open a window and play. Without it the run is headless exactly as before.
+     // --scale N draws the geometry at N times the guest's resolution; the frame is resampled back
+     // into the guest's framebuffer, so the guest never learns its screen changed size.
+@@ -1305,6 +1307,8 @@ int main(int argc, char** argv) {
+             dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
+         else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
+             presses = argv[++i];
++        else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
++            boot_sr = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+         else if (!std::strcmp(argv[i], "--hide-file") && i + 1 < argc) {
+             std::string rest = argv[++i];
+             while (!rest.empty()) {
+@@ -1433,6 +1437,7 @@ int main(int argc, char** argv) {
+     const auto region = dream::hle::region_from_name(cfg.region);
+     bios.set_locale(dream::hle::Language::English, region, dream::hle::broadcast_for(region));
+     sys.install();
++    bios.set_boot_sr(boot_sr);
+     bios.setup_boot(cfg.entry);
+     const std::vector<std::uint8_t> ipbin(sys.memory.ram() + 0x8000, sys.memory.ram() + 0x10000);
+     std::memcpy(sys.memory.ram() + (cfg.load_address & (dream::mem::DcMemory::kRamSize - 1)),
+diff --git a/runtime/include/dream/runtime/hle/bios.h b/runtime/include/dream/runtime/hle/bios.h
+index 54cda8e..1649ba1 100644
+--- a/runtime/include/dream/runtime/hle/bios.h
++++ b/runtime/include/dream/runtime/hle/bios.h
+@@ -49,6 +49,11 @@ public:
+         broadcast_ = broadcast;
+     }
+ 
++    // SA-nx: the SR the game starts with (default 0x400000F1, as Flycast's reios leaves it). Sonic
++    // Adventure's renderer assumes register bank 1 (RB = 1) throughout; SARecomp's captured state
++    // in its main loop has SR = 0x60000001. Call before setup_boot().
++    void set_boot_sr(std::uint32_t sr) noexcept { boot_sr_ = sr; }
++
+     // Formats the flash (if unformatted) and writes the vector table and handlers.
+     void install();
+     // Registers and memory as after the real BIOS handed over to 1ST_READ.BIN at boot_addr; loads
+@@ -69,6 +74,7 @@ public:
+     Flash& flash() noexcept { return flash_; }
+ 
+ private:
++    std::uint32_t boot_sr_ = 0x400000F1u;
+     Language lang_ = Language::English;
+     Region region_ = Region::Usa;
+     Broadcast broadcast_ = Broadcast::Ntsc;
+diff --git a/runtime/src/hle/bios.cpp b/runtime/src/hle/bios.cpp
+index 55df238..7bf93bc 100644
+--- a/runtime/src/hle/bios.cpp
++++ b/runtime/src/hle/bios.cpp
+@@ -126,6 +126,9 @@ void Bios::setup_boot(std::uint32_t boot_addr) {
+     install();
+     sh4::Ctx fresh{};
+     c = fresh;
++    // SR first (set_boot_sr), so the registers below land in the bank it selects.
++    const std::uint32_t boot_sr = boot_sr_;
++    sh4::write_sr(c, boot_sr);
+     c.r[0] = 0xAC0005D8;
+     c.r[1] = 0x00000009;
+     c.r[2] = 0xAC00940C;
+@@ -149,7 +152,7 @@ void Bios::setup_boot(std::uint32_t boot_addr) {
+     c.sgr = 0x8D000000;
+     c.pr = 0xAC00043C;
+     c.pc = boot_addr;
+-    sh4::write_sr(c, 0x400000F1);  // MD, IMASK 15, T
++    sh4::write_sr(c, boot_sr);  // default MD, IMASK 15, T
+     sh4::write_fpscr(c, 0x00040001);
+     c.next_event = 0;
+     // SYSINFO_INIT's block, so games that skip the call still find the id.

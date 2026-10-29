@@ -2,6 +2,34 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
+
+- Boot 5 on Mark's PC (patch 0007): same as before the break on screen, black after the Station
+  Square title card; 0.6x in the window (was 0.3x), stop pc 0x0C037CFA, 130M unmapped reads. The
+  0007 freeze only existed in the headless runs with MOVIE.BIN translated.
+- Ruled out in turn: model data (ADV00 in RAM equals the file apart from 54 material words the game
+  updates), the drawing code's translation (same fault with 0x0C030000-0x0C040000 interpreted, and
+  with `--interpret`: identical frame 2132 and registers), interrupts and thread switches
+  (`DREAM_TRACE_BANKS`, a local diagnostic: both banks survive every interrupt and switch intact).
+- A local watchpoint in the interpreter (`DREAM_WATCH=pc:reg:below`, a ring of the last 4096
+  instructions) at the mesh loop's `add #24,r2` (0x0C037858) caught it: the loop at 0x0C0376D0
+  holds the meshset pointer in r2 on bank 0 (SR 0x40000000); the helper at 0x0C037EE0 clears RB on
+  entry and its exit at 0x0C03828C sets RB, so on return the loop reads bank 1's r2 (0), adds 24 and
+  draws "meshset" 0x18, whose garbage strips walk into unmapped 0x0040xxxx. All six helpers that
+  build the RB mask (0x0C037EE4, 7FCE, 827C, 851A, 863A, 8804, 88BE, 8B14) clear on entry and set on
+  exit: the renderer assumes RB = 1. SARecomp's captured main-loop state
+  (src/postpal_bootstrap_state.hpp) has SR = 0x60000001. Our boot (bios.cpp, after Flycast's reios)
+  starts 1ST_READ at SR 0x400000F1, and nothing in the game sets RB.
+- Starting at SR 0x600000F1, fully interpreted: 45 guest s, 0 unmapped reads, 5,920 sectors,
+  407 opaque polygons in the last frame (64 before). Patch 0008 adds `--boot-sr VALUE`;
+  boot_test.ps1 and play.ps1 pass 0x600000F1.
+- Translated, with the bank fix: a fault at 35.4 s, a return to 0xFFFFFFFF. RAM at 35.0 s matches
+  the interpreted run except PR values (translated code writes the 0x0C link-space form) and timer
+  counters. The chain started at a false non-local return from `jmp @r3` at 0x0C0A9842: computed
+  tail jumps went through call_indirect without the 0007 handoff. 0007 now covers them too, and the
+  handoff carries its target so a prologue only takes one meant for itself (a handoff landing in a
+  runtime hook or the interpreter is dropped). p13_tailpr gained a `jmp @r2` case.
+
 ## 2026-10-28: the stall after translating MOVIE.BIN was a false non-local return (patch 0007)
 
 - With MOVIE.BIN translated, every headless run stopped asking for disc data at exactly 761
