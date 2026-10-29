@@ -26,6 +26,12 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 - Seeds: 0x0C6446D4 (147,793 untranslated calls), 0x0C6446DA, 0x0C65C148.
 - Headless rerun with 0007: 5,644 sectors (stall gone), 1.6x real time, non-local returns
   about 450,000 -> 33,990. It then reaches the model fault at pc 0x0C037CFA (unmapped reads).
+- Model fault, first look: the drawing routine (fn 0x0C037CCC, store-queue vertex writer) gets a
+  mesh pointer r2 = 0x18 (NULL plus an offset); its reads land in BIOS ROM at address 0, and the
+  garbage there (0x00200106) becomes the vertex list, which then reads unmapped 0x0040xxxx.
+  Interpreting 0x0C030000-0x0C040000 does not remove it (21M unmapped reads by 40 s), so the
+  drawing code is translated correctly and the bad pointer comes from upstream data. `--replay`
+  to 32 s: only fn 0x0C600502 and fn 0x0C600FC4 disagree (GD-ROM server, polls hardware).
 
 ## 2026-10-28: headless runs here; the movie player kept everything interpreted
 
