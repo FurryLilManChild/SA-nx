@@ -12,6 +12,10 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   boot_test.ps1 and play.ps1 now pass out\saves\vmu_A1.bin. Headless check (30 guest s, scripted
   Start): 48 block writes; the card's directory holds SONICADV_INT, "SONIC ADVENTURE / Main Save
   File", 10 blocks.
+- A complete save Mark found (raw card image, 135,253 bytes: the 128 KB card plus 4 KB trailer)
+  holds SONICADV_INT, the same file name the PAL build writes, plus Chao data and an SA2 save.
+  Installed as out\saves\vmu_A1.bin (first 128 KB); the game accepts it as a complete save, so
+  stages can be started from Trial mode.
 
 ## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
 
