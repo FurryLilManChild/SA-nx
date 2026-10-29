@@ -24,8 +24,8 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   with `dream-translate disasm`), called directly so a throw fails it.
 - `Apply-Patches` now also runs `git clean` in the submodule, since 0007 adds files.
 - Seeds: 0x0C6446D4 (147,793 untranslated calls), 0x0C6446DA, 0x0C65C148.
-- Pushed for a PC build before the headless rebuild here finished; the 761-sector stall is not
-  yet confirmed gone.
+- Headless rerun with 0007: 5,644 sectors (stall gone), 1.6x real time, non-local returns
+  about 450,000 -> 33,990. It then reaches the model fault at pc 0x0C037CFA (unmapped reads).
 
 ## 2026-10-28: headless runs here; the movie player kept everything interpreted
 
