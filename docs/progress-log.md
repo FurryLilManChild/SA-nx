@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: first profile; cached frame readback and a main RAM fast path (patch 0017)
+
+- Profile of a full Emerald Coast run on Mark's PC (473 host s, 303 guest s, 0.6x real time,
+  244,954 samples, 0 unreadable; function names resolved from the PDB). Self time: 50% other DLLs,
+  40% launcher runtime, 10% translated guest code.
+- 43.8% of all samples sit in one copy in VCRUNTIME140 (shown as `_NLG_Return2`, the nearest
+  export: that DLL has no symbols loaded, so this is memcpy) under Presenter::upload (44.0%
+  inclusive). The copy reads the offscreen target's readback buffer, which was allocated
+  HOST_VISIBLE | HOST_COHERENT without HOST_CACHED: on a discrete GPU that is uncached for CPU
+  reads. Fix: HostBuffer::ensure(read_back) prefers HOST_CACHED (coherent if available,
+  otherwise vkInvalidateMappedMemoryRanges after the fence), plus a transfer-to-host barrier.
+  The launcher prints "readback memory: host-cached" so the log shows what it got.
+- Next: DcMemory::resolve 9.9% and load<u32> 8.0% self. Loads and stores to main RAM (area 3
+  and its mirrors) now skip resolve(); stores keep journaling and the write watch. New test.
+- Then: AICA emulation (ARM7 plus DSP, about 7%), find_function 1.3%, call_indirect, and
+  incremental-link thunks (ILT entries, about 2%).
+
 ## 2026-10-29: sampling profiler (patch 0016)
 
 - Speed is 0.6x to 0.7x real time and the untranslated calls (a few thousand per run) cannot

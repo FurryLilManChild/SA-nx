@@ -1,0 +1,260 @@
+diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
+index a5c35e1..c21ee2f 100644
+--- a/render/include/dream/render/vk/offscreen.h
++++ b/render/include/dream/render/vk/offscreen.h
+@@ -49,6 +49,8 @@ public:
+     // The last rendered frame as RGBA8888, width() * height() pixels, row 0 at the top. Null
+     // before the first successful render().
+     const std::uint32_t* pixels() const noexcept;
++    // SA-nx: whether the readback buffer got host-cached memory (fast CPU reads).
++    bool readback_cached() const noexcept { return readback_.cached(); }
+ 
+     const std::string& error() const noexcept { return error_; }
+     std::uint64_t frames = 0;
+diff --git a/render/include/dream/render/vk/resources.h b/render/include/dream/render/vk/resources.h
+index eaee9e3..04d866b 100644
+--- a/render/include/dream/render/vk/resources.h
++++ b/render/include/dream/render/vk/resources.h
+@@ -33,6 +33,8 @@ public:
+             memory_ = o.memory_;
+             mapped_ = o.mapped_;
+             capacity_ = o.capacity_;
++            coherent_ = o.coherent_;
++            cached_ = o.cached_;
+             o.device_ = VK_NULL_HANDLE;
+             o.buffer_ = VK_NULL_HANDLE;
+             o.memory_ = VK_NULL_HANDLE;
+@@ -44,7 +46,17 @@ public:
+ 
+     // Grows the buffer when `bytes` exceeds what is already allocated; keeps it otherwise, so a
+     // steady frame size allocates once.
+-    bool ensure(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags usage);
++    //
++    // `read_back` is for a buffer the GPU writes and the CPU reads (SA-nx). Host-visible memory
++    // that is not host-cached is write-combined on a discrete GPU: fine for the CPU to write, but
++    // every CPU read goes uncached across the bus, and reading a 640x480 frame back that way took
++    // 44% of the game thread's time on Mark's PC. A read-back buffer therefore asks for a cached
++    // type first; call invalidate() after the GPU's writes are complete and before reading.
++    bool ensure(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags usage,
++                bool read_back = false);
++    // Makes the GPU's writes visible to the CPU when the memory type is not coherent; a no-op
++    // when it is.
++    void invalidate();
+     void write(const void* data, std::size_t bytes, VkDeviceSize offset = 0);
+     void destroy();
+ 
+@@ -54,6 +66,8 @@ public:
+     // assembling a second copy of the frame just to change a corner of it.
+     void* mapped() noexcept { return mapped_; }
+     VkDeviceSize capacity() const noexcept { return capacity_; }
++    // Whether the memory is host-cached (diagnostics: the launcher reports it once).
++    bool cached() const noexcept { return cached_; }
+ 
+ private:
+     VkDevice device_ = VK_NULL_HANDLE;
+@@ -61,6 +75,7 @@ private:
+     VkDeviceMemory memory_ = VK_NULL_HANDLE;
+     void* mapped_ = nullptr;
+     VkDeviceSize capacity_ = 0;
++    bool coherent_ = true, cached_ = false;
+ };
+ 
+ // A device-local image used as an attachment (the depth buffer).
+diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
+index 41d2488..6333908 100644
+--- a/render/src/vk/offscreen.cpp
++++ b/render/src/vk/offscreen.cpp
+@@ -117,7 +117,7 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+         return false;
+     }
+     if (!readback_.ensure(ctx, static_cast<VkDeviceSize>(width) * height * 4,
+-                          VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
++                          VK_BUFFER_USAGE_TRANSFER_DST_BIT, /*read_back=*/true)) {
+         error_ = "could not allocate the readback buffer";
+         return false;
+     }
+@@ -189,6 +189,18 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     copy.imageExtent = {extent_.width, extent_.height, 1};
+     vkCmdCopyImageToBuffer(cmd_, colour_.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            readback_.handle(), 1, &copy);
++    // The CPU reads the buffer after the fence: make the copy's writes available to the host.
++    VkBufferMemoryBarrier to_host{};
++    to_host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
++    to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
++    to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    to_host.buffer = readback_.handle();
++    to_host.offset = 0;
++    to_host.size = VK_WHOLE_SIZE;
++    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
++                         nullptr, 1, &to_host, 0, nullptr);
+     if (vkEndCommandBuffer(cmd_) != VK_SUCCESS) {
+         error_ = "vkEndCommandBuffer failed";
+         return false;
+@@ -209,6 +221,7 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+         error_ = "the GPU did not finish the frame within a second";
+         return false;
+     }
++    readback_.invalidate();
+     have_pixels_ = true;
+     ++frames;
+     return true;
+diff --git a/render/src/vk/resources.cpp b/render/src/vk/resources.cpp
+index 78777d2..ad4c30d 100644
+--- a/render/src/vk/resources.cpp
++++ b/render/src/vk/resources.cpp
+@@ -2,6 +2,7 @@
+ #include "dream/render/vk/resources.h"
+ 
+ #include <cstring>
++#include <vector>
+ 
+ #include "dream/render/vk/context.h"
+ 
+@@ -22,7 +23,8 @@ HostBuffer::~HostBuffer() {
+     destroy();
+ }
+ 
+-bool HostBuffer::ensure(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags usage) {
++bool HostBuffer::ensure(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags usage,
++                        bool read_back) {
+     if (bytes == 0)
+         return true;
+     if (buffer_ && bytes <= capacity_)
+@@ -40,9 +42,26 @@ bool HostBuffer::ensure(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFla
+ 
+     VkMemoryRequirements req{};
+     vkGetBufferMemoryRequirements(device_, buffer_, &req);
+-    const std::uint32_t type = find_memory_type(
+-        ctx.physical_device(), req.memoryTypeBits,
+-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
++    constexpr VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
++    constexpr VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++    constexpr VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++    std::uint32_t type = UINT32_MAX;
++    VkMemoryPropertyFlags got = 0;
++    // Preference order: a read-back buffer wants cached memory, coherent if possible; every
++    // buffer falls back to the plain host-visible coherent type it always used.
++    std::vector<VkMemoryPropertyFlags> wants;
++    if (read_back)
++        wants = {visible | cached | coherent, visible | cached};
++    wants.push_back(visible | coherent);
++    for (VkMemoryPropertyFlags want : wants) {
++        type = find_memory_type(ctx.physical_device(), req.memoryTypeBits, want);
++        if (type != UINT32_MAX) {
++            got = want;
++            break;
++        }
++    }
++    coherent_ = (got & coherent) != 0;
++    cached_ = (got & cached) != 0;
+     if (type == UINT32_MAX) {
+         destroy();
+         return false;
+@@ -64,6 +83,17 @@ bool HostBuffer::ensure(const Context& ctx, VkDeviceSize bytes, VkBufferUsageFla
+     return true;
+ }
+ 
++void HostBuffer::invalidate() {
++    if (coherent_ || !mapped_)
++        return;
++    VkMappedMemoryRange range{};
++    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++    range.memory = memory_;
++    range.offset = 0;
++    range.size = VK_WHOLE_SIZE;
++    vkInvalidateMappedMemoryRanges(device_, 1, &range);
++}
++
+ void HostBuffer::write(const void* data, std::size_t bytes, VkDeviceSize offset) {
+     if (mapped_ && bytes)
+         std::memcpy(static_cast<char*>(mapped_) + offset, data, bytes);
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 57f7e07..0540cdc 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -137,6 +137,8 @@ struct Live {
+             error = offscreen.error();
+             return false;
+         }
++        std::printf("readback memory: %s\n",
++                    offscreen.readback_cached() ? "host-cached" : "not host-cached (slow reads)");
+         // The renderer's pipelines are built against the offscreen render pass, not the window's:
+         // that is where the geometry is drawn.
+         if (!renderer.create(window.context(), offscreen.render_pass())) {
+diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
+index 1539f8e..4e80efa 100644
+--- a/runtime/src/mem/dc_memory.cpp
++++ b/runtime/src/mem/dc_memory.cpp
+@@ -172,8 +172,21 @@ DcMemory::Target DcMemory::resolve(std::uint32_t a, unsigned size, bool write) {
+     return t;
+ }
+ 
++// SA-nx: main RAM (area 3 and its mirrors in P0 to P3) is most of every frame's accesses, and the
++// general resolve() walks P4, operand-cache RAM and the area switch before getting there; the
++// profile on Mark's PC put resolve() alone at 10% of the game thread. The same address test as
++// resolve()'s area 3 case: physical = a & 0x1FFFFFFF, area = physical >> 26.
++constexpr bool is_main_ram(std::uint32_t a) noexcept {
++    return a < 0xE0000000u && ((a >> 26) & 7u) == 3u;
++}
++
+ template <typename T>
+ T DcMemory::load(std::uint32_t a) {
++    if (is_main_ram(a)) {
++        T v;
++        std::memcpy(&v, ram_.get() + (a & (kRamSize - 1)), sizeof(T));
++        return v;
++    }
+     const Target t = resolve(a, sizeof(T), false);
+     if (t.kind == Target::kBytes) {
+         T v;
+@@ -193,7 +206,8 @@ T DcMemory::load(std::uint32_t a) {
+ 
+ template <typename T>
+ void DcMemory::store(std::uint32_t a, T v) {
+-    const Target t = resolve(a, sizeof(T), true);
++    const Target t = is_main_ram(a) ? Target{Target::kBytes, ram_.get() + (a & (kRamSize - 1))}
++                                    : resolve(a, sizeof(T), true);
+     if (t.kind == Target::kBytes) {
+         if (journaling) {
+             std::uint64_t old = 0;
+diff --git a/runtime/tests/test_memory.cpp b/runtime/tests/test_memory.cpp
+index 08ba01e..73668a1 100644
+--- a/runtime/tests/test_memory.cpp
++++ b/runtime/tests/test_memory.cpp
+@@ -216,3 +216,34 @@ TEST_CASE("memory: a device write marks the journal as one that cannot be undone
+     // The device write is not in the journal, so undoing cannot silently half-revert it.
+     CHECK(m.journal.size() == 1);
+ }
++
++TEST_CASE("memory: the main RAM fast path keeps every size, mirror and write watch") {
++    // SA-nx: loads and stores to area 3 skip resolve(). They must still land in the same bytes,
++    // in every access size, through every mirror, and stores must still reach the write watch.
++    DcMemory m;
++    m.write32(0x8C001000u, 0x11223344u);
++    CHECK(m.read32(0x0C001000u) == 0x11223344u);
++    CHECK(m.read32(0xAC001000u) == 0x11223344u);
++    CHECK(m.read32(0x0D001000u) == 0x11223344u);  // 16 MB mirror
++    CHECK(m.read32(0x0F001000u) == 0x11223344u);  // last mirror of area 3
++    CHECK(m.read16(0x8C001002u) == 0x1122u);
++    CHECK(m.read8(0x8C001003u) == 0x11u);
++    m.write16(0xAC001000u, 0xBEEFu);
++    m.write8(0x0C001002u, 0x77u);
++    CHECK(m.read32(0x8C001000u) == 0x1177BEEFu);
++    // Not main RAM: area 1 (VRAM) and area 7 (P4 store queue window) still go the general way.
++    m.write32(0xA5000000u, 0xCAFEF00Du);
++    CHECK(m.read32(0xA5000000u) == 0xCAFEF00Du);
++    CHECK(m.read32(0x8C000000u) != 0xCAFEF00Du);
++
++    std::vector<std::uint32_t> seen;
++    m.watch_lo = 0x0C002000u;
++    m.watch_hi = 0x0C002010u;
++    m.on_watch_write = [&](std::uint32_t addr, std::uint32_t, unsigned) { seen.push_back(addr); };
++    m.write32(0x8C002004u, 1u);
++    m.write8(0xAC002008u, 2u);
++    m.write32(0x8C003000u, 3u);  // outside the watch
++    REQUIRE(seen.size() == 2);
++    CHECK(seen[0] == 0x8C002004u);
++    CHECK(seen[1] == 0xAC002008u);
++}
