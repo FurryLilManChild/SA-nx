@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: switch-test2 (letterbox bleed, timing log, CPU 1785 by default)
+
+- switch-test1 on Mark's Switch: boots and plays, the PC fixes held, but slow, and the area right
+  of the 4:3 picture showed its textures smeared out. Logs: startup only (no timing log existed);
+  no `[clock]` line, so it ran at the stock 1020 MHz; no report because the app was closed from
+  the HOME menu, which ends the process before the launcher writes one.
+- The bleed: present.vert's covering triangle is shrunk to letterbox but overhangs the image on its
+  right and bottom, where the coordinates pass 1 and the clamped sampler repeats the last column.
+  A 4:3 PC window has no bars, so it never showed. present.frag now draws those pixels black.
+- Timing log: every five seconds the launcher prints fps shown, renders/s, guest speed, and the
+  game thread's split: game, render (and the GPU fence wait inside it, Offscreen::wait_ns),
+  present, pacing sleep, paused. On by default on the Switch; `--perf-log` elsewhere.
+- switch_main.cpp: a first run writes sonicadv_options.txt with CPU_MHZ=1785; after that the port
+  menu's choice stands.
+- Patch 0022 re-cut (verified: the set reproduces the submodule tree). NRO 98,287,647 bytes, sha256
+  98379df69a9676731c4535f79cc0d0e9f7a615f65e558ad0bf40459af735e7a6.
+
 ## 2026-10-29: first Switch NRO built (switch-test1)
 
 - All 319 game parts and the libraries compile for the Switch. Two fixes to link:

@@ -278,6 +278,15 @@ int main(int argc, char** argv) {
     }
 
     dream_port_set_cpu_mhz = set_cpu_mhz;
+    // The first run starts with the CPU at 1785 MHz: the stock 1020 MHz is far too slow for the
+    // recompiled game (test1 ran there). Once the file exists, the port menu's choice stands.
+    if (!exists("sdmc:/switch/sonicadv/sonicadv_options.txt")) {
+        if (FILE* f = std::fopen("sdmc:/switch/sonicadv/sonicadv_options.txt", "wb")) {
+            std::fputs("CPU_MHZ=1785\n", f);
+            std::fclose(f);
+            std::printf("[switch] first run: options start with the CPU at 1785 MHz\n");
+        }
+    }
 
     g_args = {"sonicadv", "--config", "sonicadv.toml", "--window", "--boot-sr", "0x600000F1",
               "--vmu", "save/vmu_A1.bin", "--report", "sonicadv_report.txt", "--options",

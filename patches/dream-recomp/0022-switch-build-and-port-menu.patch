@@ -412,6 +412,19 @@ index 0000000..33bfd57
 +};
 +
 +}  // namespace dream::render
+diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
+index 65db176..f17b71b 100644
+--- a/render/include/dream/render/vk/offscreen.h
++++ b/render/include/dream/render/vk/offscreen.h
+@@ -58,6 +58,8 @@ public:
+ 
+     const std::string& error() const noexcept { return error_; }
+     std::uint64_t frames = 0;
++    // SA-nx: nanoseconds spent waiting for the GPU to finish renders, for the launcher's timing log.
++    std::uint64_t wait_ns = 0;
+ 
+ private:
+     Context* ctx_ = nullptr;
 diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
 index 4424f49..4b2787e 100644
 --- a/render/include/dream/render/vk/present.h
@@ -426,6 +439,25 @@ index 4424f49..4b2787e 100644
  
      // The sampler's own filter, which now only decides how a *magnified* image is stretched: the
      // guest's pixels shown as pixels, or blurred between them. Minification no longer goes through
+diff --git a/render/shaders/present.frag b/render/shaders/present.frag
+index b2489da..eaeee40 100644
+--- a/render/shaders/present.frag
++++ b/render/shaders/present.frag
+@@ -28,6 +28,14 @@ layout(location = 0) out vec4 colour;
+ const int kMaxTaps = 4;
+ 
+ void main() {
++    // The covering triangle is shrunk to letterbox, but it overhangs the image on its far sides
++    // (right and bottom), where the coordinates run past 1. The clamped sampler would smear the
++    // last row and column across those bars, so they are drawn black (SA-nx: seen on the Switch's
++    // 16:9 screen; a 4:3 PC window has no bars).
++    if (any(greaterThan(v_uv, vec2(1.0)))) {
++        colour = vec4(0.0, 0.0, 0.0, 1.0);
++        return;
++    }
+     // Rounded up, not truncated. A footprint of 2.67 texels wants three taps; taking two leaves a
+     // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
+     // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
 diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
 new file mode 100644
 index 0000000..55b747b
@@ -635,6 +667,32 @@ index 0000000..55b747b
 +}
 +
 +}  // namespace dream::render
+diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
+index 9c24009..d344bd0 100644
+--- a/render/src/vk/offscreen.cpp
++++ b/render/src/vk/offscreen.cpp
+@@ -1,6 +1,7 @@
+ // See offscreen.h.
+ #include "dream/render/vk/offscreen.h"
+ 
++#include <chrono>
+ #include <cstdlib>
+ 
+ namespace dream::render::vk {
+@@ -472,7 +473,12 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     }
+     // One second is far longer than any frame takes; waiting for ever would turn a lost device
+     // into a hung launcher with nothing on screen to say so.
+-    if (vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull) != VK_SUCCESS) {
++    const auto wait_from = std::chrono::steady_clock::now();
++    const VkResult waited = vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull);
++    wait_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                              std::chrono::steady_clock::now() - wait_from)
++                                              .count());
++    if (waited != VK_SUCCESS) {
+         error_ = "the GPU did not finish the frame within a second";
+         return false;
+     }
 diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
 index f3d3c96..1019398 100644
 --- a/render/src/vk/present.cpp
@@ -1288,7 +1346,7 @@ index 0000000..cae3ece
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..85716d5 100644
+index 824d0b4..c73c010 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,15 @@
@@ -1315,16 +1373,85 @@ index 824d0b4..85716d5 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -245,7 +255,7 @@ struct Live {
+@@ -159,6 +169,12 @@ struct Live {
+     // The guest has handed the hardware a display list. Draw it, then put the result where the
+     // hardware would have put it.
+     void render(const std::vector<std::uint32_t>& stream) {
++        const auto render_from = std::chrono::steady_clock::now();
++        struct Timed {  // SA-nx: counted however render() returns
++            std::chrono::steady_clock::time_point from;
++            std::uint64_t& into;
++            ~Timed() { into += Live::ns_since(from); }
++        } timed{render_from, perf_render_ns};
+         last_stream = stream;  // kept so F11 can write the list that drew what is on screen
+         decoder.reset();
+         decoder.feed_stream(stream.data(), stream.size());
+@@ -243,9 +259,63 @@ struct Live {
+ 
+     // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
++    // SA-nx: the timing log. Every five seconds, where the game thread's time went: running the
++    // game, drawing its display lists (and, inside that, waiting for the GPU), putting frames on
++    // the screen, and sleeping because it was ahead of real time. Whatever is left is the game.
++    static std::uint64_t ns_since(std::chrono::steady_clock::time_point t) {
++        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                              std::chrono::steady_clock::now() - t)
++                                              .count());
++    }
++
++    void perf_log(std::uint64_t guest_cycles) {
++        const auto now = std::chrono::steady_clock::now();
++        if (perf_mark == std::chrono::steady_clock::time_point{}) {
++            perf_mark = now;
++            perf_reset(guest_cycles);
++            return;
++        }
++        const double wall = std::chrono::duration<double>(now - perf_mark).count();
++        if (wall < 5.0)
++            return;
++        const double ms = wall * 1000.0;
++        const double render_ms = static_cast<double>(perf_render_ns) / 1e6;
++        const double gpu_ms = static_cast<double>(offscreen.wait_ns - perf_gpu_at) / 1e6;
++        const double present_ms = static_cast<double>(perf_present_ns) / 1e6;
++        const double sleep_ms = static_cast<double>(perf_sleep_ns) / 1e6;
++        const double paused_ms = static_cast<double>(perf_paused_ns) / 1e6;
++        const double game_ms = ms - render_ms - present_ms - sleep_ms - paused_ms;
++        const double speed = static_cast<double>(guest_cycles - perf_cycles_at) / 200e6 / (wall - paused_ms / 1000.0);
++        const auto pct = [ms](double v) { return 100.0 * v / ms; };
++        std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, render %.0f%% "
++                    "(gpu wait %.0f%%), present %.0f%%, sleep %.0f%%, paused %.0f%%\n",
++                    static_cast<double>(presented - perf_presented_at) / wall, static_cast<double>(rendered - perf_rendered_at) / wall,
++                    speed, pct(game_ms), pct(render_ms), pct(gpu_ms), pct(present_ms),
++                    pct(sleep_ms), pct(paused_ms));
++        std::fflush(stdout);
++        perf_mark = now;
++        perf_reset(guest_cycles);
++    }
++
++    void perf_reset(std::uint64_t guest_cycles) {
++        perf_render_ns = perf_present_ns = perf_sleep_ns = perf_paused_ns = 0;
++        perf_gpu_at = offscreen.wait_ns;
++        perf_presented_at = presented;
++        perf_rendered_at = rendered;
++        perf_cycles_at = guest_cycles;
++    }
++
      bool present(std::uint64_t frame, std::uint64_t guest_cycles) {
++        const auto present_from = std::chrono::steady_clock::now();
++        struct Timed {
++            std::chrono::steady_clock::time_point from;
++            std::uint64_t& into;
++            ~Timed() { into += Live::ns_since(from); }
++        } timed{present_from, perf_present_ns};
++        if (perf_enabled)
++            perf_log(guest_cycles);
          guest_frame = frame;
 -        if (!window.poll())
 +        if (!window.poll() || quit_requested)
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -282,7 +292,8 @@ struct Live {
+@@ -282,7 +352,8 @@ struct Live {
          // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
          // are meant to produce the game's own pixels, which is what makes one comparable with
          // another and usable as a reference image.
@@ -1334,7 +1461,7 @@ index 824d0b4..85716d5 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,6 +301,8 @@ struct Live {
+@@ -290,6 +361,8 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -1343,7 +1470,7 @@ index 824d0b4..85716d5 100644
                               });
          else
              presenter.upload(cmd, source, shown.width, shown.height);
-@@ -320,6 +333,7 @@ struct Live {
+@@ -320,6 +393,7 @@ struct Live {
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
@@ -1351,7 +1478,7 @@ index 824d0b4..85716d5 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -373,8 +387,110 @@ struct Live {
+@@ -373,8 +447,110 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -1462,7 +1589,7 @@ index 824d0b4..85716d5 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +500,9 @@ struct Live {
+@@ -384,10 +560,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -1476,7 +1603,19 @@ index 824d0b4..85716d5 100644
              return;
          }
          if (!menu.is_open())
-@@ -663,6 +778,13 @@ struct Live {
+@@ -660,9 +835,25 @@ struct Live {
+     // looks (frames actually presented per second of wall clock) and whether it is keeping up
+     // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
+     bool show_fps = false;
++    // SA-nx: the timing log (perf_log); on by default on the Switch, --perf-log elsewhere.
++#ifdef __SWITCH__
++    bool perf_enabled = true;
++#else
++    bool perf_enabled = false;
++#endif
++    std::chrono::steady_clock::time_point perf_mark{};
++    std::uint64_t perf_render_ns = 0, perf_present_ns = 0, perf_sleep_ns = 0, perf_paused_ns = 0;
++    std::uint64_t perf_gpu_at = 0, perf_presented_at = 0, perf_rendered_at = 0, perf_cycles_at = 0;
      // The binding screen (F1, or a pad's select button). The guest is stopped while it is up, so
      // nobody rebinds a control mid-corner.
      dream::render::InputMenu menu;
@@ -1490,7 +1629,15 @@ index 824d0b4..85716d5 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1108,6 +1230,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1269,7 @@ void usage(const char* argv0, std::FILE* out) {
+         "  --window               open a window and play; implies sound\n"
+         "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
+         "  --fps                  start with the on-screen frame-rate counter showing\n"
++        "  --perf-log             every five seconds, log where the game thread's time went\n"
+         "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
+         "                         whole run to the panel, so --unthrottled with a window measures\n"
+         "                         the refresh rate rather than the emulator.\n"
+@@ -1108,6 +1300,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -1498,7 +1645,7 @@ index 824d0b4..85716d5 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1356,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1426,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -1506,7 +1653,15 @@ index 824d0b4..85716d5 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1334,6 +1458,8 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1436,7 @@ int main(int argc, char** argv) {
+     // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
+     // decides where it starts, so a run nobody is sitting at still records the figure.
+     bool start_with_fps = false;
++    bool perf_log_flag = false;  // SA-nx: --perf-log, the five-second timing line
+     // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
+     std::string suggest_config;
+     std::uint64_t screenshot_at = 0, capture_at = 0;
+@@ -1334,6 +1529,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -1515,7 +1670,25 @@ index 824d0b4..85716d5 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1698,7 +1824,15 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1555,8 @@ int main(int argc, char** argv) {
+             writeback = true;
+         else if (!std::strcmp(argv[i], "--fps"))
+             start_with_fps = true;
++        else if (!std::strcmp(argv[i], "--perf-log"))
++            perf_log_flag = true;
+         else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
+             suggest_config = argv[++i];
+         else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
+@@ -1682,6 +1881,8 @@ int main(int argc, char** argv) {
+         live = std::make_unique<Live>(sys.memory, pvr);
+         live->writeback = writeback;
+         live->show_fps = start_with_fps;
++        if (perf_log_flag)
++            live->perf_enabled = true;
+         live->shot_presented = shot_presented;
+         live->window.set_present_mode(present_mode);
+         live->screenshot_at = screenshot_at;
+@@ -1698,7 +1899,15 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -1532,7 +1705,7 @@ index 824d0b4..85716d5 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +1855,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +1930,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -1544,7 +1717,27 @@ index 824d0b4..85716d5 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1770,6 +1904,10 @@ int main(int argc, char** argv) {
+@@ -1732,6 +1941,7 @@ int main(int argc, char** argv) {
+                     std::this_thread::sleep_for(std::chrono::milliseconds(8));
+                 }
+                 paused_for += std::chrono::steady_clock::now() - paused_at;
++                live->perf_paused_ns += Live::ns_since(paused_at);
+             }
+             // Scripted presses win while they are held, so --press still works with a window open.
+             if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
+@@ -1744,8 +1954,10 @@ int main(int argc, char** argv) {
+                 started + paused_for +
+                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
+             const auto now = std::chrono::steady_clock::now();
+-            if (target > now && target - now < std::chrono::seconds(1))
++            if (target > now && target - now < std::chrono::seconds(1)) {
+                 std::this_thread::sleep_for(target - now);
++                live->perf_sleep_ns += Live::ns_since(now);
++            }
+         };
+     }
+ #endif
+@@ -1770,6 +1982,10 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
