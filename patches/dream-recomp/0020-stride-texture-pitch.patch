@@ -1,0 +1,200 @@
+diff --git a/render/include/dream/render/texture.h b/render/include/dream/render/texture.h
+index 75c61dd..0caddbe 100644
+--- a/render/include/dream/render/texture.h
++++ b/render/include/dream/render/texture.h
+@@ -46,6 +46,11 @@ struct TextureInfo {
+     bool vq = false;
+     bool mipmapped = false;
+     bool stride = false;
++    // Texels from one row to the next in a scan-order texture (SA-nx). The width for a plain
++    // texture; for a stride texture the TEXT_CONTROL stride, while width stays the power of two
++    // the texture coordinates are scaled by, so a 320-pixel movie frame is read as 320-texel rows
++    // of a 512-wide texture and the game maps u only over the part it filled.
++    std::uint32_t pitch = 8;
+     std::uint32_t palette_base = 0;  // first palette entry for an indexed texture
+ 
+     bool indexed() const noexcept {
+diff --git a/render/include/dream/render/vk/texture_cache.h b/render/include/dream/render/vk/texture_cache.h
+index 7dd89a2..06e0316 100644
+--- a/render/include/dream/render/vk/texture_cache.h
++++ b/render/include/dream/render/vk/texture_cache.h
+@@ -57,6 +57,9 @@ public:
+     // every quad. It is part of the key: the same texture can be tiled by one polygon and not by
+     // another, and the two need different samplers.
+     VkDescriptorSet get(VkCommandBuffer cmd, std::uint32_t tcw, std::uint32_t tsp, bool tiled);
++    // SA-nx: the row width of stride textures in texels (TEXT_CONTROL bits 0-4 times 32), set
++    // by the caller every frame. 0 leaves stride textures at their power-of-two pitch.
++    void set_stride_width(std::uint32_t texels) noexcept { stride_width_ = texels; }
+ 
+     // A 1x1 opaque white texture, bound when a polygon's own texture could not be decoded. The
+     // shader is told not to sample, but Vulkan still wants a valid set bound, and a white texel
+@@ -98,6 +101,7 @@ private:
+     std::unordered_map<std::uint64_t, Entry> entries_;
+     std::unordered_map<std::uint32_t, VkSampler> samplers_;
+     Entry fallback_{};
++    std::uint32_t stride_width_ = 0;
+     const std::uint8_t* vram_ = nullptr;
+     std::size_t vram_size_ = 0;
+     std::uint32_t palette_[1024]{};
+diff --git a/render/src/texture.cpp b/render/src/texture.cpp
+index 8cc63c1..afa962e 100644
+--- a/render/src/texture.cpp
++++ b/render/src/texture.cpp
+@@ -113,7 +113,7 @@ std::uint32_t twiddle_index(std::uint32_t x, std::uint32_t y, std::uint32_t widt
+ }
+ 
+ std::uint32_t TextureInfo::size_bytes() const noexcept {
+-    u32 texels = width * height;
++    u32 texels = (twiddled ? width : std::max(width, pitch)) * height;
+     // A mipmapped texture is followed by its whole chain, each level a quarter of the last, which
+     // converges on a third more texels. Rounded up: this bounds an invalidation range, and
+     // guessing low there means a stale texture, which is the worse way to be wrong.
+@@ -161,8 +161,9 @@ bool describe_texture(std::uint32_t tcw, std::uint32_t tsp, std::uint32_t stride
+     // otherwise, and a stride texture is always in scan order.
+     const bool can_be_linear = !out.vq && !out.indexed();
+     out.twiddled = !(can_be_linear && (tcw_scan_order(tcw) != 0 || out.stride));
++    out.pitch = out.width;
+     if (out.stride && stride_width != 0)
+-        out.width = stride_width;
++        out.pitch = stride_width;
+ 
+     if (out.format == PixelFormat::Palette4)
+         out.palette_base = tcw_palette_select(tcw) << 4;
+@@ -255,6 +256,8 @@ u32 unpack_16(PixelFormat format, u16 p) {
+ bool decode_texture(const TextureInfo& info, const std::uint8_t* vram, std::size_t vram_size,
+                     const std::uint32_t* palette, std::vector<std::uint32_t>& out) {
+     const u32 w = info.width, h = info.height;
++    // Scan-order rows are `pitch` texels apart (a stride texture's TEXT_CONTROL width).
++    const u32 pitch = info.pitch ? info.pitch : w;
+     out.assign(static_cast<std::size_t>(w) * h, 0);
+     if (info.format == PixelFormat::Reserved)
+         return false;
+@@ -308,25 +311,25 @@ bool decode_texture(const TextureInfo& info, const std::uint8_t* vram, std::size
+             return true;
+         }
+         case PixelFormat::Palette8: {
+-            if (!in_range(base, w * h))
++            if (!in_range(base, std::max(w, pitch) * h))
+                 return false;
+             for (u32 y = 0; y < h; ++y)
+                 for (u32 x = 0; x < w; ++x) {
+-                    const u32 index = info.twiddled ? twiddle_index(x, y, w, h) : y * w + x;
++                    const u32 index = info.twiddled ? twiddle_index(x, y, w, h) : y * pitch + x;
+                     out[static_cast<std::size_t>(y) * w + x] =
+                         palette[info.palette_base + vram[base + index]];
+                 }
+             return true;
+         }
+         case PixelFormat::Yuv422: {
+-            if (!in_range(base, w * h * 2))
++            if (!in_range(base, std::max(w, pitch) * h * 2))
+                 return false;
+             // Two texels per four bytes. Twiddled YUV is stored as pairs, so the pair index is
+             // twiddled over half the width.
+             for (u32 y = 0; y < h; ++y)
+                 for (u32 x = 0; x < w; x += 2) {
+                     const u32 pair =
+-                        info.twiddled ? twiddle_index(x / 2, y, w / 2, h) : (y * w + x) / 2;
++                        info.twiddled ? twiddle_index(x / 2, y, w / 2, h) : (y * pitch + x) / 2;
+                     const u8* p = vram + base + static_cast<std::size_t>(pair) * 4;
+                     const s32 u = p[0], y0 = p[1], v = p[2], y1 = p[3];
+                     out[static_cast<std::size_t>(y) * w + x] = yuv_to_rgba(y0, u, v);
+@@ -339,11 +342,11 @@ bool decode_texture(const TextureInfo& info, const std::uint8_t* vram, std::size
+         case PixelFormat::Rgb565:
+         case PixelFormat::Argb4444:
+         case PixelFormat::BumpMap: {
+-            if (!in_range(base, w * h * 2))
++            if (!in_range(base, std::max(w, pitch) * h * 2))
+                 return false;
+             for (u32 y = 0; y < h; ++y)
+                 for (u32 x = 0; x < w; ++x) {
+-                    const u32 index = info.twiddled ? twiddle_index(x, y, w, h) : y * w + x;
++                    const u32 index = info.twiddled ? twiddle_index(x, y, w, h) : y * pitch + x;
+                     out[static_cast<std::size_t>(y) * w + x] = unpack_16(
+                         info.format, read16(vram + base + static_cast<std::size_t>(index) * 2));
+                 }
+diff --git a/render/src/vk/texture_cache.cpp b/render/src/vk/texture_cache.cpp
+index cbf2689..7e3d2a6 100644
+--- a/render/src/vk/texture_cache.cpp
++++ b/render/src/vk/texture_cache.cpp
+@@ -216,14 +216,18 @@ VkDescriptorSet TextureCache::get(VkCommandBuffer cmd, std::uint32_t tcw, std::u
+     // The size lives in the TSP word, the rest in the TCW; together they identify the texture. The
+     // sampler bits and whether any polygon tiles it decide the sampler bound with it, and a set
+     // holds one sampler, so both are part of the key (texture_sampling_key).
+-    const std::uint64_t key = texture_sampling_key(tcw, tsp) | (tiled ? 0x40u : 0u);
++    std::uint64_t key = texture_sampling_key(tcw, tsp) | (tiled ? 0x40u : 0u);
++    // A stride texture decodes differently for each TEXT_CONTROL width (bits 16-20 are free).
++    const bool stride_tex = ((tcw >> 25) & 1u) != 0;
++    if (stride_tex)
++        key |= static_cast<std::uint64_t>((stride_width_ / 32u) & 31u) << 16;
+     if (auto it = entries_.find(key); it != entries_.end()) {
+         ++hits;
+         return it->second.set;
+     }
+ 
+     Entry e;
+-    if (!describe_texture(tcw, tsp, 0, e.info)) {
++    if (!describe_texture(tcw, tsp, stride_tex ? stride_width_ : 0, e.info)) {
+         ++failed;
+         entries_.emplace(key, std::move(e));  // remember the failure so it is not retried per frame
+         return VK_NULL_HANDLE;
+diff --git a/render/tests/test_texture.cpp b/render/tests/test_texture.cpp
+index 928bd75..46fd684 100644
+--- a/render/tests/test_texture.cpp
++++ b/render/tests/test_texture.cpp
+@@ -321,3 +321,41 @@ TEST_CASE("texture: a VQ mip chain keeps its one-byte offset") {
+     REQUIRE(pixels.size() == 256);
+     for (u32 p : pixels) CHECK(p == 0xFF0000FFu);
+ }
++
++TEST_CASE("texture: a stride texture's rows are TEXT_CONTROL texels apart") {
++    // SA-nx: a 320-pixel-wide movie frame in a 512x256 YUV422 stride texture. The image stays
++    // 512 wide (that is what u is scaled by); only the step from row to row is the stride.
++    auto v = vram(1024 * 1024);
++    TextureInfo info;
++    const u32 tcw = make_tcw(0, 3, /*twiddled=*/false) | (1u << 25);  // YUV422, stride select
++    REQUIRE(describe_texture(tcw, make_tsp(6, 5), 320, info));
++    CHECK(info.width == 512);
++    CHECK(info.height == 256);
++    CHECK(info.pitch == 320);
++    CHECK_FALSE(info.twiddled);
++    // Row y, texel pair p: luma 2y+p bright in rows, so each row has its own value.
++    for (u32 y = 0; y < 4; ++y)
++        for (u32 x = 0; x < 320; x += 2) {
++            const std::size_t at = (static_cast<std::size_t>(y) * 320 + x) * 2;
++            const std::uint8_t luma = static_cast<std::uint8_t>(40 + 50 * y);
++            v[at] = 128;       // u
++            v[at + 1] = luma;  // y0
++            v[at + 2] = 128;   // v
++            v[at + 3] = luma;  // y1
++        }
++    std::vector<u32> pixels;
++    std::uint32_t palette[1024] = {};
++    REQUIRE(decode_texture(info, v.data(), v.size(), palette, pixels));
++    REQUIRE(pixels.size() == 512u * 256u);
++    // Grey, brightening row by row; read at the 512-wide pitch it would smear rows together.
++    for (u32 y = 0; y < 4; ++y) {
++        const u32 first = pixels[y * 512 + 0], last = pixels[y * 512 + 318];
++        CHECK(first == last);
++        if (y > 0)
++            CHECK((first & 0xFFu) > (pixels[(y - 1) * 512] & 0xFFu));
++    }
++    // Without a stride width the pitch falls back to the texture's own width.
++    REQUIRE(describe_texture(tcw, make_tsp(6, 5), 0, info));
++    CHECK(info.pitch == 512);
++}
++
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 0540cdc..c12aaf2 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -176,6 +176,9 @@ struct Live {
+         // every frame.
+         if (renderer.textures().set_palette(pvr_.reg_block() + 0x1000 / 4, palette_format()))
+             ++palette_changes;
++        // SA-nx: TEXT_CONTROL's stride (bits 0-4, units of 32 texels) is the row width of every
++        // stride texture this frame; movies are drawn from one.
++        renderer.textures().set_stride_width((pvr_.reg(0x0E4) & 31u) * 32u);
+         if (!offscreen.render(renderer, frame, geometry)) {
+             if (!reported_error) {
+                 reported_error = true;

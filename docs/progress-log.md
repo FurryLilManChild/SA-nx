@@ -2,6 +2,21 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: sound confirmed; movie texture pitch (patch 0020)
+
+- Patch 0019 on Mark's PC: "sound was all gloriously correct". Report: 49 key-ons,
+  1,915,391 of 2,537,093 samples non-zero. A movie played (4,784,640 words through the YUV
+  converter); its audio was right, its picture "a wonky mess".
+- Likely cause, not yet confirmed on a capture of the movie: the texture cache always passed a
+  stride width of 0, so a stride texture (how movies are drawn: frames are rarely a power of
+  two wide) was read with its power-of-two width as the row pitch, shearing every row. And when
+  a width was passed, describe_texture replaced the texture's width with it, which would have
+  stretched the mapping. Patch 0020: TextureInfo::pitch (the TEXT_CONTROL stride for stride
+  textures; width stays the power of two the coordinates use), scan-order decoding steps by the
+  pitch, the cache keys stride textures by the stride, and the launcher sets the stride from
+  TEXT_CONTROL every frame. Test: a 320-texel-pitch YUV422 frame in a 512x256 texture (fails on
+  the old pitch, 3 of 16 assertions).
+
 ## 2026-10-29: sound: 32-bit key-on writes (patch 0019)
 
 - Mark: patch 0018 "perfect"; the Station Square glows in the Adventure intro look right.

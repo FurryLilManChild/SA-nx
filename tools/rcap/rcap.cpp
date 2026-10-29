@@ -24,6 +24,7 @@ int main(int argc,char**argv){
   vk::Renderer r; if(!r.create(ctx,off.render_pass())){std::printf("renderer: %s\n",r.error().c_str());return 1;}
   auto pf=static_cast<PaletteFormat>(regs[0x108/4]&3);
   r.set_memory(reinterpret_cast<const std::uint8_t*>(vram.data()),vram.size(),regs.data()+0x1000/4,pf);
+  r.textures().set_stride_width((regs[0xE4/4]&31u)*32u);
   DisplayList dl; dl.feed_stream(reinterpret_cast<const std::uint32_t*>(ta.data()),ta.size()/4);
   add_background(dl.frame(),regs.data(),reinterpret_cast<const std::uint8_t*>(vram.data()),vram.size());
   vk::FrameGeometry g; g.alpha_ref=static_cast<float>(regs[0x11C/4]&0xFFu)/255.0f;
