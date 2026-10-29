@@ -38,7 +38,10 @@ extra = [0x0C02DE20,  # 2
          0x0C0A65D6,
          0x0C0A6770,
          0x0C0A67C0,
-         0x0C107A36]
+         0x0C107A36,
+         0x0C6446D4,  # headless run 3: a getter called 147,793 times untranslated
+         0x0C6446DA,
+         0x0C65C148]
 
 # Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
 # Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the
