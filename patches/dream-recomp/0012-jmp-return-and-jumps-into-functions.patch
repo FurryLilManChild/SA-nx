@@ -1,0 +1,163 @@
+diff --git a/runtime/include/dream/runtime/sh4/abi.h b/runtime/include/dream/runtime/sh4/abi.h
+index a925089..a1db0ca 100644
+--- a/runtime/include/dream/runtime/sh4/abi.h
++++ b/runtime/include/dream/runtime/sh4/abi.h
+@@ -53,6 +53,11 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+ 
+ // Control transfers whose target is only known at run time.
+ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target);
++// SA-nx: a computed jump (jmp/braf), not a call. A function entry is tail-called; an address inside
++// a translated function is a non-local transfer (run_guest resumes there; calling its resume entry
++// nested would leave the jumping code's callers to run that code a second time); anything else
++// goes to the untranslated handler as call_indirect does.
++void jump_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target);
+ 
+ // Non-local returns (docs/emitter-design.md, "Non-local returns"). Emitted code calls
+ // nonlocal_return from an `rts` whose target is not its entry PR; it throws NonLocalReturn.
+diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
+index d19b486..b900b12 100644
+--- a/runtime/src/sh4/abi_bare.cpp
++++ b/runtime/src/sh4/abi_bare.cpp
+@@ -359,6 +359,22 @@ void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
+     throw std::runtime_error("untranslated call target " + hex(target) + " from pc " + hex(c.pc));
+ }
+ 
++void jump_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
++    if (GuestFn fn = find_function(target, &m)) {
++        fn(c, m);
++        return;
++    }
++    const std::uint32_t phys = target & 0x1FFFFFFFu;
++    if (!interpreted(phys)) {
++        if (const FunctionEntry* e = find_containing(target, &m); e && e->resume) {
++            g_tail_entry_set = false;
++            nonlocal_return(c, m, target);
++        }
++    }
++    g_tail_entry_set = false;
++    call_indirect(c, m, target);
++}
++
+ void deliver_irq(Ctx& c, ::dream::Memory& m) {
+     if (g_hooks) {
+         g_hooks->on_poll(c, m);
+diff --git a/tests/sh4/programs/p13_tailpr.bin b/tests/sh4/programs/p13_tailpr.bin
+index d2c54bfc474c8688f348a7545ce69b0cd17a9174..0c774e23ca56079be02bd09fc84120fdf8ac7ae2 100644
+GIT binary patch
+delta 31
+mcmY$fo1h}4<j=Z+lYymB&7YfrlYx^#$)B<CTY|O&Cj$UsiUt$_
+
+delta 4
+LcmcChnV<py0;~ZS
+
+diff --git a/tests/sh4/programs/p13_tailpr.s b/tests/sh4/programs/p13_tailpr.s
+index f55c22b..b70d76d 100644
+--- a/tests/sh4/programs/p13_tailpr.s
++++ b/tests/sh4/programs/p13_tailpr.s
+@@ -4,12 +4,16 @@
+ ! one: Sonic Adventure's movie player does this on every frame, and treating it as non-local threw
+ ! and resumed the whole call chain each time. r1 counts: inner adds 1, the epilogue adds 2.
+ ! _main2 does the same through a computed jump (jmp @r2), which goes through call_indirect.
+-! Hand-encoded (p13_tailpr.bin, 36 bytes), checked with `dream-translate disasm`.
++! _main3 calls _jret, which returns through `mov.l @r15+,r0; jmp @r0` (Sonic Adventure's task
++! yield does): the code after the call must run once.
++! Hand-encoded (p13_tailpr.bin, 62 bytes), checked with `dream-translate disasm`.
+ 	.text
+ 	.global _main
+ 	.global _inner
+ 	.global _tail
+ 	.global _main2
++	.global _main3
++	.global _jret
+ _main:
+ 	sts.l	pr,@-r15
+ 	bsr	_inner
+@@ -33,3 +37,18 @@ _main2:
+ 	.align 2
+ .Ltail:
+ 	.long	_tail
++_main3:
++	sts.l	pr,@-r15
++	bsr	_jret
++	nop
++	add	#4,r1
++	lds.l	@r15+,pr
++	rts
++	nop
++	nop
++_jret:
++	sts.l	pr,@-r15
++	add	#1,r1
++	mov.l	@r15+,r0
++	jmp	@r0
++	nop
+diff --git a/tests/sh4/programs/programs.cmake b/tests/sh4/programs/programs.cmake
+index 137cb81..bdb126a 100644
+--- a/tests/sh4/programs/programs.cmake
++++ b/tests/sh4/programs/programs.cmake
+@@ -17,7 +17,7 @@ set(DREAM_SH4_PROGRAMS
+   "p11_condfall|p11_condfall.bin|0x8c010000|0x8c010000:0x8c010006:loop 0x8c010006:0x8c01000c:done"
+   "p12_selfcmp|p12_selfcmp.bin|0x8c010000|0x8c010000:0x8c01005c:selfcmp"
+   # Own base: position independent, kept out of the shared function table like p10.
+-  "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail 0x8c040014:0x8c040020:tailpr_main2"
++  "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail 0x8c040014:0x8c040020:tailpr_main2 0x8c040024:0x8c040032:tailpr_main3 0x8c040034:0x8c04003e:tailpr_jret"
+   # GCC-compiled C unit (tests/sh4/cprogs, `make specs` prints this line)
+   "c1_idioms|../cprogs/c1_idioms.bin|0x8c010000|0x8c010000:0x8c010024:div_mod 0x8c010028:0x8c010072:udiv_mix 0x8c010080:0x8c0100e4:dense_switch 0x8c0100e8:0x8c010100:mul64 0x8c010100:0x8c010132:sub64 0x8c010134:0x8c010178:pack_bytes 0x8c010180:0x8c0101d6:vec_transform 0x8c0101d8:0x8c010222:sort_words 0x8c010224:0x8c010246:dot3 0x8c010248:0x8c01026a:clamp_scale 0x8c010270:0x8c01027c:float_to_fixed 0x8c010280:0x8c010526:fib 0x8c01052c:0x8c010552:str_len 0x8c010554:0x8c010574:mem_copy 0x8c010578:0x8c0106b8:udivsi3_i4i 0x8c01059e:0x8c0105d4:udivsi3_i4i_059e 0x8c0105cc:0x8c0105d4:udivsi3_i4i_05cc 0x8c0105d4:0x8c010648:udivsi3_i4i_05d4 0x8c010648:0x8c010796:sdivsi3_i4i 0x8c010674:0x8c0106b8:sdivsi3_i4i_0674 0x8c01069a:0x8c0106b8:sdivsi3_i4i_069a"
+ )
+diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
+index 6511df5..4cee63e 100644
+--- a/tests/sh4/test_programs.cpp
++++ b/tests/sh4/test_programs.cpp
+@@ -158,6 +158,22 @@ struct PollRecorder : dream::sh4::Hooks {
+ };
+ }  // namespace
+ 
++TEST_CASE("p13_tailpr: a jmp to the return address is a return, run once") {
++    // _jret returns through `jmp @r0` to _main3's call return, which lies inside _main3. Taken as
++    // a tail call, that re-entered _main3 there as a second activation and then the first one
++    // ran the same tail again: r1 would gain 4 twice and the stack would be popped twice.
++    dream::BareMemory m;
++    load_image(m, "p13_tailpr.bin", 0x8C040000);
++    Ctx c = fresh();
++    c.pr = 0x8C00FFF0;
++    c.r[1] = 10;
++    const std::uint32_t sp = c.r[15];
++    CHECK_NOTHROW(dream::gen::tailpr_main3(c, m));
++    CHECK(c.r[1] == 15u);
++    CHECK(c.pr == 0x8C00FFF0u);
++    CHECK(c.r[15] == sp);
++}
++
+ TEST_CASE("p13_tailpr: an interrupt polled on a resume records the resume pc") {
+     // A task switch taken at that poll re-enters the body at c.pc. Recording the entry instead ran
+     // the prologue a second time on a frame that was already built (Sonic Adventure, patch 0010).
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index be1273d..26c7374 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -1022,15 +1022,23 @@ private:
+                             << irq_check_if_backedge(t, pc) << "goto " << label(t) << ";\n";
+                     }
+                     out << "            default: c.pc = " << hexu(pc)
+-                        << "; set_tail_entry_pr(entry_pr, target); call_indirect(c, m, target); "
++                        << "; set_tail_entry_pr(entry_pr, target); jump_indirect(c, m, target); "
+                            "return;\n";
+                     out << "        }\n";
+                 } else {
+                     if (ins.op == Op::BRAF)
+                         note(pc, ins,
+                              "computed jump with no recovered table: emitted as tail call");
++                    // A jump to the address this function must return to is a return: Sonic
++                    // Adventure's task yield (0x0C099990) ends `mov.l @r15+,r0; jmp @r0`. As a
++                    // tail call it re-entered the caller's middle as a second activation, and
++                    // the first then ran the same code again on a frame already popped.
++                    if (opt_.trace)
++                        out << "        if (!resume_pc && target == entry_pr) "
++                               "trace_return(c, m, " << hexu(pc) << ");\n";
++                    out << "        if (!resume_pc && target == entry_pr) return;\n";
+                     out << "        c.pc = " << hexu(pc)
+-                        << "; set_tail_entry_pr(entry_pr, target); call_indirect(c, m, target); "
++                        << "; set_tail_entry_pr(entry_pr, target); jump_indirect(c, m, target); "
+                            "return;\n";
+                 }
+                 break;

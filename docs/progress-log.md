@@ -4,6 +4,20 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 
 ## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
 
+- Patch 0010 did not change Mark's crash (same pc). Trace with entries (patch 0011, Mark's PC,
+  cycles 7.040e9 to 7.0446e9) shows the cause directly: fn 0x0C04E714 is entered at 191,801
+  (pr 0x0C04EA94, r15 0x8C00F34C); its jsr at 0x0C04E72C calls 0x0C099990, the task yield, which
+  ends `mov.l @r15+,r0; jmp @r0; lds.l @r15+,pr`; at 191,833 a second activation of 0x0C04E714
+  starts as a RESUME at 0x0C04E730 (r15 0x8C00F32C) with no runtime event in between: the jmp went
+  through call_indirect, which found 0x0C04E730 inside 0x0C04E714 and called its resume entry
+  nested. That activation finished the function and popped the frame; the first, still waiting in
+  C++ behind the jsr, then ran the same code again on the popped frame (r15 32 higher), and its
+  rts took stack data as PR: the crash.
+- Patch 0012: a computed jump to the function's own entry PR is a return; any other computed jump
+  goes through jump_indirect (entry: tail call; inside a translated function: non-local transfer
+  to run_guest; else the untranslated path). Test: _main3/_jret in p13 (returns via jmp @r0); it
+  fails without the fix exactly as the game did (tail run twice, stack off, throw).
+
 - trace_run on Mark's PC (returns after cycle 7,043,000,000, translated vs interpreted): identical
   through fn 0x0C04E714's return to 0x0C04EA94 (r15 0x8C00F34C); then the interpreted run continues
   in fn 0x0C04EA4A (next call at 0x0C04EB14), the translated one returns from 0x0C04F7EA with r15
