@@ -11,6 +11,10 @@ $GameId  = 'sonicadv'
 $GameToml = Join-Path $Root "games\$GameId\$GameId.toml"
 $GameExe = Join-Path $BuildDir "games\$GameId\${GameId}_boot.exe"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+# The game's memory card (VMU) lives here between runs (out\ is never committed).
+$SaveDir = Join-Path $Root 'out\saves'
+$VmuFile = Join-Path $SaveDir 'vmu_A1.bin'
+New-Item -ItemType Directory -Force -Path $SaveDir | Out-Null
 
 # The diagnostic build (build_pc.ps1 -Trace, trace_run.ps1) lives in its own folder.
 function Use-TraceBuild {

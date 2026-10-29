@@ -2,6 +2,17 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: past Station Square's title card (patch 0012); saves kept
+
+- Boot 9 on Mark's PC (0012): ran the full 120 guest s into Station Square, 0 unmapped reads,
+  6,002 sectors, 0.7x real time in the window. Mark saw the area: models and world textures off,
+  lamppost glow and helicopter spotlight low-res/odd. 7,183 untranslated calls, almost all into a
+  module at 0x8CB80000 (busiest 0x0CB830CA x2622): the next speed lead, file not identified yet.
+- Saves: the launcher already supports `--vmu FILE` (created blank and formatted if missing).
+  boot_test.ps1 and play.ps1 now pass out\saves\vmu_A1.bin. Headless check (30 guest s, scripted
+  Start): 48 block writes; the card's directory holds SONICADV_INT, "SONIC ADVENTURE / Main Save
+  File", 10 blocks.
+
 ## 2026-10-28: Station Square's bad model reads were the boot register bank (patch 0008)
 
 - Patch 0010 did not change Mark's crash (same pc). Trace with entries (patch 0011, Mark's PC,

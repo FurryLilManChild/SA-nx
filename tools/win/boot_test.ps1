@@ -17,6 +17,8 @@ $a = @('--config', $GameToml, '--max-seconds', $Seconds,
 # Sonic Adventure's renderer runs on CPU register bank 1 (SR.RB = 1); starting on bank 0 made
 # it lose model pointers (black Station Square, wrong character-select models).
 $a += @('--boot-sr', '0x600000F1')
+# Memory card: created blank on first run, kept between runs (out\saves\vmu_A1.bin).
+$a += @('--vmu', $VmuFile)
 if (-not $KeepIntro) { $a += @('--hide-file', 'SA1_600.SFD') }
 if (-not $Headless) { $a += '--window' }
 Write-Host "Booting for up to $Seconds game seconds (more in real time while it runs slow) ..."
