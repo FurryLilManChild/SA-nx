@@ -2,6 +2,30 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: Switch phase started (patch 0022, switch/), first build in progress
+
+- Mark: with 0021 the intro plays as real video, a bit slow (0.8x in its profile: DcMemory stores
+  about a third, the YUV converter writing word by word, textures re-created each frame).
+  Agreed to move to the Switch; movie speed comes back with Switch performance work.
+- Toolchain in the cloud: Mark's C:\devkitPro (devkitA64, libnx, portlibs with switch-sdl2,
+  cmake, tools) copied over the bridge and run under Wine with CoD-nx's
+  tools/linux/setup_switch_wine.sh; mesa-switch NVK (libvulkan.a, headers, Mesa license) from
+  ghcr.io/danfromtico/switch-dev-legacy-vulkan (MIT; Mark's OK). glslang is not needed: the
+  renderer's shaders are SPIR-V at build time. One 10.7 MB part compiles in 43 s at -O1.
+- Patch 0022: a host dream-translate for cross builds (DREAM_HOST_TRANSLATE), libchdr static on
+  the Switch, render's Switch branch (NVK, render/src/vk/window_switch.cpp: VI surface, libnx
+  pad, SDL's positional binding names mapped to the Switch's buttons, Minus+Plus for the menu),
+  an SDL2 audio sink, the sink's volume, Presenter::stretch, and the port menu
+  (render/include/dream/render/port_menu.h; PC: F1; options in --options FILE; the game pauses
+  while it is open). Tests: render.unit (port menu options and navigation).
+- switch/src/switch_main.cpp: logs per stream, crash reports as module offsets through the fs
+  service, terminate handler, applet-type check, the CPU clock for the port menu (clkrst; not
+  under Horizon OC), the launcher on a 256 MB-stack thread on core 1. switch/build.sh builds and
+  stages the NRO and an SD copy of sonicadv.toml; tools/win/stage_switch.ps1 copies the disc,
+  1ST_READ.BIN and the memory card on Mark's PC.
+- Not yet built for the PC with 0022 (MSVC). The libraries, the launcher and switch_main compile
+  for the Switch; the full build is running.
+
 ## 2026-10-29: movie frames never refreshed; video memory writes now invalidate textures (0021)
 
 - With 0020 the Perfect Chaos intro showed one clean frame (water) and "shook". The intro is

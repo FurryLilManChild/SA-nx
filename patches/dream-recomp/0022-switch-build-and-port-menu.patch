@@ -1,0 +1,1557 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1376565..d8278ea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,6 +41,10 @@ function(dream_add_libchdr)
+   # of the same name (CMP0077 OLD). Force NEW so the settings below actually apply.
+   set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+   set(BUILD_SHARED_LIBS ON)
++  if(NINTENDO_SWITCH)
++    set(BUILD_SHARED_LIBS OFF)  # SA-nx: Horizon has no shared libraries
++    set(INSTALL_STATIC_LIBS ON)
++  endif()
+   set(CHDR_WANT_TESTS OFF)
+   set(INSTALL_STATIC_LIBS OFF)
+   add_subdirectory(third_party/libchdr)
+diff --git a/audio/CMakeLists.txt b/audio/CMakeLists.txt
+index dc300c8..9cdc0b2 100644
+--- a/audio/CMakeLists.txt
++++ b/audio/CMakeLists.txt
+@@ -1,6 +1,17 @@
+ # dream::audio — playback through SDL3 (WP2.5). Optional in exactly the way the renderer is: the
+ # AICA and its mixer are part of dream::runtime and are tested headlessly, and a build without SDL3
+ # still produces sound into a WAV file through the launcher's --wav.
++if(NINTENDO_SWITCH)
++  # SA-nx: the Switch has devkitPro's SDL2 (switch-sdl2), used for audio only.
++  add_library(dream_audio STATIC src/sdl2_sink.cpp)
++  target_include_directories(dream_audio PUBLIC include)
++  target_include_directories(dream_audio SYSTEM PRIVATE "$ENV{DEVKITPRO}/portlibs/switch/include")
++  target_link_libraries(dream_audio PUBLIC "$ENV{DEVKITPRO}/portlibs/switch/lib/libSDL2.a" nx)
++  dream_target_defaults(dream_audio)
++  add_library(dream::audio ALIAS dream_audio)
++  message(STATUS "dream::audio: SDL2 playback (Switch)")
++  return()
++endif()
+ find_package(SDL3 QUIET CONFIG)
+ if(NOT SDL3_FOUND)
+   message(STATUS "dream::audio: no SDL3; playback is skipped")
+diff --git a/audio/include/dream/audio/sink.h b/audio/include/dream/audio/sink.h
+index aad4553..e9f8450 100644
+--- a/audio/include/dream/audio/sink.h
++++ b/audio/include/dream/audio/sink.h
+@@ -16,8 +16,6 @@
+ #include <string>
+ #include <vector>
+ 
+-struct SDL_AudioStream;
+-
+ namespace dream::audio {
+ 
+ class Sink {
+@@ -32,7 +30,7 @@ public:
+     // stopping a run for.
+     bool open(unsigned rate = 44100);
+     void close();
+-    bool is_open() const noexcept { return stream_ != nullptr; }
++    bool is_open() const noexcept { return stream_ != nullptr || device_ != 0; }
+ 
+     // One stereo sample from the AICA. Buffered until a block is worth sending.
+     void push(std::int16_t left, std::int16_t right);
+@@ -48,13 +46,19 @@ public:
+     // picture.
+     unsigned high_water = 8192;
+ 
++    // SA-nx: 0 to 1, from the port menu. Applied to every sample pushed.
++    float volume = 1.0f;
++
+     std::uint64_t pushed = 0, dropped = 0, blocks = 0;
+     const std::string& error() const noexcept { return error_; }
+ 
+ private:
+     static constexpr std::size_t kBlockFrames = 512;  // stereo frames per send
+ 
+-    SDL_AudioStream* stream_ = nullptr;
++    // The SDL3 stream (an SDL_AudioStream*), opaque here so this header names no SDL version:
++    // the Switch build includes SDL2, which declares a different type by the same name (SA-nx).
++    void* stream_ = nullptr;
++    std::uint32_t device_ = 0;  // SA-nx: the SDL2 device (the Switch build), when stream_ is not used
+     std::vector<std::int16_t> block_;
+     unsigned rate_ = 44100;
+     std::string error_;
+diff --git a/audio/src/sdl2_sink.cpp b/audio/src/sdl2_sink.cpp
+new file mode 100644
+index 0000000..cc03bf7
+--- /dev/null
++++ b/audio/src/sdl2_sink.cpp
+@@ -0,0 +1,78 @@
++// See sink.h. SA-nx: the Switch's playback, through devkitPro's switch-sdl2 (audren underneath),
++// which converts the AICA's 44.1 kHz to the console's 48 kHz. The same queue policy as the SDL3
++// sink: buffer a block, drop it when the device is too far behind, never block the guest.
++#include "dream/audio/sink.h"
++
++#include <SDL2/SDL.h>
++
++namespace dream::audio {
++
++Sink::~Sink() {
++    close();
++}
++
++bool Sink::open(unsigned rate) {
++    close();
++    rate_ = rate;
++    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
++        error_ = std::string("SDL_InitSubSystem(audio): ") + SDL_GetError();
++        return false;
++    }
++    SDL_AudioSpec want{}, have{};
++    want.freq = static_cast<int>(rate);
++    want.format = AUDIO_S16SYS;
++    want.channels = 2;
++    want.samples = 1024;
++    device_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
++    if (device_ == 0) {
++        error_ = std::string("SDL_OpenAudioDevice: ") + SDL_GetError();
++        return false;
++    }
++    SDL_PauseAudioDevice(device_, 0);
++    block_.reserve(kBlockFrames * 2);
++    return true;
++}
++
++void Sink::close() {
++    if (device_) {
++        SDL_CloseAudioDevice(device_);
++        device_ = 0;
++    }
++    block_.clear();
++}
++
++unsigned Sink::queued_samples() const {
++    if (!device_)
++        return 0;
++    return SDL_GetQueuedAudioSize(device_) / 4u;  // 16-bit stereo
++}
++
++void Sink::push(std::int16_t left, std::int16_t right) {
++    if (!device_)
++        return;
++    if (volume < 0.999f) {
++        left = static_cast<std::int16_t>(static_cast<float>(left) * volume);
++        right = static_cast<std::int16_t>(static_cast<float>(right) * volume);
++    }
++    block_.push_back(left);
++    block_.push_back(right);
++    ++pushed;
++    if (block_.size() < kBlockFrames * 2)
++        return;
++    if (queued_samples() > high_water) {
++        dropped += kBlockFrames;
++        block_.clear();
++        return;
++    }
++    flush();
++}
++
++void Sink::flush() {
++    if (!device_ || block_.empty())
++        return;
++    SDL_QueueAudio(device_, block_.data(), static_cast<Uint32>(block_.size() * sizeof(std::int16_t)));
++    ++blocks;
++    block_.clear();
++}
++
++}  // namespace dream::audio
+diff --git a/audio/src/sdl_sink.cpp b/audio/src/sdl_sink.cpp
+index 84d0920..5135f05 100644
+--- a/audio/src/sdl_sink.cpp
++++ b/audio/src/sdl_sink.cpp
+@@ -5,6 +5,12 @@
+ 
+ namespace dream::audio {
+ 
++namespace {
++SDL_AudioStream* as(void* p) {
++    return static_cast<SDL_AudioStream*>(p);
++}
++}  // namespace
++
+ Sink::~Sink() {
+     close();
+ }
+@@ -29,7 +35,7 @@ bool Sink::open(unsigned rate) {
+     }
+     // A device opened this way starts paused, so that an application can queue something before
+     // the first sample is due.
+-    if (!SDL_ResumeAudioStreamDevice(stream_)) {
++    if (!SDL_ResumeAudioStreamDevice(as(stream_))) {
+         error_ = std::string("SDL_ResumeAudioStreamDevice: ") + SDL_GetError();
+         close();
+         return false;
+@@ -40,7 +46,7 @@ bool Sink::open(unsigned rate) {
+ 
+ void Sink::close() {
+     if (stream_) {
+-        SDL_DestroyAudioStream(stream_);
++        SDL_DestroyAudioStream(as(stream_));
+         stream_ = nullptr;
+     }
+     block_.clear();
+@@ -49,7 +55,7 @@ void Sink::close() {
+ unsigned Sink::queued_samples() const {
+     if (!stream_)
+         return 0;
+-    const int bytes = SDL_GetAudioStreamQueued(stream_);
++    const int bytes = SDL_GetAudioStreamQueued(as(stream_));
+     if (bytes <= 0)
+         return 0;
+     return static_cast<unsigned>(bytes) / 4u;  // 16-bit stereo
+@@ -58,6 +64,10 @@ unsigned Sink::queued_samples() const {
+ void Sink::push(std::int16_t left, std::int16_t right) {
+     if (!stream_)
+         return;
++    if (volume < 0.999f) {
++        left = static_cast<std::int16_t>(static_cast<float>(left) * volume);
++        right = static_cast<std::int16_t>(static_cast<float>(right) * volume);
++    }
+     block_.push_back(left);
+     block_.push_back(right);
+     ++pushed;
+@@ -77,7 +87,7 @@ void Sink::push(std::int16_t left, std::int16_t right) {
+ void Sink::flush() {
+     if (!stream_ || block_.empty())
+         return;
+-    SDL_PutAudioStreamData(stream_, block_.data(),
++    SDL_PutAudioStreamData(as(stream_), block_.data(),
+                            static_cast<int>(block_.size() * sizeof(std::int16_t)));
+     ++blocks;
+     block_.clear();
+diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
+index 08a8560..c3a145c 100644
+--- a/cmake/DreamAddGame.cmake
++++ b/cmake/DreamAddGame.cmake
+@@ -109,11 +109,20 @@ function(dream_add_game id)
+   endif()
+ 
+   separate_arguments(DREAM_TRANSLATE_EXTRA_FLAGS)
++  # SA-nx: a cross build (the Switch) cannot run the dream-translate it builds; it names one built
++  # for the build machine instead, and the translation then does not depend on the target's.
++  if(DREAM_HOST_TRANSLATE)
++    set(_translate ${DREAM_HOST_TRANSLATE})
++    set(_translate_dep "")
++  else()
++    set(_translate dream-translate)
++    set(_translate_dep dream-translate)
++  endif()
+   add_custom_command(
+     OUTPUT ${_units} ${_headers}
+-    COMMAND dream-translate game --config ${_toml_path} --out-dir ${_gen}
++    COMMAND ${_translate} game --config ${_toml_path} --out-dir ${_gen}
+             --parts ${DREAM_TRANSLATE_PARTS} ${DREAM_TRANSLATE_EXTRA_FLAGS}
+-    DEPENDS dream-translate ${_toml_path} ${_symbols} ${_bin} ${_extra_deps}
++    DEPENDS ${_translate_dep} ${_toml_path} ${_symbols} ${_bin} ${_extra_deps}
+     COMMENT "Translating ${ARG_TITLE}"
+     VERBATIM)
+ 
+diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
+index 8dfec0a..de9b125 100644
+--- a/render/CMakeLists.txt
++++ b/render/CMakeLists.txt
+@@ -14,6 +14,7 @@ add_library(dream_render STATIC
+   src/overlay.cpp
+   src/input.cpp
+   src/input_menu.cpp
++  src/port_menu.cpp  # SA-nx
+ )
+ target_include_directories(dream_render PUBLIC include)
+ target_link_libraries(dream_render PUBLIC dream::runtime)
+@@ -22,7 +23,7 @@ add_library(dream::render ALIAS dream_render)
+ 
+ # The device-independent half is tested on every runner, with or without a GPU.
+ if(DREAM_BUILD_TESTS)
+-  add_executable(dream_render_tests tests/test_display_list.cpp tests/test_texture.cpp tests/test_framebuffer.cpp tests/test_tsp.cpp tests/test_background.cpp tests/test_fog.cpp tests/test_overlay.cpp tests/test_input.cpp tests/test_input_menu.cpp ${DREAM_ROOT}/runtime/tests/test_main.cpp)
++  add_executable(dream_render_tests tests/test_display_list.cpp tests/test_texture.cpp tests/test_framebuffer.cpp tests/test_tsp.cpp tests/test_background.cpp tests/test_fog.cpp tests/test_overlay.cpp tests/test_input.cpp tests/test_input_menu.cpp tests/test_port_menu.cpp ${DREAM_ROOT}/runtime/tests/test_main.cpp)
+   target_link_libraries(dream_render_tests PRIVATE dream::render)
+   target_include_directories(dream_render_tests SYSTEM PRIVATE ${DREAM_ROOT}/third_party/doctest)
+   dream_target_defaults(dream_render_tests)
+@@ -33,8 +34,25 @@ if(NOT DREAM_RENDERER)
+   return()
+ endif()
+ 
++if(NINTENDO_SWITCH)
++  # SA-nx: the Switch. Vulkan is mesa-switch's NVK, linked statically from NVK_SDK; the window is
++  # the console's own (window_switch.cpp: a VI surface, libnx for the buttons), so no SDL3.
++  set(NVK_SDK "/opt/nvk-sdk" CACHE PATH "mesa-switch install prefix (lib/libvulkan.a, include/vulkan)")
++  if(NOT EXISTS "${NVK_SDK}/lib/libvulkan.a")
++    message(FATAL_ERROR "NVK_SDK must point at a mesa-switch install (no lib/libvulkan.a in '${NVK_SDK}')")
++  endif()
++  add_library(dream_nvk INTERFACE)
++  target_include_directories(dream_nvk SYSTEM INTERFACE "${NVK_SDK}/include")
++  target_link_libraries(dream_nvk INTERFACE "${NVK_SDK}/lib/libvulkan.a" "${NVK_SDK}/lib/libexpat.a"
++                        "${NVK_SDK}/lib/libzstd.a" z nx stdc++ m)
++  add_library(Vulkan::Vulkan ALIAS dream_nvk)
++  set(Vulkan_FOUND TRUE)
++  set(SDL3_FOUND TRUE)
++  find_program(DREAM_GLSLC NAMES glslc)  # the build machine's
++else()
+ find_package(Vulkan QUIET)
+ find_package(SDL3 QUIET CONFIG)
++endif()
+ if(NOT Vulkan_FOUND OR NOT SDL3_FOUND)
+   message(STATUS "dream::render: Vulkan ${Vulkan_FOUND} SDL3 ${SDL3_FOUND}; the Vulkan backend is skipped")
+   return()
+@@ -75,9 +93,14 @@ foreach(_shader triangle.vert triangle.frag geometry.vert geometry.frag present.
+ endforeach()
+ add_custom_target(dream_render_shaders DEPENDS ${_spv_headers})
+ 
++if(NINTENDO_SWITCH)
++  set(_window_src src/vk/window_switch.cpp)
++else()
++  set(_window_src src/vk/window.cpp)
++endif()
+ add_library(dream_render_vk STATIC
+   src/vk/context.cpp
+-  src/vk/window.cpp
++  ${_window_src}
+   src/vk/resources.cpp
+   src/vk/renderer.cpp
+   src/vk/texture_cache.cpp
+@@ -86,9 +109,17 @@ add_library(dream_render_vk STATIC
+ )
+ add_dependencies(dream_render_vk dream_render_shaders)
+ target_include_directories(dream_render_vk PUBLIC include PRIVATE ${_spv_dir})
+-target_link_libraries(dream_render_vk PUBLIC dream::render Vulkan::Vulkan SDL3::SDL3)
++if(NINTENDO_SWITCH)
++  target_link_libraries(dream_render_vk PUBLIC dream::render Vulkan::Vulkan)
++else()
++  target_link_libraries(dream_render_vk PUBLIC dream::render Vulkan::Vulkan SDL3::SDL3)
++endif()
+ dream_target_defaults(dream_render_vk)
+ add_library(dream::render_vk ALIAS dream_render_vk)
++if(NINTENDO_SWITCH)
++  message(STATUS "dream::render: Vulkan backend enabled (Switch, NVK ${NVK_SDK}, glslc ${DREAM_GLSLC})")
++  return()  # the probe and the viewer are desktop tools
++endif()
+ 
+ # A standalone check that the whole graphics stack works on this machine: opens a window and draws
+ # a triangle. Not a test (it needs a display); run it by hand.
+diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
+new file mode 100644
+index 0000000..33bfd57
+--- /dev/null
++++ b/render/include/dream/render/port_menu.h
+@@ -0,0 +1,71 @@
++// The port menu (SA-nx): the launcher's own settings, over a paused game. Device-independent like
++// the binding screen (input_menu.h): it draws into the RGBA frame on its way to the GPU and is
++// driven by four calls, so the same menu works from a keyboard on the PC and from the buttons on
++// the Switch.
++//
++// Options persist as KEY=VALUE lines. Unknown keys and bad values are ignored, never fatal: a
++// damaged file must not be able to stop the game from starting.
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++namespace dream::render {
++
++struct PortOptions {
++    bool show_fps = false;
++    // 0: the picture at its own 4:3, bars at the sides. 1: stretched to fill the screen.
++    int screen = 0;
++    int volume = 100;  // percent, 0 to 100 in steps of 10
++    // CPU clock in MHz the platform should ask for, 0 for the system's own. Only offered where
++    // the platform can set it (the Switch); elsewhere the row is hidden and the value kept.
++    int cpu_mhz = 0;
++
++    std::string to_text() const;
++    static PortOptions from_text(std::string_view text);
++    bool operator==(const PortOptions& o) const noexcept {
++        return show_fps == o.show_fps && screen == o.screen && volume == o.volume &&
++               cpu_mhz == o.cpu_mhz;
++    }
++};
++
++// The clock steps offered, in MHz. 0 is the system's own; the rest are the Switch's own CPU
++// rates (1785 is the overclock profile the other ports default to).
++constexpr int kCpuSteps[] = {0, 1224, 1581, 1785};
++
++class PortMenu {
++public:
++    enum class Action { None, Close, Controls, Quit };
++
++    // `can_set_clock`: whether to show the CPU row.
++    void open(const PortOptions& o, bool can_set_clock);
++    void close() { open_ = false; }
++    bool is_open() const noexcept { return open_; }
++
++    const PortOptions& options() const noexcept { return options_; }
++    bool dirty() const noexcept { return dirty_; }
++    void mark_saved() noexcept { dirty_ = false; }
++
++    void move(int delta);    // up or down
++    void adjust(int delta);  // left or right on the current row
++    Action activate();       // A, or return
++    Action back();           // B, or escape: closes the menu
++
++    void draw(std::uint32_t* rgba, unsigned pitch, unsigned width, unsigned height) const;
++
++    // For the footer: what the buttons are called on this platform.
++    std::string help = "ARROWS MOVE AND CHANGE, RETURN CHOOSES, ESCAPE RESUMES";
++
++private:
++    enum Row : int { kResume = 0, kControls, kFps, kScreen, kVolume, kCpu, kQuit, kRowCount };
++    bool visible(int row) const { return row != kCpu || clock_; }
++
++    PortOptions options_{};
++    bool open_ = false;
++    bool dirty_ = false;
++    bool clock_ = false;
++    int row_ = kResume;
++};
++
++}  // namespace dream::render
+diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
+index 4424f49..4b2787e 100644
+--- a/render/include/dream/render/vk/present.h
++++ b/render/include/dream/render/vk/present.h
+@@ -47,6 +47,9 @@ public:
+     // Draws the uploaded image, fitted to `target`. Call inside the window's render pass. False
+     // when nothing has been uploaded yet, which leaves the cleared background showing.
+     bool draw(VkCommandBuffer cmd, VkExtent2D target);
++    // SA-nx: fill the whole target instead of keeping the guest's aspect (the port menu's
++    // "Screen: stretch").
++    bool stretch = false;
+ 
+     // The sampler's own filter, which now only decides how a *magnified* image is stretched: the
+     // guest's pixels shown as pixels, or blurred between them. Minification no longer goes through
+diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
+new file mode 100644
+index 0000000..55b747b
+--- /dev/null
++++ b/render/src/port_menu.cpp
+@@ -0,0 +1,203 @@
++// See port_menu.h.
++#include "dream/render/port_menu.h"
++
++#include <algorithm>
++#include <cstdlib>
++
++#include "dream/render/input_menu.h"
++#include "dream/render/overlay.h"
++
++namespace dream::render {
++
++namespace {
++
++std::string_view trim(std::string_view s) {
++    while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
++        s.remove_prefix(1);
++    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r'))
++        s.remove_suffix(1);
++    return s;
++}
++
++bool to_int(std::string_view s, int& out) {
++    if (s.empty() || s.size() > 9)
++        return false;
++    int v = 0;
++    bool neg = false;
++    std::size_t i = 0;
++    if (s[0] == '-') {
++        neg = true;
++        i = 1;
++    }
++    if (i == s.size())
++        return false;
++    for (; i < s.size(); ++i) {
++        if (s[i] < '0' || s[i] > '9')
++            return false;
++        v = v * 10 + (s[i] - '0');
++    }
++    out = neg ? -v : v;
++    return true;
++}
++
++int step_index(int mhz) {
++    for (int i = 0; i < static_cast<int>(std::size(kCpuSteps)); ++i)
++        if (kCpuSteps[i] == mhz)
++            return i;
++    return 0;
++}
++
++}  // namespace
++
++std::string PortOptions::to_text() const {
++    std::string s;
++    s += "SHOW_FPS=" + std::string(show_fps ? "1" : "0") + "\n";
++    s += "SCREEN=" + std::string(screen == 1 ? "stretch" : "4:3") + "\n";
++    s += "VOLUME=" + std::to_string(volume) + "\n";
++    s += "CPU_MHZ=" + std::to_string(cpu_mhz) + "\n";
++    return s;
++}
++
++PortOptions PortOptions::from_text(std::string_view text) {
++    PortOptions o;
++    while (!text.empty()) {
++        const std::size_t nl = text.find('\n');
++        std::string_view line = trim(text.substr(0, nl));
++        text = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
++        if (line.empty() || line[0] == '#')
++            continue;
++        const std::size_t eq = line.find('=');
++        if (eq == std::string_view::npos)
++            continue;
++        const std::string_view key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
++        int v = 0;
++        if (key == "SHOW_FPS" && to_int(value, v))
++            o.show_fps = v != 0;
++        else if (key == "SCREEN")
++            o.screen = value == "stretch" ? 1 : 0;
++        else if (key == "VOLUME" && to_int(value, v))
++            o.volume = std::clamp(v / 10 * 10, 0, 100);
++        else if (key == "CPU_MHZ" && to_int(value, v))
++            o.cpu_mhz = kCpuSteps[step_index(v)];  // anything not offered falls back to stock
++    }
++    return o;
++}
++
++void PortMenu::open(const PortOptions& o, bool can_set_clock) {
++    options_ = o;
++    clock_ = can_set_clock;
++    open_ = true;
++    dirty_ = false;
++    row_ = kResume;
++}
++
++void PortMenu::move(int delta) {
++    for (int tries = 0; tries < kRowCount; ++tries) {
++        row_ = (row_ + delta + kRowCount) % kRowCount;
++        if (visible(row_))
++            return;
++    }
++}
++
++void PortMenu::adjust(int delta) {
++    const PortOptions before = options_;
++    switch (row_) {
++        case kFps:
++            options_.show_fps = !options_.show_fps;
++            break;
++        case kScreen:
++            options_.screen = options_.screen == 1 ? 0 : 1;
++            break;
++        case kVolume:
++            options_.volume = std::clamp(options_.volume + delta * 10, 0, 100);
++            break;
++        case kCpu: {
++            const int n = static_cast<int>(std::size(kCpuSteps));
++            const int i = std::clamp(step_index(options_.cpu_mhz) + delta, 0, n - 1);
++            options_.cpu_mhz = kCpuSteps[i];
++            break;
++        }
++        default:
++            break;
++    }
++    if (!(options_ == before))
++        dirty_ = true;
++}
++
++PortMenu::Action PortMenu::activate() {
++    switch (row_) {
++        case kResume:
++            open_ = false;
++            return Action::Close;
++        case kControls:
++            open_ = false;
++            return Action::Controls;
++        case kQuit:
++            open_ = false;
++            return Action::Quit;
++        default:
++            adjust(1);  // A on a setting steps it, as on a console menu
++            return Action::None;
++    }
++}
++
++PortMenu::Action PortMenu::back() {
++    open_ = false;
++    return Action::Close;
++}
++
++void PortMenu::draw(std::uint32_t* rgba, unsigned pitch, unsigned width, unsigned height) const {
++    if (!open_ || !rgba || width == 0 || height == 0)
++        return;
++    const int w = static_cast<int>(width), h = static_cast<int>(height);
++    const unsigned s = std::max(1u, width / 320u);
++    const int line = static_cast<int>(text_height(s)) + static_cast<int>(s) * 2;
++    const int pad = static_cast<int>(s) * 6;
++
++    fill_rect(rgba, pitch, width, height, 0, 0, w, h, kUiShade);
++    int rows = 0;
++    for (int r = 0; r < kRowCount; ++r)
++        rows += visible(r) ? 1 : 0;
++    const int card_w = std::min(w - pad * 2, static_cast<int>(s) * 230);
++    const int card_h = std::min(h - pad * 2, line * (rows + 4) + pad * 3);
++    const int cx = (w - card_w) / 2, cy = (h - card_h) / 2;
++    fill_rect(rgba, pitch, width, height, cx, cy, card_w, card_h, kUiWhite);
++
++    const int banner_h = line + pad;
++    fill_rect(rgba, pitch, width, height, cx, cy, card_w, banner_h, kUiOrange);
++    const TextStyle banner{kUiWhite, 0, s};
++    draw_text(rgba, pitch, width, height, cx + pad, cy + pad / 2 + static_cast<int>(s),
++              "SONIC ADVENTURE", banner);
++
++    const int left = cx + pad, right = cx + card_w - pad;
++    int y = cy + banner_h + pad;
++    auto row = [&](int index, const std::string& name, const std::string& value) {
++        if (!visible(index))
++            return;
++        const bool sel = index == row_;
++        if (sel)
++            fill_rect(rgba, pitch, width, height, left - static_cast<int>(s) * 2,
++                      y - static_cast<int>(s), right - left + static_cast<int>(s) * 4, line,
++                      kUiOrange);
++        const TextStyle t{sel ? kUiWhite : kUiInk, 0, s};
++        draw_text(rgba, pitch, width, height, left, y, name, t);
++        if (!value.empty())
++            draw_text(rgba, pitch, width, height,
++                      right - static_cast<int>(text_width(value, s)), y, value, t);
++        y += line;
++    };
++    row(kResume, "RESUME", "");
++    row(kControls, "CONTROLS", "");
++    row(kFps, "SHOW FPS", options_.show_fps ? "< ON >" : "< OFF >");
++    row(kScreen, "SCREEN", options_.screen == 1 ? "< STRETCH >" : "< 4:3 >");
++    row(kVolume, "VOLUME", "< " + std::to_string(options_.volume) + "% >");
++    row(kCpu, "CPU CLOCK",
++        options_.cpu_mhz == 0 ? "< STOCK >" : "< " + std::to_string(options_.cpu_mhz) + " MHZ >");
++    y += static_cast<int>(s) * 2;
++    row(kQuit, "QUIT GAME", "");
++
++    const TextStyle hint{kUiGrey, 0, s};
++    draw_text(rgba, pitch, width, height, left, cy + card_h - line, help, hint);
++}
++
++}  // namespace dream::render
+diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
+index f3d3c96..1019398 100644
+--- a/render/src/vk/present.cpp
++++ b/render/src/vk/present.cpp
+@@ -346,7 +346,9 @@ bool Presenter::draw(VkCommandBuffer cmd, VkExtent2D target) {
+     const float target_aspect =
+         static_cast<float>(target.width) / static_cast<float>(target.height);
+     PushConstants push{{1.0f, 1.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 1.0f}};
+-    if (target_aspect > image_aspect)
++    if (stretch) {
++        // Fill the target: both scales stay at 1.
++    } else if (target_aspect > image_aspect)
+         push.scale[0] = image_aspect / target_aspect;
+     else
+         push.scale[1] = target_aspect / image_aspect;
+diff --git a/render/src/vk/window_switch.cpp b/render/src/vk/window_switch.cpp
+new file mode 100644
+index 0000000..4371e9b
+--- /dev/null
++++ b/render/src/vk/window_switch.cpp
+@@ -0,0 +1,558 @@
++// The Switch's window (SA-nx): the same Window as window.cpp, on Horizon instead of SDL3. The
++// surface is the console's default VI layer (VK_NN_vi_surface, as mesa-switch's NVK expects),
++// the controls come from libnx's pad API, and "the window was closed" means HOME and Close.
++//
++// The bindings model stays SDL's: a binding names a button or axis by SDL's positional gamepad
++// name ("a" is the bottom face button, which the Switch calls B), so the same bindings file and
++// the same binding screen work on both, and the Dreamcast's buttons sit where they did on a
++// desktop pad.
++#include <switch.h>
++#define VK_USE_PLATFORM_VI_NN 1
++#include <vulkan/vulkan.h>
++
++#include "dream/render/vk/window.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++namespace dream::render::vk {
++
++namespace {
++constexpr std::uint32_t kFramesInFlight = 2;
++
++// SDL's gamepad button names, positional, to the Switch's buttons. The Switch's B is the bottom
++// button, which SDL calls "a".
++struct ButtonName {
++    const char* name;
++    u64 bit;
++};
++constexpr ButtonName kButtons[] = {
++    {"a", HidNpadButton_B},
++    {"b", HidNpadButton_A},
++    {"x", HidNpadButton_Y},
++    {"y", HidNpadButton_X},
++    {"start", HidNpadButton_Plus},
++    {"back", HidNpadButton_Minus},
++    {"leftshoulder", HidNpadButton_L},
++    {"rightshoulder", HidNpadButton_R},
++    {"leftstick", HidNpadButton_StickL},
++    {"rightstick", HidNpadButton_StickR},
++    {"dpup", HidNpadButton_Up},
++    {"dpdown", HidNpadButton_Down},
++    {"dpleft", HidNpadButton_Left},
++    {"dpright", HidNpadButton_Right},
++};
++
++// Axes. The triggers are buttons on a Switch, so they read 0 or full travel; the sticks are
++// signed, with SDL's convention that down is positive.
++enum Axis : int { kLeftX, kLeftY, kRightX, kRightY, kLeftTrigger, kRightTrigger, kAxisCount };
++constexpr const char* kAxisNames[kAxisCount] = {"leftx",  "lefty",       "rightx",
++                                                 "righty", "lefttrigger", "righttrigger"};
++
++// The launcher's own controls (Control order). Menus follow the console's convention: A
++// confirms, B goes back. Menu is Minus and Plus together, handled in poll().
++const u64 kNav[static_cast<unsigned>(Control::Count)] = {
++    HidNpadButton_AnyUp,    // Up: the d-pad or the left stick, for menus
++    HidNpadButton_AnyDown,  // Down
++    HidNpadButton_AnyLeft,  // Left
++    HidNpadButton_AnyRight, // Right
++    HidNpadButton_A,        // A: confirm
++    HidNpadButton_B,        // B
++    HidNpadButton_Y,        // X
++    HidNpadButton_X,        // Y
++    HidNpadButton_Plus,     // Start
++    HidNpadButton_ZL,       // LeftTrigger
++    HidNpadButton_ZR,       // RightTrigger
++    0,                      // Screenshot: the console's own capture button does this
++    0,                      // Capture
++    0,                      // ToggleFps: in the port menu
++    0,                      // Menu: Minus and Plus together, below
++    HidNpadButton_B,        // Back
++};
++
++PadState g_pad;
++bool g_pad_ready = false;
++HidNpadButton g_last_buttons{};
++
++float axis_value(int axis, u64 buttons) {
++    switch (axis) {
++        case kLeftX:
++        case kLeftY: {
++            const HidAnalogStickState s = padGetStickPos(&g_pad, 0);
++            return axis == kLeftX ? static_cast<float>(s.x) / 32767.0f
++                                  : -static_cast<float>(s.y) / 32767.0f;
++        }
++        case kRightX:
++        case kRightY: {
++            const HidAnalogStickState s = padGetStickPos(&g_pad, 1);
++            return axis == kRightX ? static_cast<float>(s.x) / 32767.0f
++                                   : -static_cast<float>(s.y) / 32767.0f;
++        }
++        case kLeftTrigger:
++            return (buttons & HidNpadButton_ZL) ? 1.0f : 0.0f;
++        case kRightTrigger:
++            return (buttons & HidNpadButton_ZR) ? 1.0f : 0.0f;
++        default:
++            return 0.0f;
++    }
++}
++}  // namespace
++
++Window::~Window() {
++    destroy();
++}
++
++bool Window::create(const char* title, int width, int height, bool want_validation) {
++    (void)title;
++    (void)width;
++    (void)height;
++    if (!g_pad_ready) {
++        padConfigureInput(1, HidNpadStyleSet_NpadStandard);
++        padInitializeDefault(&g_pad);
++        g_pad_ready = true;
++    }
++    const std::vector<const char*> extensions = {VK_KHR_SURFACE_EXTENSION_NAME,
++                                                 VK_NN_VI_SURFACE_EXTENSION_NAME};
++    if (!ctx_.create(extensions, want_validation)) {
++        error_ = ctx_.error();
++        return false;
++    }
++    NWindow* win = nwindowGetDefault();
++    nwindowSetDimensions(win, 1280, 720);
++    VkViSurfaceCreateInfoNN sci{};
++    sci.sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
++    sci.window = win;
++    if (vkCreateViSurfaceNN(ctx_.instance(), &sci, nullptr, &surface_) != VK_SUCCESS) {
++        error_ = "vkCreateViSurfaceNN failed";
++        return false;
++    }
++
++    VkCommandPoolCreateInfo pci{};
++    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
++    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
++    pci.queueFamilyIndex = ctx_.queue_family();
++    vkCreateCommandPool(ctx_.device(), &pci, nullptr, &pool_);
++    cmds_.resize(kFramesInFlight);
++    VkCommandBufferAllocateInfo cai{};
++    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
++    cai.commandPool = pool_;
++    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++    cai.commandBufferCount = kFramesInFlight;
++    vkAllocateCommandBuffers(ctx_.device(), &cai, cmds_.data());
++    fences_.resize(kFramesInFlight);
++    acquired_.resize(kFramesInFlight);
++    rendered_.resize(kFramesInFlight);
++    for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
++        VkFenceCreateInfo fci{};
++        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++        fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
++        vkCreateFence(ctx_.device(), &fci, nullptr, &fences_[i]);
++        VkSemaphoreCreateInfo semi{};
++        semi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
++        vkCreateSemaphore(ctx_.device(), &semi, nullptr, &acquired_[i]);
++        vkCreateSemaphore(ctx_.device(), &semi, nullptr, &rendered_[i]);
++    }
++    refresh_devices();
++    set_bindings(Bindings::defaults());
++    return create_swapchain();
++}
++
++VkPresentModeKHR Window::choose_present_mode() const {
++    return VK_PRESENT_MODE_FIFO_KHR;  // the console's display is vsync; nothing else to measure
++}
++
++bool Window::create_swapchain() {
++    VkSurfaceCapabilitiesKHR caps{};
++    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx_.physical_device(), surface_, &caps);
++    std::uint32_t format_count = 0;
++    vkGetPhysicalDeviceSurfaceFormatsKHR(ctx_.physical_device(), surface_, &format_count, nullptr);
++    std::vector<VkSurfaceFormatKHR> formats(format_count);
++    vkGetPhysicalDeviceSurfaceFormatsKHR(ctx_.physical_device(), surface_, &format_count,
++                                         formats.data());
++    if (formats.empty()) {
++        error_ = "the surface offers no formats";
++        return false;
++    }
++    VkSurfaceFormatKHR chosen = formats[0];
++    for (const auto& f : formats)
++        if (f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) {
++            chosen = f;
++            break;
++        }
++    format_ = chosen.format;
++    extent_ = caps.currentExtent;
++    if (extent_.width == 0xFFFFFFFFu)
++        extent_ = {1280, 720};
++    std::uint32_t image_count = std::max(caps.minImageCount, 2u);
++    if (caps.maxImageCount != 0)
++        image_count = std::min(image_count, caps.maxImageCount);
++
++    VkSwapchainCreateInfoKHR sci{};
++    sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
++    sci.surface = surface_;
++    sci.minImageCount = image_count;
++    sci.imageFormat = format_;
++    sci.imageColorSpace = chosen.colorSpace;
++    sci.imageExtent = extent_;
++    sci.imageArrayLayers = 1;
++    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++    sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    sci.preTransform = caps.currentTransform;
++    sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++    sci.presentMode = choose_present_mode();
++    sci.clipped = VK_TRUE;
++    if (vkCreateSwapchainKHR(ctx_.device(), &sci, nullptr, &swapchain_) != VK_SUCCESS) {
++        error_ = "vkCreateSwapchainKHR failed";
++        return false;
++    }
++    std::uint32_t count = 0;
++    vkGetSwapchainImagesKHR(ctx_.device(), swapchain_, &count, nullptr);
++    images_.resize(count);
++    vkGetSwapchainImagesKHR(ctx_.device(), swapchain_, &count, images_.data());
++
++    depth_format_ = pick_depth_format(ctx_.physical_device());
++    if (depth_format_ == VK_FORMAT_UNDEFINED ||
++        !depth_.create(ctx_, depth_format_, extent_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
++                       VK_IMAGE_ASPECT_DEPTH_BIT)) {
++        error_ = "could not create the depth buffer";
++        return false;
++    }
++
++    VkAttachmentDescription attachments[2]{};
++    attachments[0].format = format_;
++    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
++    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++    attachments[1].format = depth_format_;
++    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
++    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
++    VkAttachmentReference colour_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
++    VkAttachmentReference depth_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
++    VkSubpassDescription subpass{};
++    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++    subpass.colorAttachmentCount = 1;
++    subpass.pColorAttachments = &colour_ref;
++    subpass.pDepthStencilAttachment = &depth_ref;
++    VkSubpassDependency dep{};
++    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
++    dep.srcStageMask =
++        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
++    dep.dstStageMask =
++        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
++    dep.dstAccessMask =
++        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
++    VkRenderPassCreateInfo rci{};
++    rci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
++    rci.attachmentCount = 2;
++    rci.pAttachments = attachments;
++    rci.subpassCount = 1;
++    rci.pSubpasses = &subpass;
++    rci.dependencyCount = 1;
++    rci.pDependencies = &dep;
++    vkCreateRenderPass(ctx_.device(), &rci, nullptr, &render_pass_);
++
++    views_.resize(count);
++    framebuffers_.resize(count);
++    for (std::uint32_t i = 0; i < count; ++i) {
++        VkImageViewCreateInfo vci{};
++        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++        vci.image = images_[i];
++        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
++        vci.format = format_;
++        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++        vkCreateImageView(ctx_.device(), &vci, nullptr, &views_[i]);
++        const VkImageView fb_attachments[2] = {views_[i], depth_.view()};
++        VkFramebufferCreateInfo fci{};
++        fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
++        fci.renderPass = render_pass_;
++        fci.attachmentCount = 2;
++        fci.pAttachments = fb_attachments;
++        fci.width = extent_.width;
++        fci.height = extent_.height;
++        fci.layers = 1;
++        vkCreateFramebuffer(ctx_.device(), &fci, nullptr, &framebuffers_[i]);
++    }
++    return true;
++}
++
++void Window::destroy_swapchain() {
++    if (!ctx_.device())
++        return;
++    vkDeviceWaitIdle(ctx_.device());
++    for (VkFramebuffer f : framebuffers_) vkDestroyFramebuffer(ctx_.device(), f, nullptr);
++    for (VkImageView v : views_) vkDestroyImageView(ctx_.device(), v, nullptr);
++    framebuffers_.clear();
++    views_.clear();
++    images_.clear();
++    depth_.destroy();
++    if (render_pass_) {
++        vkDestroyRenderPass(ctx_.device(), render_pass_, nullptr);
++        render_pass_ = VK_NULL_HANDLE;
++    }
++    if (swapchain_) {
++        vkDestroySwapchainKHR(ctx_.device(), swapchain_, nullptr);
++        swapchain_ = VK_NULL_HANDLE;
++    }
++}
++
++bool Window::recreate_swapchain() {
++    destroy_swapchain();
++    return create_swapchain();
++}
++
++void Window::refresh_devices() {
++    // One controller: the console's own (handheld or player 1). pads_ holds a placeholder so that
++    // gamepad_connected() is true; nothing here dereferences it.
++    pads_.assign(1, nullptr);
++    devices_.assign({"KEYBOARD", "SWITCH CONTROLLER"});
++}
++
++void Window::set_bindings(const Bindings& b) {
++    bindings_ = b;
++    for (unsigned i = 0; i < kPadControlCount; ++i) {
++        const Binding& bind = bindings_.gamepad.b[i];
++        gpad_[i] = Resolved{};
++        key_[i] = Resolved{};
++        if (bind.source == BindSource::Button) {
++            for (const ButtonName& n : kButtons)
++                if (bind.code == n.name)
++                    gpad_[i] = Resolved{BindSource::Button, static_cast<int>(&n - kButtons), 1};
++        } else if (bind.source == BindSource::Axis) {
++            for (int a = 0; a < kAxisCount; ++a)
++                if (bind.code == kAxisNames[a])
++                    gpad_[i] = Resolved{BindSource::Axis, a, bind.sign};
++        }
++    }
++}
++
++void Window::begin_capture() noexcept {
++    capturing_ = true;
++    captured_ = false;
++    capture_cancelled_ = false;
++    capture_ = Binding{};
++}
++
++void Window::cancel_capture() noexcept {
++    capturing_ = false;
++    captured_ = false;
++}
++
++bool Window::take_capture(Binding& out, bool& cancelled) noexcept {
++    if (!captured_)
++        return false;
++    captured_ = false;
++    out = capture_;
++    cancelled = capture_cancelled_;
++    return true;
++}
++
++bool Window::poll() {
++    // HOME then Close, or the system asking the app to exit.
++    if (!appletMainLoop())
++        running_ = false;
++    padUpdate(&g_pad);
++    const u64 buttons = padGetButtons(&g_pad);
++    const u64 down = padGetButtonsDown(&g_pad);
++
++    // Rebinding: the next button or stick push becomes the binding. Minus cancels (the console
++    // has no escape key, and Minus is not a Dreamcast button).
++    if (capturing_ && down) {
++        captured_ = true;
++        capturing_ = false;
++        if (down & HidNpadButton_Minus) {
++            capture_cancelled_ = true;
++        } else if (down & HidNpadButton_ZL) {
++            capture_ = Binding{BindSource::Axis, "lefttrigger", 1};
++        } else if (down & HidNpadButton_ZR) {
++            capture_ = Binding{BindSource::Axis, "righttrigger", 1};
++        } else {
++            capture_cancelled_ = true;
++            for (const ButtonName& n : kButtons)
++                if (down & n.bit) {
++                    capture_ = Binding{BindSource::Button, n.name, 1};
++                    capture_cancelled_ = false;
++                    break;
++                }
++        }
++    }
++
++    // The launcher's controls. Menu is Minus and Plus held together; on that frame Start is not
++    // also reported, so opening the menu does not also pause the game underneath it.
++    const bool combo = (buttons & HidNpadButton_Minus) && (buttons & HidNpadButton_Plus);
++    for (unsigned i = 0; i < static_cast<unsigned>(Control::Count); ++i) {
++        const bool was = held_[i];
++        bool now = kNav[i] != 0 && (buttons & kNav[i]) != 0;
++        if (static_cast<Control>(i) == Control::Menu)
++            now = combo;
++        if (static_cast<Control>(i) == Control::Start && (buttons & HidNpadButton_Minus))
++            now = false;
++        held_[i] = now;
++        pressed_[i] = now && !was;
++    }
++
++    const std::uint64_t now_ns = armTicksToNs(armGetSystemTick());
++    float dt = last_poll_ns_ ? static_cast<float>(now_ns - last_poll_ns_) * 1e-9f : 0.0f;
++    last_poll_ns_ = now_ns;
++    dt = std::clamp(dt, 0.0f, 0.25f);
++
++    const float dead = static_cast<float>(bindings_.deadzone_percent) / 100.0f;
++    for (unsigned i = 0; i < kPadControlCount; ++i) {
++        bool digital_on = false;
++        float analogue = 0.0f;
++        if (!capturing_) {
++            if (gpad_[i].source == BindSource::Button) {
++                const u64 bit = kButtons[gpad_[i].code].bit;
++                // Plus is Start, except while Minus is down (the menu combination).
++                if ((buttons & bit) && !(bit == HidNpadButton_Plus && (buttons & HidNpadButton_Minus)))
++                    digital_on = true;
++            } else if (gpad_[i].source == BindSource::Axis) {
++                const float raw = axis_value(gpad_[i].code, buttons);
++                const float half = gpad_[i].sign < 0 ? -raw : raw;
++                if (gpad_[i].code == kLeftTrigger || gpad_[i].code == kRightTrigger) {
++                    if (half > 0.5f)
++                        digital_on = true;  // a button on this console: ramps like a key
++                } else if (half > dead) {
++                    analogue = std::max(analogue, std::min(1.0f, (half - dead) / (1.0f - dead)));
++                }
++            }
++        }
++        const bool is_trigger = i == static_cast<unsigned>(PadControl::LeftTrigger) ||
++                                i == static_cast<unsigned>(PadControl::RightTrigger);
++        float value = analogue;
++        if (is_trigger && bindings_.trigger_ramp) {
++            constexpr float kRampSeconds = 0.15f;
++            ramp_[i] = digital_on ? std::min(1.0f, ramp_[i] + dt / kRampSeconds) : 0.0f;
++            value = std::max(value, ramp_[i]);
++        } else {
++            ramp_[i] = 0.0f;
++            if (digital_on)
++                value = 1.0f;
++        }
++        const bool was = pad_held_[i];
++        pad_held_[i] = value > 0.0f;
++        pad_pressed_[i] = pad_held_[i] && !was;
++        pad_value_[i] = value;
++    }
++    g_last_buttons = static_cast<HidNpadButton>(buttons);
++    return running_;
++}
++
++bool Window::pad_held(PadControl c) const noexcept {
++    return pad_held_[static_cast<unsigned>(c)];
++}
++
++bool Window::pad_pressed(PadControl c) const noexcept {
++    return pad_pressed_[static_cast<unsigned>(c)];
++}
++
++float Window::pad_value(PadControl c) const noexcept {
++    return pad_value_[static_cast<unsigned>(c)];
++}
++
++bool Window::held(Control c) const noexcept {
++    return held_[static_cast<unsigned>(c)];
++}
++
++bool Window::pressed(Control c) const noexcept {
++    return pressed_[static_cast<unsigned>(c)];
++}
++
++bool Window::begin_frame(std::uint32_t& image_index, VkCommandBuffer& cmd) {
++    if (!swapchain_)
++        return false;
++    vkWaitForFences(ctx_.device(), 1, &fences_[frame_], VK_TRUE, UINT64_MAX);
++    const VkResult r = vkAcquireNextImageKHR(ctx_.device(), swapchain_, UINT64_MAX,
++                                             acquired_[frame_], VK_NULL_HANDLE, &image_index);
++    if (r == VK_ERROR_OUT_OF_DATE_KHR)
++        return false;
++    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
++        error_ = "vkAcquireNextImageKHR failed";
++        return false;
++    }
++    vkResetFences(ctx_.device(), 1, &fences_[frame_]);
++    cmd = cmds_[frame_];
++    vkResetCommandBuffer(cmd, 0);
++    VkCommandBufferBeginInfo bi{};
++    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    vkBeginCommandBuffer(cmd, &bi);
++    return true;
++}
++
++bool Window::end_frame(std::uint32_t image_index) {
++    VkCommandBuffer cmd = cmds_[frame_];
++    vkEndCommandBuffer(cmd);
++    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    VkSubmitInfo si{};
++    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++    si.waitSemaphoreCount = 1;
++    si.pWaitSemaphores = &acquired_[frame_];
++    si.pWaitDstStageMask = &wait_stage;
++    si.commandBufferCount = 1;
++    si.pCommandBuffers = &cmd;
++    si.signalSemaphoreCount = 1;
++    si.pSignalSemaphores = &rendered_[frame_];
++    vkQueueSubmit(ctx_.queue(), 1, &si, fences_[frame_]);
++    VkPresentInfoKHR pi{};
++    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
++    pi.waitSemaphoreCount = 1;
++    pi.pWaitSemaphores = &rendered_[frame_];
++    pi.swapchainCount = 1;
++    pi.pSwapchains = &swapchain_;
++    pi.pImageIndices = &image_index;
++    const VkResult r = vkQueuePresentKHR(ctx_.queue(), &pi);
++    last_presented_ = image_index;
++    frame_ = (frame_ + 1) % kFramesInFlight;
++    return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
++}
++
++bool Window::read_pixels(std::vector<std::uint8_t>& out, std::uint32_t& width,
++                         std::uint32_t& height) {
++    (void)out;
++    (void)width;
++    (void)height;
++    return false;  // the console's capture button takes screenshots
++}
++
++void Window::destroy() {
++    if (ctx_.device()) {
++        vkDeviceWaitIdle(ctx_.device());
++        destroy_swapchain();
++        for (VkFence f : fences_) vkDestroyFence(ctx_.device(), f, nullptr);
++        for (VkSemaphore s : acquired_) vkDestroySemaphore(ctx_.device(), s, nullptr);
++        for (VkSemaphore s : rendered_) vkDestroySemaphore(ctx_.device(), s, nullptr);
++        fences_.clear();
++        acquired_.clear();
++        rendered_.clear();
++        if (pool_) {
++            vkDestroyCommandPool(ctx_.device(), pool_, nullptr);
++            pool_ = VK_NULL_HANDLE;
++        }
++    }
++    if (surface_ && ctx_.instance()) {
++        vkDestroySurfaceKHR(ctx_.instance(), surface_, nullptr);
++        surface_ = VK_NULL_HANDLE;
++    }
++    ctx_.destroy();
++    pads_.clear();
++    devices_.clear();
++}
++
++// Beside the game, so the bindings travel with the app folder on the SD card.
++std::string default_bindings_path() {
++    return "sdmc:/switch/sonicadv/bindings.txt";
++}
++
++}  // namespace dream::render::vk
+diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
+new file mode 100644
+index 0000000..cae3ece
+--- /dev/null
++++ b/render/tests/test_port_menu.cpp
+@@ -0,0 +1,67 @@
++// The port menu (SA-nx): options round-trip through their file, a damaged file falls back to
++// defaults, and the menu moves, changes and closes as the footer says.
++#include <cstdint>
++#include <vector>
++
++#include "dream/render/port_menu.h"
++
++#include "doctest.h"
++
++using namespace dream::render;
++
++TEST_CASE("port menu: options round-trip through their text") {
++    PortOptions o;
++    o.show_fps = true;
++    o.screen = 1;
++    o.volume = 70;
++    o.cpu_mhz = 1785;
++    const PortOptions back = PortOptions::from_text(o.to_text());
++    CHECK(back == o);
++}
++
++TEST_CASE("port menu: a damaged options file keeps the defaults for what it cannot read") {
++    const PortOptions o =
++        PortOptions::from_text("# comment\nVOLUME=lots\nSCREEN=stretch\r\nCPU_MHZ=9999\ngarbage\n");
++    CHECK(o.volume == 100);   // unreadable: default
++    CHECK(o.screen == 1);     // read, and the Windows line ending did not matter
++    CHECK(o.cpu_mhz == 0);    // not an offered rate: stock
++    CHECK_FALSE(o.show_fps);  // absent: default
++}
++
++TEST_CASE("port menu: moving, changing and closing") {
++    PortMenu m;
++    PortOptions o;
++    m.open(o, /*can_set_clock=*/false);
++    CHECK(m.is_open());
++    // Resume, Controls, FPS, Screen, Volume, (CPU hidden), Quit.
++    m.move(1);
++    m.move(1);  // SHOW FPS
++    CHECK(m.activate() == PortMenu::Action::None);
++    CHECK(m.options().show_fps);
++    CHECK(m.dirty());
++    m.move(1);
++    m.move(1);  // VOLUME
++    m.adjust(-1);
++    CHECK(m.options().volume == 90);
++    m.move(1);  // the CPU row is hidden, so this is QUIT
++    CHECK(m.activate() == PortMenu::Action::Quit);
++    CHECK_FALSE(m.is_open());
++
++    m.open(o, /*can_set_clock=*/true);
++    m.move(-1);  // wraps to QUIT
++    m.move(-1);  // CPU CLOCK, offered this time
++    m.adjust(1);
++    CHECK(m.options().cpu_mhz == kCpuSteps[1]);
++    CHECK(m.back() == PortMenu::Action::Close);
++    CHECK_FALSE(m.is_open());
++}
++
++TEST_CASE("port menu: draws inside the frame") {
++    PortMenu m;
++    m.open(PortOptions{}, true);
++    std::vector<std::uint32_t> px(640 * 480, 0x12345678u);
++    m.draw(px.data(), 640, 640, 480);
++    // The shade covers everything and the card is white somewhere in the middle.
++    CHECK(px[0] != 0x12345678u);
++    CHECK(px[240 * 640 + 320] != 0x12345678u);
++}
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index 824d0b4..85716d5 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -24,6 +24,15 @@
+ 
+ #include "profiler.h"  // SA-nx: --profile
+ 
++// SA-nx: the port menu's CPU clock setting, for a platform that can set one (the Switch layer
++// assigns it before the launcher starts). Null everywhere else, and then the row is not shown.
++void (*dream_port_set_cpu_mhz)(int mhz) = nullptr;
++#ifdef __SWITCH__
++// The Switch's own main() (switch/src/switch_main.cpp) sets up Horizon and calls this on a
++// thread with a stack big enough for the translated code.
++#define main dream_boot_main
++#endif
++
+ #include "dream/runtime/aica/aica.h"
+ #include "dream/runtime/aica/rtc.h"
+ #include "dream/runtime/gdrom/disc.h"
+@@ -52,6 +61,7 @@
+ #include "dream/render/display_list.h"
+ #include "dream/render/framebuffer.h"
+ #include "dream/render/input_menu.h"
++#include "dream/render/port_menu.h"
+ #include "dream/render/overlay.h"
+ #include "dream/render/vk/offscreen.h"
+ #include "dream/render/vk/present.h"
+@@ -245,7 +255,7 @@ struct Live {
+     // Returns false when the user has closed the window.
+     bool present(std::uint64_t frame, std::uint64_t guest_cycles) {
+         guest_frame = frame;
+-        if (!window.poll())
++        if (!window.poll() || quit_requested)
+             return false;
+         update_counter(guest_cycles);
+         pump_menu();
+@@ -282,7 +292,8 @@ struct Live {
+         // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
+         // are meant to produce the game's own pixels, which is what makes one comparable with
+         // another and usable as a reference image.
+-        if (show_fps || menu.is_open())
++        apply_options();
++        if (show_fps || menu.is_open() || port.is_open())
+             presenter.upload(cmd, source, shown.width, shown.height,
+                              [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
+                                  if (show_fps)
+@@ -290,6 +301,8 @@ struct Live {
+                                  // Last, so the screen sits over the counter rather than under it.
+                                  if (menu.is_open())
+                                      menu.draw(px, w, w, h, window.devices());
++                                 if (port.is_open())
++                                     port.draw(px, w, w, h);
+                              });
+         else
+             presenter.upload(cmd, source, shown.width, shown.height);
+@@ -320,6 +333,7 @@ struct Live {
+         ++presented;
+         if (window.pressed(dream::render::vk::Control::ToggleFps)) {
+             show_fps = !show_fps;
++            options.show_fps = show_fps;
+             fps_mark = {};  // start the next average fresh rather than from whenever it last ran
+         }
+         if (window.pressed(dream::render::vk::Control::Screenshot))
+@@ -373,8 +387,110 @@ struct Live {
+ 
+     // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
+     // never take away the way back out. Called once per poll, running or paused.
++    // SA-nx: the port menu, over a paused game. The menu key opens it; its Controls row opens the
++    // binding screen, and the menu key from there comes back here.
++    bool paused() const noexcept { return menu.is_open() || port.is_open(); }
++
++    void apply_options() {
++        show_fps = options.show_fps;
++        presenter.stretch = options.screen == 1;
++        if (volume_out)
++            *volume_out = static_cast<float>(options.volume) / 100.0f;
++        if (options.cpu_mhz != applied_cpu_mhz && dream_port_set_cpu_mhz) {
++            applied_cpu_mhz = options.cpu_mhz;
++            dream_port_set_cpu_mhz(options.cpu_mhz);
++        }
++    }
++
++    void load_options() {
++        if (options_path.empty())
++            return;
++        std::ifstream in(options_path, std::ios::binary);
++        if (!in)
++            return;  // the first run: defaults
++        const std::string text((std::istreambuf_iterator<char>(in)),
++                               std::istreambuf_iterator<char>());
++        options = dream::render::PortOptions::from_text(text);
++    }
++
++    void save_options() {
++        if (options_path.empty())
++            return;
++        // Delete first: the Switch's SD card refuses to replace a file in a rename, and a plain
++        // truncating write is enough for a file this size.
++        std::ofstream out(options_path, std::ios::binary | std::ios::trunc);
++        if (out)
++            out << options.to_text();
++        else
++            std::fprintf(stderr, "cannot write the options to %s\n", options_path.c_str());
++    }
++
++    void open_port() {
++        port.open(options, dream_port_set_cpu_mhz != nullptr);
++#ifdef __SWITCH__
++        port.help = "A CHOOSES, LEFT RIGHT CHANGES, B RESUMES";
++#endif
++        window.set_escape_quits(false);
++        rearm_escape = false;
++    }
++
++    void close_port() {
++        port.close();
++        rearm_escape = true;
++        if (port.dirty()) {
++            port.mark_saved();
++            save_options();
++        }
++    }
++
++    void pump_port() {
++        using dream::render::vk::Control;
++        using A = dream::render::PortMenu::Action;
++        A act = A::None;
++        if (window.pressed(Control::Back))
++            act = port.back();
++        if (window.pressed(Control::Up))
++            port.move(-1);
++        if (window.pressed(Control::Down))
++            port.move(1);
++        if (window.pressed(Control::Left))
++            port.adjust(-1);
++        if (window.pressed(Control::Right))
++            port.adjust(1);
++        if (window.pressed(Control::A) || window.pressed(Control::Start))
++            act = port.activate();
++        // Changes show at once: the volume and the screen while the menu is still up.
++        options = port.options();
++        apply_options();
++        if (act == A::Close || act == A::Controls || act == A::Quit) {
++            const bool dirty = port.dirty();
++            port.close();
++            rearm_escape = true;
++            if (dirty) {
++                port.mark_saved();
++                save_options();
++            }
++        }
++        if (act == A::Controls)
++            open_menu();
++        if (act == A::Quit)
++            quit_requested = true;
++    }
++
+     void pump_menu() {
+         using dream::render::vk::Control;
++        if (port.is_open()) {
++            if (window.pressed(Control::Menu)) {
++                close_port();
++                return;
++            }
++            pump_port();
++            return;
++        }
++        if (window.pressed(Control::Menu) && !menu.is_open()) {
++            open_port();
++            return;
++        }
+         // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
+         // to be let go before it means the second one. Without this, closing the screen with escape
+         // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
+@@ -384,10 +500,9 @@ struct Live {
+             window.set_escape_quits(true);
+         }
+         if (window.pressed(Control::Menu)) {
+-            if (menu.is_open())
+-                close_menu();
+-            else
+-                open_menu();
++            // From the binding screen, the menu key goes back to the port menu.
++            close_menu();
++            open_port();
+             return;
+         }
+         if (!menu.is_open())
+@@ -663,6 +778,13 @@ struct Live {
+     // The binding screen (F1, or a pad's select button). The guest is stopped while it is up, so
+     // nobody rebinds a control mid-corner.
+     dream::render::InputMenu menu;
++    // SA-nx: the port menu and its options.
++    dream::render::PortMenu port;
++    dream::render::PortOptions options;
++    std::string options_path;
++    float* volume_out = nullptr;  // the sink's volume, once there is a sink
++    int applied_cpu_mhz = 0;
++    bool quit_requested = false;
+     // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
+     // usable, or SDL could not name a settings directory on this host.
+     std::string bindings_path;
+@@ -1108,6 +1230,7 @@ void usage(const char* argv0, std::FILE* out) {
+         "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
+         "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
+         "  --profile FILE        sample where the game thread spends its time; report at exit\n"
++        "  --options FILE        the menu's settings (fps, screen, volume), read and saved here\n"
+         "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
+         "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
+         "                         up down left right), to get past screens that wait for input\n"
+@@ -1233,6 +1356,7 @@ int main(int argc, char** argv) {
+     // down left right.
+     std::string presses;
+     std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
++    std::string options_file;             // SA-nx: --options FILE (the port menu)
+     std::string profile_path;  // SA-nx: --profile FILE
+     std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
+     // --window: open a window and play. Without it the run is headless exactly as before.
+@@ -1334,6 +1458,8 @@ int main(int argc, char** argv) {
+             dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
+         else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
+             presses = argv[++i];
++        else if (!std::strcmp(argv[i], "--options") && i + 1 < argc)
++            options_file = argv[++i];
+         else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
+             profile_path = argv[++i];
+         else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
+@@ -1698,7 +1824,15 @@ int main(int argc, char** argv) {
+         live->bindings_path =
+             bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
+         live->load_bindings();
+-        std::printf("F1 (or a pad's select button) opens the controller bindings\n");
++        // SA-nx: the port menu's options.
++#ifdef __SWITCH__
++        if (options_file.empty())
++            options_file = "sdmc:/switch/sonicadv/sonicadv_options.txt";
++#endif
++        live->options_path = options_file;
++        live->load_options();
++        live->apply_options();
++        std::printf("F1 (or a pad's select button; Minus and Plus on the Switch) opens the menu\n");
+         auto previous_render = std::move(pvr.on_render);
+         pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
+             if (previous_render)
+@@ -1721,9 +1855,9 @@ int main(int argc, char** argv) {
+             // The binding screen stops the guest rather than drawing over a running one: nobody
+             // rebinds a control mid-corner, and a control being captured cannot also be played.
+             // The window keeps presenting, so the screen still draws and still answers the player.
+-            if (live->menu.is_open()) {
++            if (live->paused()) {
+                 const auto paused_at = std::chrono::steady_clock::now();
+-                while (live->menu.is_open()) {
++                while (live->paused()) {
+                     if (!live->present(sys.spg.frames(), sys.ctx.cycles))
+                         throw StopRun{"the window was closed"};
+                     // Enough to keep the screen responsive without spinning a core on a still
+@@ -1770,6 +1904,10 @@ int main(int argc, char** argv) {
+         else
+             std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
+     }
++#ifdef DREAM_WITH_RENDERER
++    if (live)
++        live->volume_out = &sink.volume;  // SA-nx: the port menu's volume
++#endif
+ #else
+     // Asking for sound from a build that cannot make any should say so, but it is not worth
+     // refusing the run over: --window implies audio, and a build without SDL3 should still show a

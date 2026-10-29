@@ -8,3 +8,17 @@ dream_add_game(sonicadv TITLE "Sonic Adventure")
 if(MSVC)
   target_link_options(sonicadv_boot PRIVATE /STACK:268435456)
 endif()
+
+# The Switch (SA-nx): Horizon's own main() around the launcher, and the NRO the homebrew menu
+# runs. switch/build.sh configures this with devkitPro's toolchain.
+if(NINTENDO_SWITCH)
+  target_sources(sonicadv_boot PRIVATE ${CMAKE_SOURCE_DIR}/switch/src/switch_main.cpp)
+  target_link_libraries(sonicadv_boot PRIVATE nx)
+  set(SANX_VERSION "0.1.0" CACHE STRING "Version shown in the homebrew menu")
+  nx_generate_nacp(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sonicadv.nacp
+    NAME "Sonic Adventure (SA-nx)"
+    AUTHOR "SA-nx"
+    VERSION "${SANX_VERSION}")
+  nx_create_nro(sonicadv_boot NACP ${CMAKE_CURRENT_BINARY_DIR}/sonicadv.nacp
+    ICON ${CMAKE_SOURCE_DIR}/switch/icon.jpg)
+endif()
