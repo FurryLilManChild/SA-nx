@@ -1,0 +1,168 @@
+diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
+index c12aaf2..824d0b4 100644
+--- a/runtime/boot/boot_main.cpp
++++ b/runtime/boot/boot_main.cpp
+@@ -179,6 +179,11 @@ struct Live {
+         // SA-nx: TEXT_CONTROL's stride (bits 0-4, units of 32 texels) is the row width of every
+         // stride texture this frame; movies are drawn from one.
+         renderer.textures().set_stride_width((pvr_.reg(0x0E4) & 31u) * 32u);
++        // SA-nx: drop every texture decoded from video memory the guest has written since the
++        // last render (texture uploads, the YUV converter's movie frames).
++        memory_.take_vram_writes([this](std::uint32_t begin, std::uint32_t end) {
++            vram_invalidated += renderer.textures().invalidate_range(begin, end);
++        });
+         if (!offscreen.render(renderer, frame, geometry)) {
+             if (!reported_error) {
+                 reported_error = true;
+@@ -646,6 +651,7 @@ struct Live {
+     std::string error;
+     std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
+                   decoded_frames = 0, backgrounds = 0;
++    std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
+     std::uint32_t target_address = 0;
+     std::uint64_t guest_frame = 0;
+     std::vector<std::uint32_t> last_stream;
+@@ -2103,6 +2109,8 @@ int main(int argc, char** argv) {
+             static_cast<unsigned long long>(live->written_back), live->renderer.textures().decoded,
+             live->renderer.textures().failed, live->renderer.textures().overwritten,
+             static_cast<unsigned long long>(live->palette_changes));
++        std::printf("window: %llu textures re-decoded after the guest rewrote their memory\n",
++                    static_cast<unsigned long long>(live->vram_invalidated));
+         if (live->have_frame)
+             std::printf("window: last shown %s\n", live->shown.describe().c_str());
+         // Vulkan objects are destroyed now rather than at scope exit, while everything they were
+diff --git a/runtime/include/dream/runtime/mem/dc_memory.h b/runtime/include/dream/runtime/mem/dc_memory.h
+index 73d3748..da93d0a 100644
+--- a/runtime/include/dream/runtime/mem/dc_memory.h
++++ b/runtime/include/dream/runtime/mem/dc_memory.h
+@@ -5,6 +5,7 @@
+ // log shows what it touched.
+ #pragma once
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <functional>
+ #include <memory>
+@@ -101,6 +102,44 @@ public:
+ 
+     std::uint8_t* ram() noexcept { return ram_.get(); }
+     std::uint8_t* vram() noexcept { return vram_.get(); }
++
++    // SA-nx: video memory written since the last take_vram_writes(), in 4 KB pages, so the
++    // renderer's texture cache can drop what it decoded from bytes that have changed since. A
++    // movie rewrites the same two textures every frame; without this the cache kept showing the
++    // first two frames it decoded. Every path that writes video memory (store, write64,
++    // sq_flush; DMA goes through store) reports here.
++    static constexpr unsigned kVramPageShift = 12;
++    void note_vram_write(const std::uint8_t* p, std::uint32_t bytes) noexcept {
++        const std::uintptr_t off = reinterpret_cast<std::uintptr_t>(p) -
++                                   reinterpret_cast<std::uintptr_t>(vram_.get());
++        if (off >= kVramSize || bytes == 0)
++            return;
++        const std::uintptr_t last = std::min<std::uintptr_t>(off + bytes - 1, kVramSize - 1);
++        for (std::uintptr_t page = off >> kVramPageShift; page <= (last >> kVramPageShift); ++page)
++            vram_dirty_[page >> 6] |= 1ull << (page & 63u);
++        vram_dirty_any_ = true;
++    }
++    // Calls `fn(begin, end)` once per run of written pages, as byte offsets into video memory
++    // (the 64-bit view, which is how textures are addressed), and forgets them.
++    template <typename F>
++    void take_vram_writes(F&& fn) {
++        if (!vram_dirty_any_)
++            return;
++        vram_dirty_any_ = false;
++        constexpr std::uint32_t pages = kVramSize >> kVramPageShift;
++        std::uint32_t run = pages;  // first page of the current run, or none
++        for (std::uint32_t page = 0; page <= pages; ++page) {
++            const bool dirty =
++                page < pages && ((vram_dirty_[page >> 6] >> (page & 63u)) & 1u) != 0;
++            if (dirty && run == pages)
++                run = page;
++            if (!dirty && run != pages) {
++                fn(run << kVramPageShift, page << kVramPageShift);
++                run = pages;
++            }
++        }
++        for (auto& w : vram_dirty_) w = 0;
++    }
+     std::uint8_t* aram() noexcept { return aram_.get(); }
+     std::uint8_t* bios() noexcept { return bios_.get(); }
+     std::uint8_t* flash() noexcept { return flash_.get(); }
+@@ -234,6 +273,8 @@ private:
+     MmioHandler* find(const std::vector<Range>& t, std::uint32_t a) const noexcept;
+ 
+     std::unique_ptr<std::uint8_t[]> ram_, vram_, aram_, bios_, flash_, ocram_;
++    std::uint64_t vram_dirty_[(kVramSize >> kVramPageShift) / 64] = {};
++    bool vram_dirty_any_ = false;
+     std::vector<Range> phys_mmio_, p4_mmio_;
+     std::uint32_t sq_[2][8]{};
+     std::uint32_t qacr_[2]{};
+diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
+index 4e80efa..bcc1279 100644
+--- a/runtime/src/mem/dc_memory.cpp
++++ b/runtime/src/mem/dc_memory.cpp
+@@ -217,6 +217,7 @@ void DcMemory::store(std::uint32_t a, T v) {
+                                sizeof(T)});
+         }
+         std::memcpy(t.bytes, &v, sizeof(T));
++        note_vram_write(t.bytes, sizeof(T));
+         note_ram_write(a, static_cast<std::uint64_t>(static_cast<std::make_unsigned_t<T>>(v)),
+                        sizeof(T));
+         return;
+@@ -329,6 +330,7 @@ void DcMemory::write64(std::uint32_t a, std::uint64_t v) {
+             journal.push_back({a + 4, old_hi, hi, 4});
+         }
+         std::memcpy(t.bytes, &v, 8);
++        note_vram_write(t.bytes, 8);
+         // Two 4-byte reports, the same split the device path below uses, so a pair written here
+         // hashes identically to the same pair written as two stores.
+         note_ram_write(a, lo, 4);
+@@ -360,6 +362,7 @@ void DcMemory::sq_flush(std::uint32_t a) {
+                 journal.push_back({dest + 4 * i, old, words[i], 4});
+             }
+         std::memcpy(t.bytes, words, 32);
++        note_vram_write(t.bytes, 32);
+         // A burst into RAM is eight stores as far as anything watching memory is concerned. Until
+         // this was here the hash and the watch saw none of them.
+         if (tracing_writes())
+diff --git a/runtime/tests/test_memory.cpp b/runtime/tests/test_memory.cpp
+index 73668a1..c12552c 100644
+--- a/runtime/tests/test_memory.cpp
++++ b/runtime/tests/test_memory.cpp
+@@ -247,3 +247,36 @@ TEST_CASE("memory: the main RAM fast path keeps every size, mirror and write wat
+     CHECK(seen[0] == 0x8C002004u);
+     CHECK(seen[1] == 0xAC002008u);
+ }
++
++TEST_CASE("memory: writes to video memory are reported as page runs") {
++    // SA-nx: the renderer drops textures decoded from video memory the guest has rewritten.
++    DcMemory m;
++    std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
++    const auto take = [&] {
++        runs.clear();
++        m.take_vram_writes([&](std::uint32_t b, std::uint32_t e) { runs.emplace_back(b, e); });
++    };
++    take();
++    CHECK(runs.empty());
++    m.write32(0xA4140000u, 1u);  // 64-bit view: offset 0x140000
++    m.write16(0xA4141FFEu, 2u);  // the next page
++    m.write32(0xA4300010u, 3u);  // somewhere else
++    take();
++    REQUIRE(runs.size() == 2);
++    CHECK(runs[0] == std::make_pair(0x140000u, 0x142000u));
++    CHECK(runs[1] == std::make_pair(0x300000u, 0x301000u));
++    take();
++    CHECK(runs.empty());  // taken once
++    // A store-queue burst straight into video memory counts too (QACR area 1, 0x04000000).
++    m.set_qacr(0, 1u << 2);
++    m.sq_write32(0xE0000000u, 7u);
++    m.sq_flush(0xE0050000u);
++    take();
++    REQUIRE(runs.size() == 1);
++    CHECK(runs[0].first == 0x050000u);
++    // Main RAM does not.
++    m.write32(0x8C010000u, 9u);
++    take();
++    CHECK(runs.empty());
++}
++

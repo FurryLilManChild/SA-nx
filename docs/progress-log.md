@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: movie frames never refreshed; video memory writes now invalidate textures (0021)
+
+- With 0020 the Perfect Chaos intro showed one clean frame (water) and "shook". The intro is
+  not SA1_600.SFD (the file play.ps1 hides); likely SAH448_6.SFD, the 448-line PAL file, not
+  yet confirmed. Capture 16: one polygon, a 512x512 YUV422 stride texture at 0x1C0000, u
+  0..0.624 (320/512), v 0..0.875 (448/512); TEXT_CONTROL 0x0A (320 texels);
+  TA_YUV_TEX_CTRL 0x1B13 (20 x 28 macroblocks = 320x448, 4:2:0 input); TA_YUV_TEX_BASE
+  0x140000. The frame decodes cleanly at the new pitch.
+- Cause of the freeze: the texture cache was only ever invalidated by palette changes and the
+  (off) framebuffer write-back. The game double-buffers the movie at 0x140000 and 0x1C0000, so
+  the first two decoded frames were shown alternately for ever.
+- Patch 0021: DcMemory marks 4 KB pages of video memory on every store, write64 and store-queue
+  burst that lands there (DMA and the YUV converter go through store); before each render the
+  launcher passes each run of written pages to TextureCache::invalidate_range. The window
+  summary counts the re-decoded textures. Test: page runs from 32-bit, 16-bit and store-queue
+  writes, taken once, main RAM excluded.
+
 ## 2026-10-29: sound confirmed; movie texture pitch (patch 0020)
 
 - Patch 0019 on Mark's PC: "sound was all gloriously correct". Report: 49 key-ons,
