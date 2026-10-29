@@ -1,0 +1,86 @@
+diff --git a/render/include/dream/render/tsp.h b/render/include/dream/render/tsp.h
+index d43c19a..e81b025 100644
+--- a/render/include/dream/render/tsp.h
++++ b/render/include/dream/render/tsp.h
+@@ -78,4 +78,15 @@ constexpr std::uint32_t tsp_sampler_key(std::uint32_t w) {
+     return (w >> 13) & 0x3Fu;
+ }
+ 
++// What identifies one way of sampling one texture: the control word, the TSP size bits (0 to 5)
++// and the sampler bits above. Polygons that share a texture can still ask for different clamping,
++// mirroring or filtering (a wall strip that repeats in V next to one that clamps), and a
++// descriptor set carries exactly one sampler, so the sampler bits have to be part of the key. Left
++// out, every polygon of a texture is drawn with whichever sampler was built first, and a strip
++// that wraps but gets a clamping sampler smears its edge texels across the polygon.
++constexpr std::uint64_t texture_sampling_key(std::uint32_t tcw, std::uint32_t tsp) {
++    return (static_cast<std::uint64_t>(tcw) << 32) | (tsp & 0x3Fu) |
++           (static_cast<std::uint64_t>(tsp_sampler_key(tsp)) << 8);
++}
++
+ }  // namespace dream::render
+diff --git a/render/src/vk/renderer.cpp b/render/src/vk/renderer.cpp
+index 4e3358f..39ee904 100644
+--- a/render/src/vk/renderer.cpp
++++ b/render/src/vk/renderer.cpp
+@@ -91,11 +91,11 @@ struct PushConstants {
+     float alpha_ref;
+ };
+ 
+-// What identifies a texture within one frame: the control word, plus the TSP bits that carry the
+-// size. Everything the sampler reads is decided per texture in prepare(), so it does not belong
+-// here; two polygons that share these bits share the decoded image.
++// What identifies a texture within one frame: the control word, the TSP size bits and the TSP
++// sampler bits (texture_sampling_key). Whether it tiles is decided per key in prepare(); two
++// polygons that share the key share the decoded image and the sampler.
+ constexpr std::uint64_t texture_key(const Polygon& p) {
+-    return (static_cast<std::uint64_t>(p.tcw) << 32) | (p.tsp & 0x3Fu);
++    return texture_sampling_key(p.tcw, p.tsp);
+ }
+ 
+ // Parameter control word and TSP fields the fragment shader needs.
+diff --git a/render/src/vk/texture_cache.cpp b/render/src/vk/texture_cache.cpp
+index f2eac2e..cbf2689 100644
+--- a/render/src/vk/texture_cache.cpp
++++ b/render/src/vk/texture_cache.cpp
+@@ -213,10 +213,10 @@ VkDescriptorSet TextureCache::get(VkCommandBuffer cmd, std::uint32_t tcw, std::u
+                                   bool tiled) {
+     if (!vram_ || !ctx_)
+         return VK_NULL_HANDLE;
+-    // The size lives in the TSP word, the rest in the TCW; together they identify the texture, and
+-    // the addressing the polygons need decides the sampler bound with it.
+-    const std::uint64_t key =
+-        (static_cast<std::uint64_t>(tcw) << 32) | (tsp & 0x3Fu) | (tiled ? 0x40u : 0u);
++    // The size lives in the TSP word, the rest in the TCW; together they identify the texture. The
++    // sampler bits and whether any polygon tiles it decide the sampler bound with it, and a set
++    // holds one sampler, so both are part of the key (texture_sampling_key).
++    const std::uint64_t key = texture_sampling_key(tcw, tsp) | (tiled ? 0x40u : 0u);
+     if (auto it = entries_.find(key); it != entries_.end()) {
+         ++hits;
+         return it->second.set;
+diff --git a/render/tests/test_tsp.cpp b/render/tests/test_tsp.cpp
+index 7b38372..eb7e840 100644
+--- a/render/tests/test_tsp.cpp
++++ b/render/tests/test_tsp.cpp
+@@ -80,3 +80,22 @@ TEST_CASE("tsp: the sampler key covers filtering, clamping and mirroring and not
+     for (unsigned bit : {13u, 14u, 15u, 16u, 17u, 18u}) CHECK(tsp_sampler_key(1u << bit) != 0);
+     for (unsigned bit : {0u, 6u, 12u, 19u, 20u, 26u, 31u}) CHECK(tsp_sampler_key(1u << bit) == 0);
+ }
++
++TEST_CASE("tsp: polygons that share a texture but sample it differently get different keys") {
++    // Captured from Sonic Adventure's Emerald Coast: one rock texture drawn with V clamped, with U
++    // and V clamped, and with neither, in the same frame.
++    const std::uint32_t tcw = 0x88061640u;
++    const std::uint64_t clamp_v = texture_sampling_key(tcw, 0x2008a4edu);
++    const std::uint64_t clamp_uv = texture_sampling_key(tcw, 0x2009a4edu);
++    const std::uint64_t wrap = texture_sampling_key(tcw, 0x200824edu);
++    CHECK(clamp_v != clamp_uv);
++    CHECK(clamp_v != wrap);
++    CHECK(clamp_uv != wrap);
++    // Fields that change neither the image nor the sampler (shading, blending) share one key.
++    CHECK(texture_sampling_key(tcw, 0x2008a4edu) == texture_sampling_key(tcw, 0x9408a4edu));
++    // A different size or a different texture is a different key.
++    CHECK(texture_sampling_key(tcw, 0x2008a4edu) != texture_sampling_key(tcw, 0x2008a4e4u));
++    CHECK(texture_sampling_key(tcw, 0x2008a4edu) != texture_sampling_key(tcw + 1, 0x2008a4edu));
++    // Bit 6 is left free for the texture cache's "tiled" flag.
++    for (std::uint32_t tsp : {0u, 0xFFFFFFFFu, 0x2008a4edu}) CHECK((texture_sampling_key(tcw, tsp) & 0x40u) == 0);
++}

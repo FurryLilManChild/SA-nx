@@ -2,6 +2,27 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-29: graphics pass 1 (patch 0013, one sampler per texture); Emerald Coast seeds
+
+- Mark's F11 captures worked: 7 captures of Emerald Coast (capture-NNN.{ppm,ta,vram,regs,txt}).
+  A scratch inspector (built on dream_render) lists each polygon's texture words, UV range and
+  screen bounds, and decodes any texture to an image.
+- Texture decode is not the fault: the wall, water, sand and rock textures in capture 4 decode
+  cleanly (VQ, 4444, 565, twiddled, mipmapped).
+- Found: polygons sharing one texture ask for different clamp, mirror or filter settings (the
+  rock texture tcw 0x88061640 is drawn with V clamped, U+V clamped, and wrapping, in one frame).
+  Both the renderer's per-frame key and the texture cache key ignored those TSP bits, so all of
+  them got whichever sampler was built first. A strip that wraps but gets a clamping sampler
+  smears its edge texels into lines. Capture 4: 23 of 96 textures, 1,270 of 1,846 textured
+  polygons are in that situation. Patch 0013 adds texture_sampling_key (tcw, size bits, sampler
+  bits) to tsp.h, used by both keys, with a unit test from the captured words. Cost: a texture
+  used two ways is decoded twice. Expected to fix at least some of the streaked rock walls; not
+  yet seen on Mark's PC.
+- Seeds from the Emerald Coast run (suggested.toml): 19 targets. Eight of them are the tails of a
+  trig lookup at 0x0C085990 that ends in `braf r1` through a halfword table at 0x0C085A38; all
+  eight table targets are now seeds. They total about 3,400 calls in 138 guest s, so they are
+  not the cause of the 0.7x speed; that needs a profile.
+
 ## 2026-10-29: past Station Square's title card (patch 0012); saves kept
 
 - Boot 9 on Mark's PC (0012): ran the full 120 guest s into Station Square, 0 unmapped reads,

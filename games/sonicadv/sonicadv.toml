@@ -41,7 +41,26 @@ extra = [0x0C02DE20,  # 2
          0x0C107A36,
          0x0C6446D4,  # headless run 3: a getter called 147,793 times untranslated
          0x0C6446DA,
-         0x0C65C148]
+         0x0C65C148,
+         0x0C0409EE,  # Emerald Coast run 2026-10-29: 174
+         0x0C07CA80,  # Emerald Coast run 2026-10-29: 68
+         0x0C0859FA,  # Emerald Coast run 2026-10-29: trig tail, braf table at 0x0C085A38
+         0x0C0859FE,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C085A04,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C085A0A,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C085A10,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C085A18,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C085A1E,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C085A26,  # Emerald Coast run 2026-10-29: trig tail
+         0x0C0A676A,  # Emerald Coast run 2026-10-29: 2
+         0x0C0FBA40,  # Emerald Coast run 2026-10-29: 4
+         0x0C643FDC,  # Emerald Coast run 2026-10-29: 1
+         0x0C64793E,  # Emerald Coast run 2026-10-29: 3
+         0x0C647948,  # Emerald Coast run 2026-10-29: 3
+         0x0C647A10,  # Emerald Coast run 2026-10-29: 1
+         0x0C647A22,  # Emerald Coast run 2026-10-29: 1
+         0x0C65E01C,  # Emerald Coast run 2026-10-29: 1
+         0x0C65E2F8]  # Emerald Coast run 2026-10-29: 1
 
 # Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
 # Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the
