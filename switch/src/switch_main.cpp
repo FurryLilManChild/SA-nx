@@ -31,6 +31,7 @@
 
 int dream_boot_main(int argc, char** argv);
 extern void (*dream_port_set_cpu_mhz)(int mhz);
+extern volatile int dream_port_phase;  // the launcher: 0 playing, 1 menu, 2 ended
 extern "C" char __start__;  // libnx's crt0: the start of this module, for crash offsets
 
 namespace {
@@ -82,8 +83,12 @@ void crash_write(const char* text) {
     fsFileClose(&f);
 }
 
+// __start__ is an absolute linker symbol (0), not the load address; the profiler's find_module()
+// asks the kernel instead, and crash offsets use that when it has run (test4 logged raw
+// addresses because of this).
+std::uint64_t g_base_for_crash = 0;
 std::uint64_t off(std::uint64_t a) {
-    return a - reinterpret_cast<std::uint64_t>(&__start__);
+    return a - g_base_for_crash;
 }
 
 [[noreturn]] void on_terminate() {
@@ -246,69 +251,143 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
 }
 
 // --- sampling profiler --------------------------------------------------------------------
-// About 500 times a second a thread on core 2 pauses the game thread, reads its program counter
-// and link register, and lets it go again. The counts, as offsets into this module, are written to
-// sonicadv_profile.txt every 20 seconds (overwritten, so a run closed from the HOME menu still
-// leaves one); Claude resolves them to functions with the build's ELF. The pause costs the game
-// thread a few percent while it runs. On for every run of this build: the test is the profile.
+// About 500 times a second a thread on core 2 pauses the game thread, reads its registers and the
+// chain of frame records on its stack (each caller's return address), and lets it go again. Only
+// samples taken while the game is playing count: menu time and the end-of-run report and teardown
+// are counted separately (dream_port_phase, set by the launcher). Every 20 seconds the counts are
+// written to sonicadv_profile.tmp and then moved over sonicadv_profile.txt, so a run that ends
+// mid-write keeps the last whole file. Addresses are offsets into this module (its load address
+// taken from the kernel's memory map, not from a linker symbol); Claude resolves them with the
+// build's ELF. The pauses cost the game thread a few percent.
 Handle g_prof_target = INVALID_HANDLE;
+std::uint64_t g_stack_lo = 0, g_stack_hi = 0;  // the game thread's stack, for walking it safely
 Thread g_prof;
 volatile bool g_prof_stop = false;
+std::uint64_t g_module_base = 0, g_module_end = 0;
 
-void prof_write(const std::unordered_map<std::uint64_t, std::uint32_t>& pcs,
-                const std::unordered_map<std::uint64_t, std::uint32_t>& lrs, std::uint64_t samples,
-                std::uint64_t failed) {
-    FILE* f = std::fopen("sdmc:/switch/sonicadv/sonicadv_profile.txt", "w");
+void find_module() {
+    MemoryInfo mi{};
+    u32 pi = 0;
+    // The code segment this function is in starts at the module's load address (crt0 is first).
+    if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, reinterpret_cast<u64>(&find_module)))) {
+        g_module_base = mi.addr;
+        g_base_for_crash = mi.addr;
+        // Code, then read-only data, then data: walk forward while the mappings stay contiguous.
+        u64 at = mi.addr + mi.size;
+        g_module_end = at;
+        for (int i = 0; i < 8; ++i) {
+            MemoryInfo next{};
+            if (R_FAILED(svcQueryMemory(&next, &pi, at)) || next.addr != at ||
+                (next.type & 0xFF) == MemType_Unmapped)
+                break;
+            at = next.addr + next.size;
+            g_module_end = at;
+        }
+    }
+}
+
+struct Profile {
+    static constexpr int kDepth = 8;
+    std::unordered_map<std::uint64_t, std::uint32_t> pcs;        // where the thread was
+    std::unordered_map<std::string, std::uint32_t> stacks;      // pc, lr, then callers
+    std::uint64_t samples = 0, failed = 0, in_menu = 0, after_run = 0;
+};
+
+std::uint64_t mod(std::uint64_t a) {
+    return (a >= g_module_base && a < g_module_end) ? a - g_module_base : 0xFFFFFFFFull;
+}
+
+void prof_write(const Profile& p) {
+    FILE* f = std::fopen("sdmc:/switch/sonicadv/sonicadv_profile.tmp", "w");
     if (!f)
         return;
-    std::fprintf(f, "SA-nx profile: %llu samples, %llu unreadable\n",
-                 static_cast<unsigned long long>(samples), static_cast<unsigned long long>(failed));
-    const auto dump = [f](const char* what, const std::unordered_map<std::uint64_t, std::uint32_t>& m,
-                          std::size_t limit) {
+    std::fprintf(f,
+                 "SA-nx profile 2: %llu playing samples, %llu unreadable, %llu in a menu, %llu "
+                 "after the run; module 0x%llx..0x%llx\n",
+                 (unsigned long long)p.samples, (unsigned long long)p.failed,
+                 (unsigned long long)p.in_menu, (unsigned long long)p.after_run,
+                 (unsigned long long)g_module_base, (unsigned long long)g_module_end);
+    {
         std::vector<std::pair<std::uint32_t, std::uint64_t>> v;
-        v.reserve(m.size());
-        for (const auto& [a, n] : m) v.push_back({n, a});
+        for (const auto& [a, n] : p.pcs) v.push_back({n, a});
         std::sort(v.rbegin(), v.rend());
-        std::fprintf(f, "== %s (%zu distinct)\n", what, v.size());
-        for (std::size_t i = 0; i < v.size() && i < limit; ++i)
-            std::fprintf(f, "%x %u\n", static_cast<unsigned>(v[i].second), v[i].first);
-    };
-    dump("pc", pcs, 6000);
-    dump("lr", lrs, 3000);
+        std::fprintf(f, "== pc %zu\n", v.size());
+        for (std::size_t i = 0; i < v.size() && i < 2500; ++i)
+            std::fprintf(f, "%llx %u\n", (unsigned long long)v[i].second, v[i].first);
+    }
+    {
+        std::vector<std::pair<std::uint32_t, const std::string*>> v;
+        for (const auto& [k, n] : p.stacks) v.push_back({n, &k});
+        std::sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+        std::fprintf(f, "== stacks %zu\n", v.size());
+        for (std::size_t i = 0; i < v.size() && i < 2500; ++i)
+            std::fprintf(f, "%u %s\n", v[i].first, v[i].second->c_str());
+    }
+    std::fprintf(f, "== end\n");
     std::fclose(f);
+    // The SD card's FAT refuses a rename onto an existing file: delete, then rename.
+    std::remove("sdmc:/switch/sonicadv/sonicadv_profile.txt");
+    std::rename("sdmc:/switch/sonicadv/sonicadv_profile.tmp",
+                "sdmc:/switch/sonicadv/sonicadv_profile.txt");
 }
 
 void profiler(void*) {
-    std::unordered_map<std::uint64_t, std::uint32_t> pcs, lrs;
-    pcs.reserve(1 << 16);
-    lrs.reserve(1 << 14);
-    std::uint64_t samples = 0, failed = 0;
+    Profile p;
+    p.pcs.reserve(1 << 15);
+    p.stacks.reserve(1 << 15);
     std::uint64_t last_write = armGetSystemTick();
     const std::uint64_t write_every = armGetSystemTickFreq() * 20;
+    char key[Profile::kDepth * 10 + 32];
     while (!g_prof_stop) {
         svcSleepThread(2'000'000ll);  // 2 ms: about 500 samples a second
+        const int phase = dream_port_phase;
         if (R_FAILED(svcSetThreadActivity(g_prof_target, ThreadActivity_Paused))) {
-            ++failed;
+            ++p.failed;
             continue;
         }
         ThreadContext ctx;
         const Result rc = svcGetThreadContext3(&ctx, g_prof_target);
+        std::uint64_t chain[Profile::kDepth];
+        int depth = 0;
+        if (R_SUCCEEDED(rc) && phase == 0) {
+            // Frame records: [fp] is the caller's fp, [fp + 8] the return address. Read while the
+            // thread is paused, and only inside its own stack, so a bad fp cannot fault here.
+            std::uint64_t fp = ctx.fp;
+            while (depth < Profile::kDepth && fp >= g_stack_lo && fp + 16 <= g_stack_hi &&
+                   (fp & 7) == 0) {
+                const std::uint64_t* rec = reinterpret_cast<const std::uint64_t*>(fp);
+                chain[depth++] = rec[1];
+                if (rec[0] <= fp)
+                    break;  // frames grow toward higher addresses; anything else is not a chain
+                fp = rec[0];
+            }
+        }
         svcSetThreadActivity(g_prof_target, ThreadActivity_Runnable);
         if (R_FAILED(rc)) {
-            ++failed;
+            ++p.failed;
             continue;
         }
-        ++samples;
-        ++pcs[off(ctx.pc.x)];
-        ++lrs[off(ctx.lr)];
+        if (phase == 1) {
+            ++p.in_menu;
+            continue;
+        }
+        if (phase == 2) {
+            ++p.after_run;
+            continue;
+        }
+        ++p.samples;
+        ++p.pcs[mod(ctx.pc.x)];
+        int n = std::snprintf(key, sizeof key, "%llx %llx", (unsigned long long)mod(ctx.pc.x),
+                              (unsigned long long)mod(ctx.lr));
+        for (int i = 0; i < depth && n > 0 && n < static_cast<int>(sizeof key) - 12; ++i)
+            n += std::snprintf(key + n, sizeof key - n, " %llx", (unsigned long long)mod(chain[i]));
+        ++p.stacks[std::string(key)];
         if (armGetSystemTick() - last_write >= write_every) {
             last_write = armGetSystemTick();
-            prof_write(pcs, lrs, samples, failed);
+            prof_write(p);
         }
     }
-    prof_write(pcs, lrs, samples, failed);
-    std::printf("[profile] %llu samples, %llu unreadable\n",
-                static_cast<unsigned long long>(samples), static_cast<unsigned long long>(failed));
+    prof_write(p);
 }
 
 int main(int argc, char** argv) {
@@ -317,6 +396,7 @@ int main(int argc, char** argv) {
     std::set_terminate(on_terminate);
     open_logs();
     std::printf("SA-nx (Switch) starting\n");
+    find_module();  // the load address, for crash reports and the profiler
 
     const AppletType at = appletGetAppletType();
     if (at != AppletType_Application && at != AppletType_SystemApplication) {
@@ -391,6 +471,10 @@ int main(int argc, char** argv) {
     }
     threadStart(&game);
     g_prof_target = game.handle;
+    // The thread runs on the mirror libnx maps its stack to; the original allocation is no longer
+    // accessible once mapped.
+    g_stack_lo = reinterpret_cast<std::uint64_t>(game.stack_mirror);
+    g_stack_hi = g_stack_lo + game.stack_sz;
     const bool profiling =
         R_SUCCEEDED(threadCreate(&g_prof, profiler, nullptr, nullptr, 0x10000, 0x2B, 2));
     if (profiling) {

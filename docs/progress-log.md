@@ -2,6 +2,29 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test4 profile; switch-test5 profiles with callers
+
+- switch-test4 profile (107,655 samples; Mark ran mostly at 1785 MHz). Two flaws found while
+  reading it: offsets were raw addresses, because libnx's __start__ is an absolute symbol (0),
+  not the load address (the crash handler had the same bug); and the file was cut off mid-write
+  (the launcher ends the process before main() regains control), losing the lr section. The load
+  address was recovered from the samples: at base 0x523a5000, 10 of the 30 hottest addresses fall
+  exactly on svc instructions (svcWaitSynchronization+4, svcSendSyncRequest).
+- Split of the game thread (includes menu and end-of-run time, which test4 could not exclude):
+  translated game code 20.3%, waiting in the kernel 19.4% (svcWaitSynchronization 13.3%, mostly
+  the GPU fence; svcSendSyncRequest 5.6%), sound 16.0% (Mixer::dsp_step 8.8%, Arm7::step 3.6%,
+  Mixer::sample 1.4%), malloc/free 15.1% (nearly all at one instruction in _free_r: dlmalloc's
+  sorted large-bin insertion walking a long list), memory layer 8.7% (non-RAM paths: resolve,
+  store<u32>), overlay fill_rect 7.0% (the menu's full-screen shade; probably menu time),
+  thread-local reads 2.1%, find_function 2.3%, scheduler 1.3%.
+- Not known yet: who frees so much, and whether it happens during play or in teardown.
+- switch-test5: the profiler takes the load address from svcQueryMemory, walks frame records on
+  the game thread's stack (its mirror mapping) for up to 8 callers, counts only samples while
+  playing (dream_port_phase from the launcher: menu and after-run samples are counted apart), and
+  writes to a .tmp then renames. The crash handler uses the same load address. NRO sha256
+  54335b503eb9e08b7c121dae854c1cc9c930ea451f1d3525876f060f6d6bad8c.
+- tools/recut_patches.sh rebuilds 0022 and 0023 from the dream-recomp tree and checks the set.
+
 ## 2026-10-30: switch-test3 result (no gain); switch-test4 is a sampling profiler
 
 - switch-test3 on Mark's Switch, all at stock 1020 MHz (no clock change in the log; no report in

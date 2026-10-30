@@ -1346,16 +1346,19 @@ index 0000000..cae3ece
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..ff8fdbd 100644
+index 824d0b4..b9aaa4b 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -24,6 +24,15 @@
+@@ -24,6 +24,18 @@
  
  #include "profiler.h"  // SA-nx: --profile
  
 +// SA-nx: the port menu's CPU clock setting, for a platform that can set one (the Switch layer
 +// assigns it before the launcher starts). Null everywhere else, and then the row is not shown.
 +void (*dream_port_set_cpu_mhz)(int mhz) = nullptr;
++// SA-nx: what the launcher is doing, for a profiler outside it (switch_main.cpp's): 0 playing,
++// 1 a menu is open and the game is stopped, 2 the run has ended (report, teardown).
++volatile int dream_port_phase = 0;
 +#ifdef __SWITCH__
 +// The Switch's own main() (switch/src/switch_main.cpp) sets up Horizon and calls this on a
 +// thread with a stack big enough for the translated code.
@@ -1365,7 +1368,7 @@ index 824d0b4..ff8fdbd 100644
  #include "dream/runtime/aica/aica.h"
  #include "dream/runtime/aica/rtc.h"
  #include "dream/runtime/gdrom/disc.h"
-@@ -52,6 +61,7 @@
+@@ -52,6 +64,7 @@
  #include "dream/render/display_list.h"
  #include "dream/render/framebuffer.h"
  #include "dream/render/input_menu.h"
@@ -1373,7 +1376,7 @@ index 824d0b4..ff8fdbd 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -159,6 +169,12 @@ struct Live {
+@@ -159,6 +172,12 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -1386,7 +1389,7 @@ index 824d0b4..ff8fdbd 100644
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -243,9 +259,70 @@ struct Live {
+@@ -243,9 +262,71 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -1452,13 +1455,14 @@ index 824d0b4..ff8fdbd 100644
 +                                                                            // counted as menu
 +        if (perf_enabled)
 +            perf_log(guest_cycles);
++        dream_port_phase = paused() ? 1 : 0;
          guest_frame = frame;
 -        if (!window.poll())
 +        if (!window.poll() || quit_requested)
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -282,7 +359,8 @@ struct Live {
+@@ -282,7 +363,8 @@ struct Live {
          // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
          // are meant to produce the game's own pixels, which is what makes one comparable with
          // another and usable as a reference image.
@@ -1468,7 +1472,7 @@ index 824d0b4..ff8fdbd 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,6 +368,8 @@ struct Live {
+@@ -290,6 +372,8 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -1477,7 +1481,7 @@ index 824d0b4..ff8fdbd 100644
                               });
          else
              presenter.upload(cmd, source, shown.width, shown.height);
-@@ -320,6 +400,7 @@ struct Live {
+@@ -320,6 +404,7 @@ struct Live {
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
@@ -1485,7 +1489,7 @@ index 824d0b4..ff8fdbd 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -373,8 +454,110 @@ struct Live {
+@@ -373,8 +458,110 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -1596,7 +1600,7 @@ index 824d0b4..ff8fdbd 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +567,9 @@ struct Live {
+@@ -384,10 +571,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -1610,7 +1614,7 @@ index 824d0b4..ff8fdbd 100644
              return;
          }
          if (!menu.is_open())
-@@ -660,9 +842,28 @@ struct Live {
+@@ -660,9 +846,28 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -1639,7 +1643,7 @@ index 824d0b4..ff8fdbd 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1279,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1283,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -1647,7 +1651,7 @@ index 824d0b4..ff8fdbd 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1310,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1314,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -1655,7 +1659,7 @@ index 824d0b4..ff8fdbd 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1436,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1440,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -1663,7 +1667,7 @@ index 824d0b4..ff8fdbd 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1446,7 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1450,7 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -1671,7 +1675,7 @@ index 824d0b4..ff8fdbd 100644
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1539,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1543,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -1680,7 +1684,7 @@ index 824d0b4..ff8fdbd 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1565,8 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1569,8 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -1689,7 +1693,7 @@ index 824d0b4..ff8fdbd 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1682,6 +1891,8 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1895,8 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -1698,7 +1702,7 @@ index 824d0b4..ff8fdbd 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +1909,15 @@ int main(int argc, char** argv) {
+@@ -1698,7 +1913,15 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -1715,7 +1719,7 @@ index 824d0b4..ff8fdbd 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +1940,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +1944,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -1727,7 +1731,7 @@ index 824d0b4..ff8fdbd 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +1951,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +1955,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -1735,7 +1739,7 @@ index 824d0b4..ff8fdbd 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +1964,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +1968,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -1747,7 +1751,7 @@ index 824d0b4..ff8fdbd 100644
          };
      }
  #endif
-@@ -1770,6 +1992,15 @@ int main(int argc, char** argv) {
+@@ -1770,6 +1996,15 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -1763,7 +1767,7 @@ index 824d0b4..ff8fdbd 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2012,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2016,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -1775,7 +1779,15 @@ index 824d0b4..ff8fdbd 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -2145,7 +2379,7 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2284,7 @@ int main(int argc, char** argv) {
+                      static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
+         rc = 1;
+     }
++    dream_port_phase = 2;
+     const double host_s =
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+     if (!profile_path.empty())
+@@ -2145,7 +2384,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
