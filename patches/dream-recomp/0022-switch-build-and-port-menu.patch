@@ -1346,7 +1346,7 @@ index 0000000..cae3ece
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..c73c010 100644
+index 824d0b4..ff8fdbd 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,15 @@
@@ -1386,7 +1386,7 @@ index 824d0b4..c73c010 100644
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -243,9 +259,63 @@ struct Live {
+@@ -243,9 +259,70 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -1415,14 +1415,19 @@ index 824d0b4..c73c010 100644
 +        const double present_ms = static_cast<double>(perf_present_ns) / 1e6;
 +        const double sleep_ms = static_cast<double>(perf_sleep_ns) / 1e6;
 +        const double paused_ms = static_cast<double>(perf_paused_ns) / 1e6;
-+        const double game_ms = ms - render_ms - present_ms - sleep_ms - paused_ms;
++        const double audio_ms =
++            perf_audio_ns ? static_cast<double>(*perf_audio_ns - perf_audio_at) / 1e6 : 0.0;
++        // Sound runs inside the game's time (the AICA ticks between guest instructions), so it is
++        // taken out of that bucket rather than added beside it.
++        const double game_ms = ms - render_ms - present_ms - sleep_ms - paused_ms - audio_ms;
 +        const double speed = static_cast<double>(guest_cycles - perf_cycles_at) / 200e6 / (wall - paused_ms / 1000.0);
 +        const auto pct = [ms](double v) { return 100.0 * v / ms; };
-+        std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, render %.0f%% "
-+                    "(gpu wait %.0f%%), present %.0f%%, sleep %.0f%%, paused %.0f%%\n",
-+                    static_cast<double>(presented - perf_presented_at) / wall, static_cast<double>(rendered - perf_rendered_at) / wall,
-+                    speed, pct(game_ms), pct(render_ms), pct(gpu_ms), pct(present_ms),
-+                    pct(sleep_ms), pct(paused_ms));
++        std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, sound %.0f%%, "
++                    "render %.0f%% (gpu wait %.0f%%), present %.0f%%, sleep %.0f%%, menu %.0f%%\n",
++                    static_cast<double>(presented - perf_presented_at) / wall,
++                    static_cast<double>(rendered - perf_rendered_at) / wall, speed, pct(game_ms),
++                    pct(audio_ms), pct(render_ms), pct(gpu_ms), pct(present_ms), pct(sleep_ms),
++                    pct(paused_ms));
 +        std::fflush(stdout);
 +        perf_mark = now;
 +        perf_reset(guest_cycles);
@@ -1431,6 +1436,7 @@ index 824d0b4..c73c010 100644
 +    void perf_reset(std::uint64_t guest_cycles) {
 +        perf_render_ns = perf_present_ns = perf_sleep_ns = perf_paused_ns = 0;
 +        perf_gpu_at = offscreen.wait_ns;
++        perf_audio_at = perf_audio_ns ? *perf_audio_ns : 0;
 +        perf_presented_at = presented;
 +        perf_rendered_at = rendered;
 +        perf_cycles_at = guest_cycles;
@@ -1442,7 +1448,8 @@ index 824d0b4..c73c010 100644
 +            std::chrono::steady_clock::time_point from;
 +            std::uint64_t& into;
 +            ~Timed() { into += Live::ns_since(from); }
-+        } timed{present_from, perf_present_ns};
++        } timed{present_from, paused() ? perf_scratch_ns : perf_present_ns};  // menu time is
++                                                                            // counted as menu
 +        if (perf_enabled)
 +            perf_log(guest_cycles);
          guest_frame = frame;
@@ -1451,7 +1458,7 @@ index 824d0b4..c73c010 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -282,7 +352,8 @@ struct Live {
+@@ -282,7 +359,8 @@ struct Live {
          // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
          // are meant to produce the game's own pixels, which is what makes one comparable with
          // another and usable as a reference image.
@@ -1461,7 +1468,7 @@ index 824d0b4..c73c010 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,6 +361,8 @@ struct Live {
+@@ -290,6 +368,8 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -1470,7 +1477,7 @@ index 824d0b4..c73c010 100644
                               });
          else
              presenter.upload(cmd, source, shown.width, shown.height);
-@@ -320,6 +393,7 @@ struct Live {
+@@ -320,6 +400,7 @@ struct Live {
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
@@ -1478,7 +1485,7 @@ index 824d0b4..c73c010 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -373,8 +447,110 @@ struct Live {
+@@ -373,8 +454,110 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -1589,7 +1596,7 @@ index 824d0b4..c73c010 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +560,9 @@ struct Live {
+@@ -384,10 +567,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -1603,7 +1610,7 @@ index 824d0b4..c73c010 100644
              return;
          }
          if (!menu.is_open())
-@@ -660,9 +835,25 @@ struct Live {
+@@ -660,9 +842,28 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -1616,6 +1623,9 @@ index 824d0b4..c73c010 100644
 +    std::chrono::steady_clock::time_point perf_mark{};
 +    std::uint64_t perf_render_ns = 0, perf_present_ns = 0, perf_sleep_ns = 0, perf_paused_ns = 0;
 +    std::uint64_t perf_gpu_at = 0, perf_presented_at = 0, perf_rendered_at = 0, perf_cycles_at = 0;
++    std::uint64_t perf_scratch_ns = 0;
++    const std::uint64_t* perf_audio_ns = nullptr;  // the AICA's sample_tick time, when measured
++    std::uint64_t perf_audio_at = 0;
      // The binding screen (F1, or a pad's select button). The guest is stopped while it is up, so
      // nobody rebinds a control mid-corner.
      dream::render::InputMenu menu;
@@ -1629,7 +1639,7 @@ index 824d0b4..c73c010 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1269,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1279,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -1637,7 +1647,7 @@ index 824d0b4..c73c010 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1300,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1310,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -1645,7 +1655,7 @@ index 824d0b4..c73c010 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1426,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1436,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -1653,7 +1663,7 @@ index 824d0b4..c73c010 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1436,7 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1446,7 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -1661,7 +1671,7 @@ index 824d0b4..c73c010 100644
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1529,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1539,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -1670,7 +1680,7 @@ index 824d0b4..c73c010 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1555,8 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1565,8 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -1679,7 +1689,7 @@ index 824d0b4..c73c010 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1682,6 +1881,8 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1891,8 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -1688,7 +1698,7 @@ index 824d0b4..c73c010 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +1899,15 @@ int main(int argc, char** argv) {
+@@ -1698,7 +1909,15 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -1705,7 +1715,7 @@ index 824d0b4..c73c010 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +1930,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +1940,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -1717,7 +1727,7 @@ index 824d0b4..c73c010 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +1941,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +1951,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -1725,7 +1735,7 @@ index 824d0b4..c73c010 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +1954,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +1964,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -1737,14 +1747,95 @@ index 824d0b4..c73c010 100644
          };
      }
  #endif
-@@ -1770,6 +1982,10 @@ int main(int argc, char** argv) {
+@@ -1770,6 +1992,15 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
 +#ifdef DREAM_WITH_RENDERER
-+    if (live)
++    if (live) {
 +        live->volume_out = &sink.volume;  // SA-nx: the port menu's volume
++        if (live->perf_enabled) {
++            aica.time_ticks = true;
++            live->perf_audio_ns = &aica.tick_ns;
++        }
++    }
 +#endif
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
+@@ -1781,7 +2012,10 @@ int main(int argc, char** argv) {
+     (void)no_audio;
+ #endif
+     aica.on_sample = [&](std::int16_t l, std::int16_t r) {
+-        ++arm_pcs[aica.arm.next_pc()];
++        // SA-nx: one tick in sixteen. A hash-map update on every one of 44,100 ticks a second is
++        // real time on the Switch, and the shape of the histogram is all anyone reads from it.
++        if ((aica.samples & 15u) == 0)
++            ++arm_pcs[aica.arm.next_pc()];
+ #ifdef DREAM_WITH_AUDIO
+         sink.push(l, r);
+ #endif
+@@ -2145,7 +2379,7 @@ int main(int argc, char** argv) {
+         std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
+         for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
+         std::sort(top.rbegin(), top.rend());
+-        std::printf("ARM7 pc histogram (per sample tick):");
++        std::printf("ARM7 pc histogram (one sample tick in 16):");
+         for (std::size_t i = 0; i < top.size() && i < 12; ++i)
+             std::printf(" %08x:%llu", top[i].second, static_cast<unsigned long long>(top[i].first));
+         std::printf("\n");
+diff --git a/runtime/include/dream/runtime/aica/aica.h b/runtime/include/dream/runtime/aica/aica.h
+index 1ac2d5e..2940b57 100644
+--- a/runtime/include/dream/runtime/aica/aica.h
++++ b/runtime/include/dream/runtime/aica/aica.h
+@@ -64,11 +64,17 @@ private:
+ public:
+     Arm7 arm;
+     Mixer mixer;
++    // SA-nx: when time_ticks is set, an estimate of the nanoseconds spent in sample_tick (the
++    // ARM7, the timers and the mixer): one tick in every eight is timed and counted eight times,
++    // which keeps the clock reads off most of the 44,100 ticks a second.
++    bool time_ticks = false;
++    std::uint64_t tick_ns = 0;
+     std::uint64_t samples = 0, timer_irqs = 0, sh4_irq_raises = 0, channel_writes = 0,
+                   dsp_writes = 0, internal_dma_requests = 0, scpu_to_arm = 0, scpu_to_sh4 = 0,
+                   arm_side_reg_writes = 0, sh4_side_reg_writes = 0;
+ 
+ private:
++    void sample_tick_body();
+     std::uint32_t reg_read(std::uint32_t offset, unsigned size);
+     void reg_write(std::uint32_t offset, std::uint32_t value, unsigned size);
+     void store(std::uint32_t offset, std::uint32_t value, unsigned size);
+diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
+index c8d4401..a9aeb09 100644
+--- a/runtime/src/aica/aica.cpp
++++ b/runtime/src/aica/aica.cpp
+@@ -2,6 +2,8 @@
+ // aica_if.cpp; GPL-2.0, ADR 1).
+ #include "dream/runtime/aica/aica.h"
+ 
++#include <chrono>
++
+ namespace dream::aica {
+ 
+ Aica::Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory)
+@@ -236,6 +238,19 @@ void Aica::update_sh4_interrupts() {
+ }
+ 
+ void Aica::sample_tick() {
++    if (time_ticks && (samples & 7u) == 0) {
++        const auto from = std::chrono::steady_clock::now();
++        sample_tick_body();
++        tick_ns += 8u * static_cast<std::uint64_t>(
++                            std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                std::chrono::steady_clock::now() - from)
++                                .count());
++        return;
++    }
++    sample_tick_body();
++}
++
++void Aica::sample_tick_body() {
+     ++samples;
+     arm.run(Arm7::kCyclesPerSample);
+     step_timers();

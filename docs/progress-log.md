@@ -2,6 +2,28 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test3 in progress (inline main RAM, sound in the timing log)
+
+- switch-test2 timing (Mark's Switch; menu-open lines dropped). Stock 1020 MHz: speed 0.30x to
+  0.40x, game thread 70 to 81% game, 13 to 34% render (mostly GPU wait), about 5% present.
+  1785 MHz: 0.49x to 0.62x, 68 to 75% game, 19 to 27% render. So the game bucket dominates: moving
+  rendering off the thread caps at about 0.46x at stock. A 75% faster clock gave about 50% more
+  speed. The letterbox bars are black (fix confirmed by the run; no report of bleed).
+- What is inside the game bucket on the Switch is not measured yet. The best lead is Mark's PC
+  profile (out/logs/profile.txt, a run mostly in the intro movie): translated guest code 9.7% of
+  the game thread, DcMemory load/store, note_ram_write and resolve about 45%, Arm7 about 4 to 5%.
+- Patch 0023: emitted code calls Memory::read8..write64, which were pure virtual. They are now
+  inline (forced, since game units build at -O1) and serve main RAM (area 3 through P0 to P3)
+  straight from DcMemory's buffer; everything else goes to the renamed virtual do_read8 and so on.
+  The store observers (journaling, hash_writes, watch_lo/hi) moved to Memory so the inline store
+  path can see them: while any is armed, every store takes the full path. Tests: runtime.unit
+  (new: the inline path through Memory& matches, and an armed write hash still sees every store),
+  dream_emit_tests (12 cases, 35,811 assertions) pass on the host.
+- Timing log: a sound share (Aica::sample_tick, one tick in eight timed), taken out of the game
+  share; present calls while the menu is open now count as menu time, which removes the negative
+  percentages. The report's ARM7 pc histogram samples one tick in sixteen (it was a hash-map
+  update on every one of 44,100 ticks a second).
+
 ## 2026-10-29: switch-test2 (letterbox bleed, timing log, CPU 1785 by default)
 
 - switch-test1 on Mark's Switch: boots and plays, the PC fixes held, but slow, and the area right
