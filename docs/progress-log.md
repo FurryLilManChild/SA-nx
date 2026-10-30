@@ -2,7 +2,7 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
-## 2026-10-30: switch-test3 in progress (inline main RAM, sound in the timing log)
+## 2026-10-30: switch-test3 (inline main RAM, sound in the timing log)
 
 - switch-test2 timing (Mark's Switch; menu-open lines dropped). Stock 1020 MHz: speed 0.30x to
   0.40x, game thread 70 to 81% game, 13 to 34% render (mostly GPU wait), about 5% present.
@@ -23,6 +23,13 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   share; present calls while the menu is open now count as menu time, which removes the negative
   percentages. The report's ARM7 pc histogram samples one tick in sixteen (it was a hash-map
   update on every one of 44,100 ticks a second).
+- Built: 342 steps, no errors or warnings. part18's 5,113 memory accesses compile to the inline
+  area-3 test (5,465 compares against 0xDFFFFFFF), no calls. The NRO grew from 98,287,647 to
+  152,793,119 bytes: the inlined checks enlarge the code, which costs instruction cache; whether that
+  eats into the gain is for the test to show. sha256
+  5ced187a11cd986a3a7b55363d2353762c9cc0d844ea66eb7dd85d3de6f7ddad.
+- Seen in the disassembly, for later: every emitted function entry reads a thread-local flag
+  (__aarch64_read_tp twice) before its interrupt check.
 
 ## 2026-10-29: switch-test2 (letterbox bleed, timing log, CPU 1785 by default)
 
