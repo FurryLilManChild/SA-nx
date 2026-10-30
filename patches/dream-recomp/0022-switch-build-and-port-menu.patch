@@ -413,10 +413,46 @@ index 0000000..33bfd57
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..f17b71b 100644
+index 65db176..c36bc46 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
-@@ -58,6 +58,8 @@ public:
+@@ -10,8 +10,10 @@
+ //   * Render size and window size stop being the same number. Drawing at two or four times the
+ //     guest's resolution is then a change to one argument rather than a change to the design.
+ //
+-// The readback is synchronous: record, submit, wait. A frame is a megabyte or so and the guest is
+-// blocked on the render anyway, which is exactly what the hardware makes it do.
++// The readback was synchronous: record, submit, wait. SA-nx: render() now submits and returns, and
++// the wait happens when the pixels are first asked for (pixels(), finish()), so the guest keeps
++// running while the GPU draws. On the Switch the wait was 22% of the game thread (switch-test5
++// profile). DREAM_SYNC_RENDER=1 waits inside render() again, to compare.
+ #pragma once
+ 
+ #include <cstdint>
+@@ -43,12 +45,18 @@ public:
+     std::uint32_t width() const noexcept { return extent_.width; }
+     std::uint32_t height() const noexcept { return extent_.height; }
+ 
+-    // Draws one decoded frame and waits for it to finish. Afterwards pixels() holds the result.
++    // Records and submits one decoded frame. The GPU may still be drawing when this returns:
++    // pixels() and finish() wait for it. A render still in flight is finished first, so the
++    // command buffer and the readback buffer are never reused while the GPU reads them.
+     bool render(Renderer& renderer, const Frame& frame, const FrameGeometry& geometry);
+ 
+-    // The last rendered frame as RGBA8888, width() * height() pixels, row 0 at the top. Null
+-    // before the first successful render().
+-    const std::uint32_t* pixels() const noexcept;
++    // Waits for the render in flight, if any. Call it before changing anything the GPU may still
++    // be reading for that render (cached textures, for one). False if the GPU did not finish.
++    bool finish();
++
++    // The last rendered frame as RGBA8888, width() * height() pixels, row 0 at the top, after
++    // waiting for it. Null before the first successful render().
++    const std::uint32_t* pixels();
+     // SA-nx: whether translucent surfaces are sorted per pixel, as the hardware does (needs
+     // fragmentStoresAndAtomics; DREAM_NO_OIT=1 turns it off to compare against the per-strip
+     // sort). False until the first render() has set it up.
+@@ -58,6 +66,8 @@ public:
  
      const std::string& error() const noexcept { return error_; }
      std::uint64_t frames = 0;
@@ -425,6 +461,15 @@ index 65db176..f17b71b 100644
  
  private:
      Context* ctx_ = nullptr;
+@@ -70,6 +80,8 @@ private:
+     VkFence fence_ = VK_NULL_HANDLE;
+     HostBuffer readback_;
+     bool have_pixels_ = false;
++    bool pending_ = false;      // a submitted render whose fence has not been waited on
++    bool sync_ = false;         // DREAM_SYNC_RENDER: wait inside render()
+     // Per-pixel translucency (SA-nx).
+     bool create_oit();
+     void destroy_oit();
 diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
 index 4424f49..4b2787e 100644
 --- a/render/include/dream/render/vk/present.h
@@ -458,6 +503,80 @@ index b2489da..eaeee40 100644
      // Rounded up, not truncated. A footprint of 2.67 texels wants three taps; taking two leaves a
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
+diff --git a/render/src/overlay.cpp b/render/src/overlay.cpp
+index a9f0841..41b3a97 100644
+--- a/render/src/overlay.cpp
++++ b/render/src/overlay.cpp
+@@ -78,25 +78,6 @@ const Glyph* find_glyph(char c) {
+     return nullptr;
+ }
+ 
+-// src over dst, both RGBA with red in the low byte. The background is drawn at less than full
+-// alpha so the picture underneath still shows; the glyphs themselves are opaque.
+-u32 blend(u32 dst, u32 src) {
+-    const u32 a = (src >> 24) & 0xFFu;
+-    if (a == 0)
+-        return dst;
+-    if (a == 0xFF)
+-        return src;
+-    u32 out = 0xFF000000u;
+-    for (unsigned i = 0; i < 3; ++i) {
+-        const u32 s = (src >> (8 * i)) & 0xFFu, d = (dst >> (8 * i)) & 0xFFu;
+-        // Rounded rather than truncated, so a 50% grey over black is 128 and not 127: the tests
+-        // compare exact values and a half-pixel bias is the kind of thing that drifts unnoticed.
+-        const u32 v = (s * a + d * (255u - a) + 127u) / 255u;
+-        out |= v << (8 * i);
+-    }
+-    return out;
+-}
+-
+ }  // namespace
+ 
+ unsigned text_width(std::string_view text, unsigned scale) {
+@@ -116,11 +97,40 @@ void fill_rect(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x
+     const int x0 = std::max(0, x), y0 = std::max(0, y);
+     const int x1 = std::min(static_cast<int>(width), x + w);
+     const int y1 = std::min(static_cast<int>(height), y + h);
+-    for (int py = y0; py < y1; ++py)
++    const u32 a = (colour >> 24) & 0xFFu;
++    if (a == 0)
++        return;
++    if (a == 0xFFu) {  // opaque: a plain store
++        for (int py = y0; py < y1; ++py) {
++            u32* row = rgba + static_cast<std::size_t>(py) * pitch;
++            for (int px = x0; px < x1; ++px)
++                row[px] = colour;
++        }
++        return;
++    }
++    // Source over destination, both RGBA with red in the low byte. The background is drawn at less
++    // than full alpha so the picture underneath still shows; the glyphs themselves are opaque.
++    // Rounded rather than truncated, so a 50% grey over black is 128 and not 127 (the tests
++    // compare exact values). SA-nx: with the source's share computed once and the
++    // division by 255 done as (t + 1 + (t >> 8)) >> 8, which equals t / 255 for every t below
++    // 65535 (t here is at most 255 * 255 + 127). The per-pixel division made the FPS counter cost
++    // 3.3% of the Switch's game thread (switch-test5 profile).
++    const u32 inv = 255u - a;
++    u32 src[3];
++    for (unsigned i = 0; i < 3; ++i)
++        src[i] = ((colour >> (8 * i)) & 0xFFu) * a + 127u;
++    for (int py = y0; py < y1; ++py) {
++        u32* row = rgba + static_cast<std::size_t>(py) * pitch;
+         for (int px = x0; px < x1; ++px) {
+-            u32& d = rgba[static_cast<std::size_t>(py) * pitch + static_cast<std::size_t>(px)];
+-            d = blend(d, colour);
++            const u32 d = row[px];
++            u32 out = 0xFF000000u;
++            for (unsigned i = 0; i < 3; ++i) {
++                const u32 t = src[i] + ((d >> (8 * i)) & 0xFFu) * inv;
++                out |= ((t + 1u + (t >> 8)) >> 8) << (8 * i);
++            }
++            row[px] = out;
+         }
++    }
+ }
+ 
+ void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
 diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
 new file mode 100644
 index 0000000..55b747b
@@ -668,7 +787,7 @@ index 0000000..55b747b
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..d344bd0 100644
+index 9c24009..fdb0461 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,6 +1,7 @@
@@ -679,20 +798,80 @@ index 9c24009..d344bd0 100644
  #include <cstdlib>
  
  namespace dream::render::vk {
-@@ -472,7 +473,12 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
-     }
-     // One second is far longer than any frame takes; waiting for ever would turn a lost device
-     // into a hung launcher with nothing on screen to say so.
--    if (vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull) != VK_SUCCESS) {
+@@ -13,6 +14,7 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+     destroy();
+     ctx_ = &ctx;
+     extent_ = {width, height};
++    sync_ = std::getenv("DREAM_SYNC_RENDER") != nullptr;
+     if (width == 0 || height == 0) {
+         error_ = "an offscreen target needs a non-empty size";
+         return false;
+@@ -321,6 +323,7 @@ void Offscreen::destroy_oit() {
+ void Offscreen::destroy() {
+     if (ctx_ && ctx_->device())
+         vkDeviceWaitIdle(ctx_->device());
++    pending_ = false;
+     destroy_oit();
+     if (ctx_ && ctx_->device()) {
+         VkDevice dev = ctx_->device();
+@@ -345,9 +348,31 @@ void Offscreen::destroy() {
+     ctx_ = nullptr;
+ }
+ 
++bool Offscreen::finish() {
++    if (!pending_)
++        return true;
++    pending_ = false;
++    // One second is far longer than any frame takes; waiting for ever would turn a lost device
++    // into a hung launcher with nothing on screen to say so.
 +    const auto wait_from = std::chrono::steady_clock::now();
 +    const VkResult waited = vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull);
 +    wait_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                                              std::chrono::steady_clock::now() - wait_from)
 +                                              .count());
 +    if (waited != VK_SUCCESS) {
-         error_ = "the GPU did not finish the frame within a second";
++        error_ = "the GPU did not finish the frame within a second";
++        return false;
++    }
++    readback_.invalidate();
++    have_pixels_ = true;
++    return true;
++}
++
+ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeometry& geometry) {
+     if (!ctx_ || !cmd_)
+         return false;
++    if (!finish())
++        return false;
+     vkResetCommandBuffer(cmd_, 0);
+     VkCommandBufferBeginInfo bi{};
+     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+@@ -470,20 +495,15 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+         error_ = "vkQueueSubmit failed";
          return false;
      }
+-    // One second is far longer than any frame takes; waiting for ever would turn a lost device
+-    // into a hung launcher with nothing on screen to say so.
+-    if (vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull) != VK_SUCCESS) {
+-        error_ = "the GPU did not finish the frame within a second";
+-        return false;
+-    }
+-    readback_.invalidate();
+-    have_pixels_ = true;
++    pending_ = true;
+     ++frames;
++    if (sync_)
++        return finish();
+     return true;
+ }
+ 
+-const std::uint32_t* Offscreen::pixels() const noexcept {
+-    if (!have_pixels_)
++const std::uint32_t* Offscreen::pixels() {
++    if (!finish() || !have_pixels_)
+         return nullptr;
+     return static_cast<const std::uint32_t*>(readback_.mapped());
+ }
 diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
 index f3d3c96..1019398 100644
 --- a/render/src/vk/present.cpp
@@ -1346,7 +1525,7 @@ index 0000000..cae3ece
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..b9aaa4b 100644
+index 824d0b4..8fbce68 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,18 @@
@@ -1376,7 +1555,7 @@ index 824d0b4..b9aaa4b 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -159,6 +172,12 @@ struct Live {
+@@ -159,6 +172,15 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -1386,10 +1565,13 @@ index 824d0b4..b9aaa4b 100644
 +            std::uint64_t& into;
 +            ~Timed() { into += Live::ns_since(from); }
 +        } timed{render_from, perf_render_ns};
++        // SA-nx: the previous render may still be on the GPU (Offscreen::render no longer waits).
++        // Finish it before anything below can drop or replace a texture it is reading.
++        offscreen.finish();
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -243,9 +262,71 @@ struct Live {
+@@ -243,9 +265,73 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -1425,11 +1607,13 @@ index 824d0b4..b9aaa4b 100644
 +        const double game_ms = ms - render_ms - present_ms - sleep_ms - paused_ms - audio_ms;
 +        const double speed = static_cast<double>(guest_cycles - perf_cycles_at) / 200e6 / (wall - paused_ms / 1000.0);
 +        const auto pct = [ms](double v) { return 100.0 * v / ms; };
++        // The GPU wait now falls inside render or present, wherever the pixels were first needed.
 +        std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, sound %.0f%%, "
-+                    "render %.0f%% (gpu wait %.0f%%), present %.0f%%, sleep %.0f%%, menu %.0f%%\n",
++                    "render %.0f%%, present %.0f%% (gpu wait inside those %.0f%%), sleep %.0f%%, "
++                    "menu %.0f%%\n",
 +                    static_cast<double>(presented - perf_presented_at) / wall,
 +                    static_cast<double>(rendered - perf_rendered_at) / wall, speed, pct(game_ms),
-+                    pct(audio_ms), pct(render_ms), pct(gpu_ms), pct(present_ms), pct(sleep_ms),
++                    pct(audio_ms), pct(render_ms), pct(present_ms), pct(gpu_ms), pct(sleep_ms),
 +                    pct(paused_ms));
 +        std::fflush(stdout);
 +        perf_mark = now;
@@ -1462,7 +1646,7 @@ index 824d0b4..b9aaa4b 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -282,7 +363,8 @@ struct Live {
+@@ -282,7 +368,8 @@ struct Live {
          // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
          // are meant to produce the game's own pixels, which is what makes one comparable with
          // another and usable as a reference image.
@@ -1472,7 +1656,7 @@ index 824d0b4..b9aaa4b 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,6 +372,8 @@ struct Live {
+@@ -290,6 +377,8 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -1481,7 +1665,7 @@ index 824d0b4..b9aaa4b 100644
                               });
          else
              presenter.upload(cmd, source, shown.width, shown.height);
-@@ -320,6 +404,7 @@ struct Live {
+@@ -320,6 +409,7 @@ struct Live {
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
@@ -1489,7 +1673,7 @@ index 824d0b4..b9aaa4b 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -373,8 +458,110 @@ struct Live {
+@@ -373,8 +463,110 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -1600,7 +1784,7 @@ index 824d0b4..b9aaa4b 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +571,9 @@ struct Live {
+@@ -384,10 +576,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -1614,7 +1798,7 @@ index 824d0b4..b9aaa4b 100644
              return;
          }
          if (!menu.is_open())
-@@ -660,9 +846,28 @@ struct Live {
+@@ -660,9 +851,28 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -1643,7 +1827,7 @@ index 824d0b4..b9aaa4b 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1283,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1288,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -1651,7 +1835,7 @@ index 824d0b4..b9aaa4b 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1314,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1319,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -1659,7 +1843,7 @@ index 824d0b4..b9aaa4b 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1440,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1445,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -1667,7 +1851,7 @@ index 824d0b4..b9aaa4b 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1450,7 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1455,7 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -1675,7 +1859,7 @@ index 824d0b4..b9aaa4b 100644
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1543,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1548,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -1684,7 +1868,7 @@ index 824d0b4..b9aaa4b 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1569,8 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1574,8 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -1693,7 +1877,7 @@ index 824d0b4..b9aaa4b 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1682,6 +1895,8 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1900,8 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -1702,7 +1886,7 @@ index 824d0b4..b9aaa4b 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +1913,15 @@ int main(int argc, char** argv) {
+@@ -1698,7 +1918,15 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -1719,7 +1903,7 @@ index 824d0b4..b9aaa4b 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +1944,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +1949,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -1731,7 +1915,7 @@ index 824d0b4..b9aaa4b 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +1955,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +1960,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -1739,7 +1923,7 @@ index 824d0b4..b9aaa4b 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +1968,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +1973,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -1751,7 +1935,7 @@ index 824d0b4..b9aaa4b 100644
          };
      }
  #endif
-@@ -1770,6 +1996,15 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2001,15 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -1767,7 +1951,7 @@ index 824d0b4..b9aaa4b 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2016,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2021,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -1779,7 +1963,7 @@ index 824d0b4..b9aaa4b 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -2046,6 +2284,7 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2289,7 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -1787,7 +1971,7 @@ index 824d0b4..b9aaa4b 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2145,7 +2384,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +2389,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());

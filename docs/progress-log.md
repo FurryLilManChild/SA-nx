@@ -2,6 +2,29 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test5 profile (play only); switch-test6: GPU overlap, cheap counter
+
+- switch-test5 profile: 126,585 playing samples (1785 MHz, FPS counter on), 1,408 in a menu,
+  13,676 after the run. Correction to test4: malloc/free during play is 0.3%; test4's 15% was
+  the end-of-run teardown, which test4 could not separate.
+- Playing: GPU fence wait 22.3% (nvFenceWait from Offscreen::render), sound 20.2%
+  (Mixer::dsp_step 11.0%, Arm7::step 4.7%, Mixer::sample 1.9%), translated code 21.1%
+  (fn_0c641e40 6.8%, fn_0c64162c 2.5%, fn_0c037990 2.4%), memory layer 11.2% (stores and
+  store-queue flushes to non-RAM: the game's TA submission, fn_0c037990/fn_0c037294), renderer CPU
+  5.1%, FPS counter 3.3% (fill_rect from draw_text from Live::draw_counter), find_function 3.0%
+  (call_indirect from fn_0c641e40), __aarch64_read_tp 2.6% (nearly all from fn_0c64162c),
+  memmove 2.6% (Presenter::upload 1.2%), disc reads on the game thread 2.6% (fsFileRead from
+  stdio), swapchain IPC about 0.9%.
+- gdrom syscalls: 2.60M in test4 (80 guest s) and 2.61M in test5 (146 guest s): not proportional
+  to play time, so concentrated in loading rather than a steady polling cost.
+- switch-test6: Offscreen::render submits and returns; finish() (called from pixels() and at the
+  start of Live::render) waits, so the guest runs while the GPU draws. DREAM_SYNC_RENDER=1 restores
+  the old wait. rcap on lavapipe: capture-013 renders byte-identical both ways. fill_rect: opaque
+  rows are plain stores; translucent pixels use the exact (t + 1 + (t >> 8)) >> 8 for t / 255
+  (checked for every t below 65535) instead of a division per channel. render.unit passes (78
+  cases). The timing line reports the GPU wait as falling inside render or present. NRO sha256
+  afc8c8dbb2c143eb31ed89f55654732c3b87a4fc2e3953398e41d1720dfdbb83.
+
 ## 2026-10-30: switch-test4 profile; switch-test5 profiles with callers
 
 - switch-test4 profile (107,655 samples; Mark ran mostly at 1785 MHz). Two flaws found while
