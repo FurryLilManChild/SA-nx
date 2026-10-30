@@ -22,6 +22,7 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   - GdiDisc reads 64-sector windows. Test: a generated GDI read out of order across windows,
     backwards and across tracks.
   - Timing line: with the sound thread, its busy share and the game's waits for it.
+  - NRO sha256 bc1cf258209e5512a1c08af22705d4fa642246252aab10af7821b9929688a23d.
 
 ## 2026-10-30: switch-test5 profile (play only); switch-test6: GPU overlap, cheap counter
 
