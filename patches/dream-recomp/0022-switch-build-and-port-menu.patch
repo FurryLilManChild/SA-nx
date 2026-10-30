@@ -337,10 +337,10 @@ index 8dfec0a..de9b125 100644
  # a triangle. Not a test (it needs a display); run it by hand.
 diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
 new file mode 100644
-index 0000000..7fdbd16
+index 0000000..3d7cf88
 --- /dev/null
 +++ b/render/include/dream/render/port_menu.h
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,97 @@
 +// The port menu (SA-nx): the launcher's own settings, over a paused game. Device-independent like
 +// the binding screen (input_menu.h): it draws into the RGBA frame on its way to the GPU and is
 +// driven by four calls, so the same menu works from a keyboard on the PC and from the buttons on
@@ -368,9 +368,10 @@ index 0000000..7fdbd16
 +    int gpu_mhz = 0;
 +    // Memory clock in MHz, 0 for the system's own; offered alongside the CPU row.
 +    int mem_mhz = 0;
-+    // 0: translucent surfaces sorted per pixel, as the hardware does (accurate). 1: sorted per
-+    // strip, which is cheaper for the GPU but can draw overlapping translucency in the wrong order
-+    // (Sonic's eyes, before the per-pixel sort).
++    // 0: translucent surfaces sorted per pixel, as the hardware does (accurate, up to 32 layers
++    // per pixel). 2: the same with the nearest 8 layers kept (accurate, lean), much cheaper where
++    // many layers stack up. 1: sorted per strip, cheaper still but can draw overlapping
++    // translucency in the wrong order (Sonic's eyes, before the per-pixel sort).
 +    int translucency = 0;
 +
 +    std::string to_text() const;
@@ -438,7 +439,7 @@ index 0000000..7fdbd16
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..78447fe 100644
+index 65db176..69a5862 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
 @@ -10,8 +10,10 @@
@@ -477,7 +478,7 @@ index 65db176..78447fe 100644
      // SA-nx: whether translucent surfaces are sorted per pixel, as the hardware does (needs
      // fragmentStoresAndAtomics; DREAM_NO_OIT=1 turns it off to compare against the per-strip
      // sort). False until the first render() has set it up.
-@@ -58,6 +66,17 @@ public:
+@@ -58,6 +66,28 @@ public:
  
      const std::string& error() const noexcept { return error_; }
      std::uint64_t frames = 0;
@@ -492,15 +493,30 @@ index 65db176..78447fe 100644
 +    // SA-nx: the port menu's translucency setting. False draws translucent surfaces with the
 +    // per-strip sort even where the per-pixel one is available; it can change between frames.
 +    bool allow_oit = true;
++    // SA-nx: the lean resolve, 8 layers kept per pixel instead of 32 ("accurate (lean)").
++    bool lean_oit = false;
++    // SA-nx: GPU time per pass, from timestamps (zero where the device has none), and what the
++    // translucency pass covered, summed over renders; the launcher logs the differences.
++    struct GpuTimes {
++        std::uint64_t frames = 0, total_ns = 0, opaque_ns = 0, gather_ns = 0, resolve_ns = 0;
++    } gpu;
++    struct TranslucencyStats {
++        std::uint64_t frames = 0, oit_frames = 0, translucent_polygons = 0, box_pixels = 0;
++        std::uint64_t target_pixels = 0;
++    } stats;
  
  private:
      Context* ctx_ = nullptr;
-@@ -70,6 +89,14 @@ private:
+@@ -70,6 +100,18 @@ private:
      VkFence fence_ = VK_NULL_HANDLE;
      HostBuffer readback_;
      bool have_pixels_ = false;
 +    bool pending_ = false;      // a submitted render whose fence has not been waited on
 +    bool pixels_current_ = false;  // the readback buffer holds the last render
++    static constexpr std::uint32_t kStamps = 5;
++    VkQueryPool queries_ = VK_NULL_HANDLE;
++    float timestamp_period_ = 0.0f;  // nanoseconds per tick
++    bool timed_ = false;             // the submission being waited for wrote the timestamps
 +    bool full_oit_ = false;     // DREAM_OIT_FULL: the translucency pass over the whole target
 +    void record_readback(VkCommandBuffer cmd);
 +    // The target-pixel rectangle the frame's translucent polygons fall in; false when there are
@@ -543,6 +559,53 @@ index 4424f49..d0c3e12 100644
      void destroy_image();
  
      Context* ctx_ = nullptr;
+diff --git a/render/include/dream/render/vk/renderer.h b/render/include/dream/render/vk/renderer.h
+index fdf8825..b1542d6 100644
+--- a/render/include/dream/render/vk/renderer.h
++++ b/render/include/dream/render/vk/renderer.h
+@@ -66,7 +66,7 @@ public:
+         oit_capacity_ = capacity;
+     }
+     // Records the resolve: one full-screen triangle in subpass 1 of the pass prepare_oit() saw.
+-    void draw_resolve(VkCommandBuffer cmd);
++    void draw_resolve(VkCommandBuffer cmd, bool lean = false);  // lean: 8 layers (SA-nx)
+     // Decodes and uploads every texture the frame needs. Call outside the render pass.
+     void prepare(VkCommandBuffer upload, const Frame& frame);
+     // Bring-up aid: draw every list with blending off, to see the geometry a frame contains
+@@ -110,6 +110,9 @@ private:
+         VkBlendFactor src = VK_BLEND_FACTOR_ONE, dst = VK_BLEND_FACTOR_ZERO;
+         VkRenderPass pass = VK_NULL_HANDLE;
+         std::uint32_t subpass = 0;
++        // SA-nx: when non-zero, the fragment shader's specialisation constant 0 (the resolve's
++        // layers kept per pixel).
++        std::int32_t fs_constant0 = 0;
+     };
+     VkPipeline build_pipeline(const PipelineDesc& d);
+     VkPipeline gather_pipeline(std::uint32_t cull_mode);
+@@ -124,6 +127,7 @@ private:
+     VkRenderPass oit_pass_ = VK_NULL_HANDLE;
+     std::unordered_map<std::uint32_t, VkPipeline> gather_pipelines_;
+     VkPipeline resolve_pipeline_ = VK_NULL_HANDLE;
++    VkPipeline resolve_lean_pipeline_ = VK_NULL_HANDLE;  // SA-nx: 8 layers per pixel
+     VkDescriptorSet oit_set_ = VK_NULL_HANDLE;
+     std::uint32_t oit_width_ = 0, oit_capacity_ = 0;
+     VkPipelineLayout layout_ = VK_NULL_HANDLE;
+diff --git a/render/shaders/oit_resolve.frag b/render/shaders/oit_resolve.frag
+index f3bf4ab..8dc7f14 100644
+--- a/render/shaders/oit_resolve.frag
++++ b/render/shaders/oit_resolve.frag
+@@ -8,7 +8,10 @@
+ layout(location = 0) out vec4 o_colour;
+ 
+ // Fragments kept per pixel. Past this many the farthest are dropped, which costs the least.
+-const int kMax = 32;
++// SA-nx: a specialisation constant, so the renderer can also build a lean resolve that keeps 8
++// (the port menu's "accurate (lean)"): the arrays below live in per-thread memory, and on the
++// Switch's GPU 32 of each made a screen with many stacked layers take hundreds of milliseconds.
++layout(constant_id = 0) const int kMax = 32;
+ 
+ // The hardware's eight blend factors. 2 and 3 are "the other colour": the destination for the
+ // source factor, the source for the destination factor.
 diff --git a/render/shaders/present.frag b/render/shaders/present.frag
 index b2489da..eaeee40 100644
 --- a/render/shaders/present.frag
@@ -638,10 +701,10 @@ index a9f0841..41b3a97 100644
  void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
 diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
 new file mode 100644
-index 0000000..f63a801
+index 0000000..3abc669
 --- /dev/null
 +++ b/render/src/port_menu.cpp
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,244 @@
 +// See port_menu.h.
 +#include "dream/render/port_menu.h"
 +
@@ -702,7 +765,8 @@ index 0000000..f63a801
 +    s += "CPU_MHZ=" + std::to_string(cpu_mhz) + "\n";
 +    s += "GPU_MHZ=" + std::to_string(gpu_mhz) + "\n";
 +    s += "MEM_MHZ=" + std::to_string(mem_mhz) + "\n";
-+    s += "TRANSLUCENCY=" + std::string(translucency == 1 ? "fast" : "accurate") + "\n";
++    s += "TRANSLUCENCY=" +
++         std::string(translucency == 1 ? "fast" : translucency == 2 ? "lean" : "accurate") + "\n";
 +    return s;
 +}
 +
@@ -732,7 +796,7 @@ index 0000000..f63a801
 +        else if (key == "MEM_MHZ" && to_int(value, v))
 +            o.mem_mhz = kMemSteps[step_index(kMemSteps, v)];
 +        else if (key == "TRANSLUCENCY")
-+            o.translucency = value == "fast" ? 1 : 0;
++            o.translucency = value == "fast" ? 1 : value == "lean" ? 2 : 0;
 +    }
 +    return o;
 +}
@@ -765,9 +829,16 @@ index 0000000..f63a801
 +        case kVolume:
 +            options_.volume = std::clamp(options_.volume + delta * 10, 0, 100);
 +            break;
-+        case kTranslucency:
-+            options_.translucency = options_.translucency == 1 ? 0 : 1;
++        case kTranslucency: {
++            // Shown in order of cost: accurate, accurate (lean), fast.
++            static constexpr int kOrder[] = {0, 2, 1};
++            int i = 0;
++            while (i < 3 && kOrder[i] != options_.translucency)
++                ++i;
++            i = ((i % 3) + (delta < 0 ? 2 : 1)) % 3;
++            options_.translucency = kOrder[i];
 +            break;
++        }
 +        case kCpu: {
 +            const int n = static_cast<int>(std::size(kCpuSteps));
 +            const int i = std::clamp(step_index(kCpuSteps, options_.cpu_mhz) + delta, 0, n - 1);
@@ -860,7 +931,10 @@ index 0000000..f63a801
 +    row(kFps, "SHOW FPS", options_.show_fps ? "< ON >" : "< OFF >");
 +    row(kScreen, "SCREEN", options_.screen == 1 ? "< STRETCH >" : "< 4:3 >");
 +    row(kVolume, "VOLUME", "< " + std::to_string(options_.volume) + "% >");
-+    row(kTranslucency, "TRANSLUCENCY", options_.translucency == 1 ? "< FAST >" : "< ACCURATE >");
++    row(kTranslucency, "TRANSLUCENCY",
++        options_.translucency == 1   ? "< FAST >"
++        : options_.translucency == 2 ? "< LEAN >"
++                                     : "< ACCURATE >");
 +    row(kCpu, "CPU CLOCK",
 +        options_.cpu_mhz == 0 ? "< STOCK >" : "< " + std::to_string(options_.cpu_mhz) + " MHZ >");
 +    row(kGpu, "GPU CLOCK",
@@ -876,7 +950,7 @@ index 0000000..f63a801
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..0a30480 100644
+index 9c24009..366e33c 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,6 +1,9 @@
@@ -930,7 +1004,29 @@ index 9c24009..0a30480 100644
      rpci.pDependencies = deps;
      if (vkCreateRenderPass(ctx.device(), &rpci, nullptr, &render_pass_) != VK_SUCCESS) {
          error_ = "vkCreateRenderPass failed for the offscreen target";
-@@ -321,6 +340,7 @@ void Offscreen::destroy_oit() {
+@@ -135,6 +154,21 @@ bool Offscreen::create(Context& ctx, std::uint32_t width, std::uint32_t height)
+         error_ = "could not allocate the readback buffer";
+         return false;
+     }
++    // SA-nx: GPU timestamps around the passes, read back with each finished render, for the
++    // launcher's timing log. Without timestamp support the counters simply stay at zero.
++    {
++        VkPhysicalDeviceProperties props{};
++        vkGetPhysicalDeviceProperties(ctx.physical_device(), &props);
++        if (props.limits.timestampComputeAndGraphics && props.limits.timestampPeriod > 0.0f) {
++            timestamp_period_ = props.limits.timestampPeriod;
++            VkQueryPoolCreateInfo q{};
++            q.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++            q.queryType = VK_QUERY_TYPE_TIMESTAMP;
++            q.queryCount = kStamps;
++            if (vkCreateQueryPool(ctx.device(), &q, nullptr, &queries_) != VK_SUCCESS)
++                queries_ = VK_NULL_HANDLE;
++        }
++    }
+     const char* no_oit = std::getenv("DREAM_NO_OIT");
+     oit_available_ = ctx.caps().fragment_stores_and_atomics && !(no_oit && *no_oit == '1') &&
+                      create_oit();
+@@ -321,11 +355,15 @@ void Offscreen::destroy_oit() {
  void Offscreen::destroy() {
      if (ctx_ && ctx_->device())
          vkDeviceWaitIdle(ctx_->device());
@@ -938,7 +1034,15 @@ index 9c24009..0a30480 100644
      destroy_oit();
      if (ctx_ && ctx_->device()) {
          VkDevice dev = ctx_->device();
-@@ -345,9 +365,31 @@ void Offscreen::destroy() {
+         if (fence_)
+             vkDestroyFence(dev, fence_, nullptr);
++        if (queries_)
++            vkDestroyQueryPool(dev, queries_, nullptr);
++        queries_ = VK_NULL_HANDLE;
+         if (pool_)
+             vkDestroyCommandPool(dev, pool_, nullptr);  // frees cmd_ with it
+         if (framebuffer_)
+@@ -345,9 +383,49 @@ void Offscreen::destroy() {
      ctx_ = nullptr;
  }
  
@@ -959,6 +1063,24 @@ index 9c24009..0a30480 100644
 +    }
 +    readback_.invalidate();
 +    have_pixels_ = true;
++    if (timed_) {
++        timed_ = false;
++        std::uint64_t t[kStamps]{};
++        if (vkGetQueryPoolResults(ctx_->device(), queries_, 0, kStamps, sizeof t, t,
++                                  sizeof(std::uint64_t),
++                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
++            const auto ns = [this](std::uint64_t a, std::uint64_t b) {
++                return b > a ? static_cast<std::uint64_t>(static_cast<double>(b - a) *
++                                                          timestamp_period_)
++                             : 0u;
++            };
++            gpu.frames += 1;
++            gpu.total_ns += ns(t[0], t[4]);
++            gpu.opaque_ns += ns(t[0], t[1]);
++            gpu.gather_ns += ns(t[1], t[2]);
++            gpu.resolve_ns += ns(t[2], t[3]);
++        }
++    }
 +    return true;
 +}
 +
@@ -970,9 +1092,14 @@ index 9c24009..0a30480 100644
      vkResetCommandBuffer(cmd_, 0);
      VkCommandBufferBeginInfo bi{};
      bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-@@ -358,7 +400,13 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -357,8 +435,27 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+         return false;
      }
  
++    if (queries_) {
++        vkCmdResetQueryPool(cmd_, queries_, 0, kStamps);
++        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries_, 0);
++    }
      renderer.prepare(cmd_, frame);  // texture uploads happen outside the render pass
 -    const bool oit = oit_available_ && bind_oit(renderer);
 +    // SA-nx: the per-pixel translucency work covers only the rectangle the translucent polygons
@@ -982,10 +1109,28 @@ index 9c24009..0a30480 100644
 +    VkRect2D tbox{};
 +    const bool any_translucent = translucent_bounds(frame, geometry, tbox);
 +    const bool oit = allow_oit && any_translucent && oit_available_ && bind_oit(renderer);
++    // The translucency statistics for the timing log.
++    stats.frames += 1;
++    stats.translucent_polygons +=
++        frame.lists[static_cast<unsigned>(ListType::Translucent)].size();
++    if (oit) {
++        stats.oit_frames += 1;
++        stats.box_pixels += static_cast<std::uint64_t>(tbox.extent.width) * tbox.extent.height;
++    }
++    stats.target_pixels = static_cast<std::uint64_t>(extent_.width) * extent_.height;
      if (oit) {
          // Empty lists: no fragments, every head at the end marker.
          vkCmdFillBuffer(cmd_, oit_counter_.handle(), 0, VK_WHOLE_SIZE, 0);
-@@ -411,7 +459,9 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -392,6 +489,8 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     renderer.draw(cmd_, frame, geometry, extent_,
+                   oit ? Renderer::Lists::Opaque : Renderer::Lists::All);
+     vkCmdEndRenderPass(cmd_);
++    if (queries_)
++        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 1);
+ 
+     if (oit) {
+         // The resolve reads the opaque image while writing the colour attachment, so it reads a
+@@ -411,7 +510,9 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          VkImageCopy ic{};
          ic.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
          ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -996,25 +1141,37 @@ index 9c24009..0a30480 100644
          vkCmdCopyImage(cmd_, colour_.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         opaque_copy_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
          VkImageMemoryBarrier to_read = to_dst;
-@@ -430,19 +480,48 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -430,19 +531,59 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          obi.renderArea.extent = extent_;
          vkCmdBeginRenderPass(cmd_, &obi, VK_SUBPASS_CONTENTS_INLINE);
          vkCmdSetViewport(cmd_, 0, 1, &viewport);
 -        vkCmdSetScissor(cmd_, 0, 1, &scissor);
 +        vkCmdSetScissor(cmd_, 0, 1, &tbox);
          renderer.draw(cmd_, frame, geometry, extent_, Renderer::Lists::TranslucentGather);
++        if (queries_)
++            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
          vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
+-        renderer.draw_resolve(cmd_);
 +        vkCmdSetScissor(cmd_, 0, 1, &tbox);
-         renderer.draw_resolve(cmd_);
++        renderer.draw_resolve(cmd_, lean_oit);
          vkCmdEndRenderPass(cmd_);
-     }
- 
++        if (queries_)
++            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 3);
++    } else if (queries_) {
++        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
++        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 3);
++    }
++
 +    // SA-nx: the readback is only recorded when asked for (the guest reads its framebuffer back);
 +    // otherwise pixels() makes one on demand, and the window takes the frame straight from the
 +    // colour image (colour_image()).
 +    pixels_current_ = readback;
 +    if (readback)
 +        record_readback(cmd_);
++    if (queries_) {
++        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 4);
++        timed_ = true;
++    }
 +    if (vkEndCommandBuffer(cmd_) != VK_SUCCESS) {
 +        error_ = "vkEndCommandBuffer failed";
 +        return false;
@@ -1028,14 +1185,14 @@ index 9c24009..0a30480 100644
 +    if (vkQueueSubmit(ctx_->queue(), 1, &si, fence_) != VK_SUCCESS) {
 +        error_ = "vkQueueSubmit failed";
 +        return false;
-+    }
+     }
 +    pending_ = true;
 +    ++frames;
 +    if (sync_)
 +        return finish();
 +    return true;
 +}
-+
+ 
 +void Offscreen::record_readback(VkCommandBuffer cmd) {
      // The render pass left the colour image as a transfer source, so the copy needs no barrier of
      // its own; the subpass dependency above orders it.
@@ -1047,7 +1204,7 @@ index 9c24009..0a30480 100644
                             readback_.handle(), 1, &copy);
      // The CPU reads the buffer after the fence: make the copy's writes available to the host.
      VkBufferMemoryBarrier to_host{};
-@@ -454,37 +533,77 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -454,37 +595,77 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
      to_host.buffer = readback_.handle();
      to_host.offset = 0;
      to_host.size = VK_WHOLE_SIZE;
@@ -1257,6 +1414,83 @@ index f3d3c96..4fc00a3 100644
          push.scale[0] = image_aspect / target_aspect;
      else
          push.scale[1] = target_aspect / image_aspect;
+diff --git a/render/src/vk/renderer.cpp b/render/src/vk/renderer.cpp
+index f0298ec..18e8924 100644
+--- a/render/src/vk/renderer.cpp
++++ b/render/src/vk/renderer.cpp
+@@ -261,6 +261,15 @@ VkPipeline Renderer::build_pipeline(const PipelineDesc& d) {
+     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+     stages[1].module = d.fs;
+     stages[1].pName = "main";
++    const VkSpecializationMapEntry spec_entry{0, 0, sizeof(std::int32_t)};
++    VkSpecializationInfo spec{};
++    if (d.fs_constant0) {
++        spec.mapEntryCount = 1;
++        spec.pMapEntries = &spec_entry;
++        spec.dataSize = sizeof d.fs_constant0;
++        spec.pData = &d.fs_constant0;
++        stages[1].pSpecializationInfo = &spec;
++    }
+ 
+     VkVertexInputBindingDescription binding{};
+     binding.binding = 0;
+@@ -360,7 +369,7 @@ VkPipeline Renderer::build_pipeline(const PipelineDesc& d) {
+ // Per-pixel translucency (SA-nx). The gather pipelines differ only in culling: depth is tested in
+ // the shader against the opaque pass's depth, blending happens in the resolve.
+ bool Renderer::prepare_oit(VkRenderPass pass) {
+-    if (pass == oit_pass_ && resolve_pipeline_)
++    if (pass == oit_pass_ && resolve_pipeline_ && resolve_lean_pipeline_)
+         return true;
+     for (auto& [k, pl] : gather_pipelines_) vkDestroyPipeline(ctx_->device(), pl, nullptr);
+     gather_pipelines_.clear();
+@@ -368,6 +377,10 @@ bool Renderer::prepare_oit(VkRenderPass pass) {
+         vkDestroyPipeline(ctx_->device(), resolve_pipeline_, nullptr);
+         resolve_pipeline_ = VK_NULL_HANDLE;
+     }
++    if (resolve_lean_pipeline_) {
++        vkDestroyPipeline(ctx_->device(), resolve_lean_pipeline_, nullptr);
++        resolve_lean_pipeline_ = VK_NULL_HANDLE;
++    }
+     oit_pass_ = pass;
+     PipelineDesc d;
+     d.vs = resolve_vs_;
+@@ -377,7 +390,9 @@ bool Renderer::prepare_oit(VkRenderPass pass) {
+     d.pass = pass;
+     d.subpass = 1;
+     resolve_pipeline_ = build_pipeline(d);
+-    return resolve_pipeline_ != VK_NULL_HANDLE;
++    d.fs_constant0 = 8;
++    resolve_lean_pipeline_ = build_pipeline(d);
++    return resolve_pipeline_ != VK_NULL_HANDLE && resolve_lean_pipeline_ != VK_NULL_HANDLE;
+ }
+ 
+ VkPipeline Renderer::gather_pipeline(std::uint32_t cull_mode) {
+@@ -397,10 +412,11 @@ VkPipeline Renderer::gather_pipeline(std::uint32_t cull_mode) {
+     return pl;
+ }
+ 
+-void Renderer::draw_resolve(VkCommandBuffer cmd) {
+-    if (!resolve_pipeline_ || !oit_set_)
++void Renderer::draw_resolve(VkCommandBuffer cmd, bool lean) {
++    VkPipeline pl = lean ? resolve_lean_pipeline_ : resolve_pipeline_;
++    if (!pl || !oit_set_)
+         return;
+-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline_);
++    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
+     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &oit_set_, 0,
+                             nullptr);
+     PushConstants push{};
+@@ -622,6 +638,10 @@ void Renderer::destroy() {
+         vkDestroyPipeline(ctx_->device(), resolve_pipeline_, nullptr);
+         resolve_pipeline_ = VK_NULL_HANDLE;
+     }
++    if (resolve_lean_pipeline_) {
++        vkDestroyPipeline(ctx_->device(), resolve_lean_pipeline_, nullptr);
++        resolve_lean_pipeline_ = VK_NULL_HANDLE;
++    }
+     oit_pass_ = VK_NULL_HANDLE;
+     oit_set_ = VK_NULL_HANDLE;
+     if (oit_set_layout_) {
 diff --git a/render/src/vk/window_switch.cpp b/render/src/vk/window_switch.cpp
 new file mode 100644
 index 0000000..4371e9b
@@ -1823,10 +2057,10 @@ index 0000000..4371e9b
 +}  // namespace dream::render::vk
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
-index 0000000..ecf78f9
+index 0000000..360fdc7
 --- /dev/null
 +++ b/render/tests/test_port_menu.cpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,89 @@
 +// The port menu (SA-nx): options round-trip through their file, a damaged file falls back to
 +// defaults, and the menu moves, changes and closes as the footer says.
 +#include <cstdint>
@@ -1878,9 +2112,16 @@ index 0000000..ecf78f9
 +    m.move(1);  // VOLUME
 +    m.adjust(-1);
 +    CHECK(m.options().volume == 90);
-+    m.move(1);  // TRANSLUCENCY
++    m.move(1);  // TRANSLUCENCY: accurate, then lean, then fast, then round again
 +    CHECK(m.activate() == PortMenu::Action::None);
++    CHECK(m.options().translucency == 2);
++    m.adjust(1);
 +    CHECK(m.options().translucency == 1);
++    m.adjust(1);
++    CHECK(m.options().translucency == 0);
++    m.adjust(-1);
++    CHECK(m.options().translucency == 1);
++    CHECK(PortOptions::from_text("TRANSLUCENCY=lean\n").translucency == 2);
 +    m.move(1);  // the clock rows are hidden, so this is QUIT
 +    CHECK(m.activate() == PortMenu::Action::Quit);
 +    CHECK_FALSE(m.is_open());
@@ -1910,7 +2151,7 @@ index 0000000..ecf78f9
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..6feadf5 100644
+index 824d0b4..b65c150 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,24 @@
@@ -1972,7 +2213,7 @@ index 824d0b4..6feadf5 100644
          if (!offscreen.render(renderer, frame, geometry)) {
              if (!reported_error) {
                  reported_error = true;
-@@ -243,9 +274,88 @@ struct Live {
+@@ -243,9 +274,117 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -2030,6 +2271,35 @@ index 824d0b4..6feadf5 100644
 +                        static_cast<double>(rendered - perf_rendered_at) / wall, speed,
 +                        pct(game_ms), pct(audio_ms), pct(render_ms), pct(present_ms), pct(gpu_ms),
 +                        pct(sleep_ms), pct(paused_ms));
++        // SA-nx: the GPU's own time per render, from timestamps, and what translucency cost.
++        const auto& g = offscreen.gpu;
++        const auto& st = offscreen.stats;
++        const double gf = static_cast<double>(g.frames - perf_gpu_last.frames);
++        const double tf = static_cast<double>(st.frames - perf_stats_last.frames);
++        if (gf > 0 && tf > 0) {
++            const auto avg_ms = [gf](std::uint64_t now_ns, std::uint64_t then_ns) {
++                return static_cast<double>(now_ns - then_ns) / 1e6 / gf;
++            };
++            const double oit_frames = static_cast<double>(st.oit_frames - perf_stats_last.oit_frames);
++            const double cover =
++                oit_frames > 0 && st.target_pixels
++                    ? 100.0 * static_cast<double>(st.box_pixels - perf_stats_last.box_pixels) /
++                          oit_frames / static_cast<double>(st.target_pixels)
++                    : 0.0;
++            std::printf("gpu: %.1f ms per render (opaque %.1f, translucency gather %.1f, resolve "
++                        "%.1f) | translucent polygons %.0f per render, per-pixel pass in %.0f%% "
++                        "of renders over %.0f%% of the screen\n",
++                        avg_ms(g.total_ns, perf_gpu_last.total_ns),
++                        avg_ms(g.opaque_ns, perf_gpu_last.opaque_ns),
++                        avg_ms(g.gather_ns, perf_gpu_last.gather_ns),
++                        avg_ms(g.resolve_ns, perf_gpu_last.resolve_ns),
++                        static_cast<double>(st.translucent_polygons -
++                                            perf_stats_last.translucent_polygons) /
++                            tf,
++                        100.0 * oit_frames / tf, cover);
++        }
++        perf_gpu_last = g;
++        perf_stats_last = st;
 +        std::fflush(stdout);
 +        perf_mark = now;
 +        perf_reset(guest_cycles);
@@ -2062,7 +2332,7 @@ index 824d0b4..6feadf5 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -277,12 +387,27 @@ struct Live {
+@@ -277,12 +416,27 @@ struct Live {
              window.recreate_swapchain();
              return true;
          }
@@ -2091,7 +2361,7 @@ index 824d0b4..6feadf5 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,9 +415,18 @@ struct Live {
+@@ -290,9 +444,18 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -2110,7 +2380,7 @@ index 824d0b4..6feadf5 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -320,6 +454,7 @@ struct Live {
+@@ -320,6 +483,7 @@ struct Live {
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
@@ -2118,7 +2388,7 @@ index 824d0b4..6feadf5 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -330,7 +465,29 @@ struct Live {
+@@ -330,7 +494,29 @@ struct Live {
              screenshot();
          if (capture_at && presented == capture_at)
              capture();
@@ -2149,7 +2419,7 @@ index 824d0b4..6feadf5 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +530,123 @@ struct Live {
+@@ -373,8 +559,126 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -2174,10 +2444,13 @@ index 824d0b4..6feadf5 100644
 +            applied_mem_mhz = options.mem_mhz;
 +            dream_port_set_mem_mhz(options.mem_mhz);
 +        }
-+        if (offscreen.allow_oit != (options.translucency == 0)) {
-+            offscreen.allow_oit = options.translucency == 0;
-+            std::printf("translucency: %s\n", offscreen.allow_oit ? "accurate (per pixel)"
-+                                                                   : "fast (per strip)");
++        if (offscreen.allow_oit != (options.translucency != 1) ||
++            offscreen.lean_oit != (options.translucency == 2)) {
++            offscreen.allow_oit = options.translucency != 1;
++            offscreen.lean_oit = options.translucency == 2;
++            std::printf("translucency: %s\n", !offscreen.allow_oit  ? "fast (per strip)"
++                                               : offscreen.lean_oit ? "accurate, lean (8 layers)"
++                                                                    : "accurate (32 layers)");
 +        }
 +    }
 +
@@ -2273,7 +2546,7 @@ index 824d0b4..6feadf5 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +656,9 @@ struct Live {
+@@ -384,10 +688,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -2287,7 +2560,7 @@ index 824d0b4..6feadf5 100644
              return;
          }
          if (!menu.is_open())
-@@ -660,9 +931,38 @@ struct Live {
+@@ -660,9 +963,40 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -2306,6 +2579,8 @@ index 824d0b4..6feadf5 100644
 +    std::uint64_t perf_render_ns = 0, perf_present_ns = 0, perf_sleep_ns = 0, perf_paused_ns = 0;
 +    std::uint64_t perf_gpu_at = 0, perf_presented_at = 0, perf_rendered_at = 0, perf_cycles_at = 0;
 +    std::uint64_t perf_scratch_ns = 0;
++    dream::render::vk::Offscreen::GpuTimes perf_gpu_last{};
++    dream::render::vk::Offscreen::TranslucencyStats perf_stats_last{};
 +    const std::uint64_t* perf_audio_ns = nullptr;  // the AICA's sample_tick time, when measured
 +    bool perf_sound_threaded = false;              // the AICA runs on its own thread
 +    const std::uint64_t* perf_sound_wait_ns = nullptr;
@@ -2326,7 +2601,7 @@ index 824d0b4..6feadf5 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1378,9 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1412,9 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -2336,7 +2611,7 @@ index 824d0b4..6feadf5 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1411,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1445,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -2344,7 +2619,7 @@ index 824d0b4..6feadf5 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1537,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1571,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -2352,7 +2627,7 @@ index 824d0b4..6feadf5 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1547,12 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1581,12 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -2365,7 +2640,7 @@ index 824d0b4..6feadf5 100644
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1645,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1679,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -2374,7 +2649,7 @@ index 824d0b4..6feadf5 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1671,12 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1705,12 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -2387,7 +2662,7 @@ index 824d0b4..6feadf5 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1682,6 +2001,8 @@ int main(int argc, char** argv) {
+@@ -1682,6 +2035,8 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -2396,7 +2671,7 @@ index 824d0b4..6feadf5 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +2019,15 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2053,15 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -2413,7 +2688,7 @@ index 824d0b4..6feadf5 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +2050,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2084,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -2425,7 +2700,7 @@ index 824d0b4..6feadf5 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2061,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2095,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -2433,7 +2708,7 @@ index 824d0b4..6feadf5 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2074,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2108,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -2445,7 +2720,7 @@ index 824d0b4..6feadf5 100644
          };
      }
  #endif
-@@ -1770,6 +2102,15 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2136,15 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -2461,7 +2736,7 @@ index 824d0b4..6feadf5 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2122,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2156,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -2473,7 +2748,7 @@ index 824d0b4..6feadf5 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2134,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2168,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -2497,7 +2772,7 @@ index 824d0b4..6feadf5 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -2046,6 +2407,8 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2441,8 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -2506,7 +2781,7 @@ index 824d0b4..6feadf5 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2145,7 +2508,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +2542,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());

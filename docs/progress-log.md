@@ -2,6 +2,31 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test8 result; switch-test9 (GPU timing, lean translucency)
+
+- switch-test8 (Mark played the whole of Emerald Coast at CPU 1785, GPU 768, memory 1600,
+  translucency accurate): mostly 0.88x to 1.01x, average about 0.93x (test7 at 1785/768 without
+  the memory clock: about 0.83x). Short drops to about 10 fps line up with 5-second stretches where
+  the game thread waited on the GPU for 22 to 57% of the time. Back at character select: 1.5 fps,
+  the GPU wait 97% (about 650 ms per frame); the port menu could not be reached, so the run ended
+  from HOME. Translated game code is now the largest CPU item (37.8%); call_indirect 6.5%; resolve
+  and store-queue stores dropped to about 2.6% together (from about 8%). Exception unwinding
+  (uw_update_context, read_encoded_value) about 1% during play.
+- Suspect for the GPU stalls (not measured on the GPU yet): the per-pixel resolve keeps up to 32
+  fragments per pixel in per-thread arrays; screens with many stacked translucent layers make it
+  very expensive on the Switch's GPU.
+- switch-test9:
+  - Offscreen writes GPU timestamps (start, after the opaque pass, after the gather, after the
+    resolve, end) and sums per-pass times on each finish(); translucency stats (translucent
+    polygons, renders with the per-pixel pass, the rectangle's share of the screen). The timing
+    log prints a gpu: line every five seconds.
+  - oit_resolve.frag: kMax is specialisation constant 0; the renderer builds a second resolve
+    pipeline with 8. Port menu translucency: accurate, lean (8 layers), fast
+    (TRANSLUCENCY=lean in the options file).
+  - rcap: captures 002, 006, 009, 013, 015 render identically with lean and with accurate (no
+    pixel there has more than 8 layers); accurate is unchanged from test8.
+  - NRO sha256 5342cbd957a4946b90fe5b45e07e7b389b91d234ac09520a0c07f412c023df2d.
+
 ## 2026-10-30: switch-test7 result; switch-test8 (GPU present, bounded translucency, clocks)
 
 - switch-test7 (handheld: GPU stock 307 MHz; CPU 1785): sound thread on core 2 busy 20 to 32%,
