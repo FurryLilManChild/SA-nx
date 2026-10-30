@@ -32,6 +32,7 @@
 int dream_boot_main(int argc, char** argv);
 extern void (*dream_port_set_cpu_mhz)(int mhz);
 extern void (*dream_port_set_gpu_mhz)(int mhz);
+extern void (*dream_port_set_mem_mhz)(int mhz);
 extern volatile int dream_port_phase;  // the launcher: 0 playing, 1 menu, 2 ended
 extern void (*dream_port_on_thread)(const char* name);
 extern "C" char __start__;  // libnx's crt0: the start of this module, for crash offsets
@@ -128,6 +129,7 @@ struct Clock {
 };
 Clock g_cpu_clock{PcvModuleId_CpuBus, "CPU"};
 Clock g_gpu_clock{PcvModuleId_GPU, "GPU"};
+Clock g_mem_clock{PcvModuleId_EMC, "memory"};
 bool g_clkrst = false;
 bool g_hooked = false;
 AppletHookCookie g_clk_hook;
@@ -146,7 +148,7 @@ bool service_running(const char* name) {
 void clk_reapply() {
     if (appletGetFocusState() != AppletFocusState_InFocus)
         return;
-    for (Clock* c : {&g_cpu_clock, &g_gpu_clock})
+    for (Clock* c : {&g_cpu_clock, &g_gpu_clock, &g_mem_clock})
         if (c->open && c->set_hz)
             clkrstSetClockRate(&c->session, c->set_hz);
 }
@@ -163,6 +165,8 @@ u32 to_hz(const Clock& c, int mhz) {
         return 460800000u;
     if (c.module == PcvModuleId_GPU && mhz == 614)
         return 614400000u;
+    if (c.module == PcvModuleId_EMC && mhz == 1331)
+        return 1331200000u;
     return static_cast<u32>(mhz) * 1000000u;
 }
 
@@ -219,10 +223,14 @@ void set_gpu_mhz(int mhz) {
     set_clock(g_gpu_clock, mhz);
 }
 
+void set_mem_mhz(int mhz) {
+    set_clock(g_mem_clock, mhz);
+}
+
 void clk_restore() {
     if (g_hooked)
         appletUnhook(&g_clk_hook);
-    for (Clock* c : {&g_cpu_clock, &g_gpu_clock}) {
+    for (Clock* c : {&g_cpu_clock, &g_gpu_clock, &g_mem_clock}) {
         if (!c->open)
             continue;
         if (c->set_hz && c->old_hz)
@@ -475,6 +483,7 @@ int main(int argc, char** argv) {
 
     dream_port_set_cpu_mhz = set_cpu_mhz;
     dream_port_set_gpu_mhz = set_gpu_mhz;
+    dream_port_set_mem_mhz = set_mem_mhz;
     // Helper threads the launcher starts. Core 1 is the game's; the sound processor gets core 2.
     // Core 0 keeps the main thread (asleep while the game runs), SDL's audio thread and the
     // profiler.

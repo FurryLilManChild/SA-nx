@@ -210,7 +210,7 @@ index 6680b09..7ffe353 100644
      }
      void sq_write32(std::uint32_t a, std::uint32_t v) override { sq_[(a >> 2) & 15] = v; }
 diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
-index bcc1279..6395bad 100644
+index bcc1279..75cedd3 100644
 --- a/runtime/src/mem/dc_memory.cpp
 +++ b/runtime/src/mem/dc_memory.cpp
 @@ -64,7 +64,11 @@ DcMemory::DcMemory()
@@ -252,7 +252,7 @@ index bcc1279..6395bad 100644
      const Target t = resolve(a, 8, false);
      if (t.kind == Target::kBytes) {
          std::uint64_t v;
-@@ -286,13 +290,13 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
+@@ -286,13 +290,21 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
                 (static_cast<std::uint64_t>(t.mmio->read(t.mmio_addr + 4, 4)) << 32);
      return 0;
  }
@@ -266,23 +266,36 @@ index bcc1279..6395bad 100644
  }
 -void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
 +void DcMemory::do_write32(std::uint32_t a, std::uint32_t v) {
++    // SA-nx: the store queues first. A game hands its display lists to the hardware by filling
++    // them a word at a time and flushing; each word went through the CCN check and resolve()
++    // before landing in sq_ (the Switch's test7 profile: resolve 4.3%, store 3.8%). With nothing
++    // watching stores the word goes straight in, exactly where resolve() would have put it.
++    if ((a & 0xFC000000u) == 0xE0000000u && !journaling && !tracing_writes()) {
++        std::memcpy(reinterpret_cast<std::uint8_t*>(&sq_[(a >> 5) & 1][0]) + (a & 0x1Cu), &v, 4);
++        return;
++    }
      if ((a & 0xFFFFFFC0u) == 0xFF000000u) {
          switch (a & 0x3Cu) {
              case 0x20:
-@@ -317,7 +321,7 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
+@@ -317,7 +329,12 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
      }
      store<std::uint32_t>(a, v);
  }
 -void DcMemory::write64(std::uint32_t a, std::uint64_t v) {
 +void DcMemory::do_write64(std::uint32_t a, std::uint64_t v) {
++    // SA-nx: the store queues, as in do_write32 (an FMOV pair writes them eight bytes at a time).
++    if ((a & 0xFC000000u) == 0xE0000000u && (a & 7u) == 0 && !journaling && !tracing_writes()) {
++        std::memcpy(reinterpret_cast<std::uint8_t*>(&sq_[(a >> 5) & 1][0]) + (a & 0x18u), &v, 8);
++        return;
++    }
      const Target t = resolve(a, 8, true);
      if (t.kind == Target::kBytes) {
          const std::uint32_t lo = static_cast<std::uint32_t>(v);
 diff --git a/runtime/tests/test_memory.cpp b/runtime/tests/test_memory.cpp
-index c12552c..e421cda 100644
+index c12552c..604ee9e 100644
 --- a/runtime/tests/test_memory.cpp
 +++ b/runtime/tests/test_memory.cpp
-@@ -280,3 +280,25 @@ TEST_CASE("memory: writes to video memory are reported as page runs") {
+@@ -280,3 +280,55 @@ TEST_CASE("memory: writes to video memory are reported as page runs") {
      CHECK(runs.empty());
  }
  
@@ -307,4 +320,34 @@ index c12552c..e421cda 100644
 +    m.write32(0x8C004018u, 3u);
 +    CHECK(dc.writes_hashed == before + 2);  // and the inline path is back once it is off
 +    CHECK(m.read32(0x8C004018u) == 3u);
++}
++
++TEST_CASE("memory: store-queue words written by the quick path reach RAM on the flush") {
++    // SA-nx: do_write32 and do_write64 put store-queue words straight into the queue when nothing
++    // watches stores. Both queues, both widths, then a flush to RAM through QACR, must give the
++    // same bytes as before; with the write hash armed the full path still runs and sees them.
++    DcMemory m;
++    dream::Memory& mem = m;
++    m.set_qacr(0, 0x0Cu);  // area 3 (RAM): bits 4:2 = 3
++    m.set_qacr(1, 0x0Cu);
++    for (unsigned q = 0; q < 2; ++q) {
++        const std::uint32_t base = 0xE0000000u + q * 32u;
++        mem.write64(base, 0x1111111100000000ull + q);
++        mem.write32(base + 8, 0x22220000u + q);
++        mem.write32(base + 12, 0x33330000u + q);
++        mem.write64(base + 16, 0x5555555544444444ull);
++        mem.write64(base + 24, 0x7777777766666666ull);
++        m.sq_flush(0xE0001000u + q * 32u);
++        const std::uint32_t ram = 0x8C001000u + q * 32u;
++        CHECK(m.read32(ram) == q);
++        CHECK(m.read32(ram + 4) == 0x11111111u);
++        CHECK(m.read32(ram + 8) == 0x22220000u + q);
++        CHECK(m.read32(ram + 12) == 0x33330000u + q);
++        CHECK(m.read32(ram + 16) == 0x44444444u);
++        CHECK(m.read32(ram + 28) == 0x77777777u);
++    }
++    m.hash_writes = true;
++    const std::uint64_t before = m.writes_hashed;
++    mem.write32(0xE0000000u, 9u);
++    CHECK(m.writes_hashed == before + 1);  // the full path, which reports to the hash
 +}

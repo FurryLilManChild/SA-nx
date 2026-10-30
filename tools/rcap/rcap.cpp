@@ -28,6 +28,7 @@ int main(int argc,char**argv){
   DisplayList dl; dl.feed_stream(reinterpret_cast<const std::uint32_t*>(ta.data()),ta.size()/4);
   add_background(dl.frame(),regs.data(),reinterpret_cast<const std::uint8_t*>(vram.data()),vram.size());
   vk::FrameGeometry g; g.alpha_ref=static_cast<float>(regs[0x11C/4]&0xFFu)/255.0f;
+  off.readback = std::getenv("RCAP_NO_READBACK") == nullptr;  // pixels() then copies on demand
   if(!off.render(r,dl.frame(),g)){std::printf("render: %s\n",off.error().c_str());return 1;}
   const std::uint32_t* px=off.pixels(); FILE*f=std::fopen(argv[2],"wb");
   std::fprintf(f,"P6 %u %u 255\n",off.width(),off.height());

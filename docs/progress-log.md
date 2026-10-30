@@ -2,6 +2,37 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test7 result; switch-test8 (GPU present, bounded translucency, clocks)
+
+- switch-test7 (handheld: GPU stock 307 MHz; CPU 1785): sound thread on core 2 busy 20 to 32%,
+  the game never waited for it. Gameplay: GPU 307 accurate about 0.63x (GPU wait 13%); GPU 614
+  0.72x to 0.87x; GPU 768 accurate 0.79x to 0.97x, typically 0.83x (GPU wait 5%); GPU 768
+  translucency fast 0.97x to 1.00x (only about 10 s logged). CPU back to stock with GPU 768 and
+  fast: 0.39x to 0.56x. Mark: GPU clock helps, translucency more; he wants full speed with the
+  accurate setting.
+- test7 profile (153,387 playing samples, mixed clocks): translated code 35.4% (fn_0c641e40
+  10.2%, the object loop calling through call_indirect), find_function 7.1% (up from 3.5%: the
+  cache grew to 4096 x 32 bytes), __aarch64_read_tp 4.0%, DcMemory resolve 4.3% and store<u32>
+  3.8% (store-queue words from fn_0c037990/fn_0c037294), GPU fence wait 13.5%, memmove 3.9%
+  (Presenter::upload), swapchain acquire 2.0%.
+- switch-test8:
+  - Offscreen: the readback is recorded only when Live needs pixels in video memory
+    (writeback) or DREAM_CPU_PRESENT=1; pixels() copies on demand. An incoming subpass dependency
+    orders the next render after copies reading the colour image. The per-pixel translucency
+    pass is limited to the rectangle of the frame's translucent polygons (opaque copy, gather and
+    resolve scissored); none on screen, no pass. DREAM_OIT_FULL=1 restores the whole target.
+  - Presenter::copy_from takes the frame from the colour image on the GPU; Presenter::overlay
+    puts the FPS counter (an opaque tile) over it. The menus still composite on the CPU.
+  - Port menu: memory clock (stock, 1331, 1600; PcvModuleId_EMC).
+  - find_function cache: 1024 slots of 24 bytes; call_indirect checks it inline first.
+  - DcMemory::do_write32/do_write64: store-queue words go straight into sq_ when nothing watches
+    stores.
+  - Checks: rcap (lavapipe) on captures 002, 006, 009, 013, 015, 016: bounded translucency
+    byte-identical to the full pass, on-demand readback identical, 013 identical to test6's
+    output; the validation layer reports nothing from rendering. runtime.unit (new: store-queue
+    quick path), render.unit, dream_emit_tests pass.
+  - NRO sha256 d3d9d086a138f9746299c9c6a475a9c2eeb6748853b4840fbe43b56943e8cc8a.
+
 ## 2026-10-30: switch-test6 result; switch-test7 (sound thread, clocks, lookups, disc)
 
 - switch-test6 (1785 MHz): gameplay about 0.59x (test5 about 0.55x). GPU fence wait 17.8% of the
