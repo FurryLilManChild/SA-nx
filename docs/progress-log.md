@@ -8,7 +8,7 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   0.40x, game thread 70 to 81% game, 13 to 34% render (mostly GPU wait), about 5% present.
   1785 MHz: 0.49x to 0.62x, 68 to 75% game, 19 to 27% render. So the game bucket dominates: moving
   rendering off the thread caps at about 0.46x at stock. A 75% faster clock gave about 50% more
-  speed. Whether the letterbox bars are now black: not yet reported.
+  speed. Mark confirmed the letterbox bars are plain black in test2.
 - What is inside the game bucket on the Switch is not measured yet. The best lead is Mark's PC
   profile (out/logs/profile.txt, a run mostly in the intro movie): translated guest code 9.7% of
   the game thread, DcMemory load/store, note_ram_write and resolve about 45%, Arm7 about 4 to 5%.
