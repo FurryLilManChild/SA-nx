@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test3 result (no gain); switch-test4 is a sampling profiler
+
+- switch-test3 on Mark's Switch, all at stock 1020 MHz (no clock change in the log; no report in
+  switchlogs). He felt no difference, and the numbers agree: the gameplay stretch at about 10
+  renders/s ran 0.31x to 0.37x (test2: 0.31x to 0.37x for the same pattern). Other stretches
+  0.32x to 0.49x. Split: game 40 to 63%, sound 9 to 29% (typically about 20%), render 10 to 47%
+  (GPU wait 5 to 41%), present 4 to 8%.
+- So patch 0023 (inline main RAM) made no measurable difference at stock. The PC profile it was
+  based on was mostly the intro movie, on a different CPU; it did not carry over to Switch
+  gameplay. 0023 stays for now (neutral, code 55% larger); the profile decides.
+- New and measured: sound (the AICA's ARM7, timers and mixer) is about a fifth of the game
+  thread, on the same core as the game.
+- switch-test4: switch_main.cpp samples the game thread about 500 times a second from core 2
+  (svcSetThreadActivity pause, svcGetThreadContext3, resume) and writes pc and lr counts as module
+  offsets to sonicadv_profile.txt every 20 s and at exit. Offsets are ELF addresses (__start__ is
+  0). NRO sha256 8f67f93e0f4348cb25421cd25d0d09dfd608c37f25437f7e8e1aa839cf17906a.
+
 ## 2026-10-30: switch-test3 (inline main RAM, sound in the timing log)
 
 - switch-test2 timing (Mark's Switch; menu-open lines dropped). Stock 1020 MHz: speed 0.30x to

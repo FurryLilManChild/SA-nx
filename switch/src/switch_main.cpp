@@ -8,6 +8,7 @@
 //   sdmc:/switch/sonicadv/sonicadv.log        stdout, sonicadv.err.log stderr (fresh each launch)
 //   sdmc:/switch/sonicadv/sonicadv_args.txt   optional extra launcher arguments, one per line
 //   sdmc:/switch/sonicadv/crash_XXXXXXXX.txt  written by a crash
+//   sdmc:/switch/sonicadv/sonicadv_profile.txt where the game thread spends its time (below)
 //
 // The clock and crash-report approach follows CoD-nx's src/switch_nx.c (MIT, burnout3-sw's base).
 #include <switch.h>
@@ -23,6 +24,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <unordered_map>
+#include <utility>
+#include <algorithm>
 #include <vector>
 
 int dream_boot_main(int argc, char** argv);
@@ -241,6 +245,72 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     svcExitProcess();
 }
 
+// --- sampling profiler --------------------------------------------------------------------
+// About 500 times a second a thread on core 2 pauses the game thread, reads its program counter
+// and link register, and lets it go again. The counts, as offsets into this module, are written to
+// sonicadv_profile.txt every 20 seconds (overwritten, so a run closed from the HOME menu still
+// leaves one); Claude resolves them to functions with the build's ELF. The pause costs the game
+// thread a few percent while it runs. On for every run of this build: the test is the profile.
+Handle g_prof_target = INVALID_HANDLE;
+Thread g_prof;
+volatile bool g_prof_stop = false;
+
+void prof_write(const std::unordered_map<std::uint64_t, std::uint32_t>& pcs,
+                const std::unordered_map<std::uint64_t, std::uint32_t>& lrs, std::uint64_t samples,
+                std::uint64_t failed) {
+    FILE* f = std::fopen("sdmc:/switch/sonicadv/sonicadv_profile.txt", "w");
+    if (!f)
+        return;
+    std::fprintf(f, "SA-nx profile: %llu samples, %llu unreadable\n",
+                 static_cast<unsigned long long>(samples), static_cast<unsigned long long>(failed));
+    const auto dump = [f](const char* what, const std::unordered_map<std::uint64_t, std::uint32_t>& m,
+                          std::size_t limit) {
+        std::vector<std::pair<std::uint32_t, std::uint64_t>> v;
+        v.reserve(m.size());
+        for (const auto& [a, n] : m) v.push_back({n, a});
+        std::sort(v.rbegin(), v.rend());
+        std::fprintf(f, "== %s (%zu distinct)\n", what, v.size());
+        for (std::size_t i = 0; i < v.size() && i < limit; ++i)
+            std::fprintf(f, "%x %u\n", static_cast<unsigned>(v[i].second), v[i].first);
+    };
+    dump("pc", pcs, 6000);
+    dump("lr", lrs, 3000);
+    std::fclose(f);
+}
+
+void profiler(void*) {
+    std::unordered_map<std::uint64_t, std::uint32_t> pcs, lrs;
+    pcs.reserve(1 << 16);
+    lrs.reserve(1 << 14);
+    std::uint64_t samples = 0, failed = 0;
+    std::uint64_t last_write = armGetSystemTick();
+    const std::uint64_t write_every = armGetSystemTickFreq() * 20;
+    while (!g_prof_stop) {
+        svcSleepThread(2'000'000ll);  // 2 ms: about 500 samples a second
+        if (R_FAILED(svcSetThreadActivity(g_prof_target, ThreadActivity_Paused))) {
+            ++failed;
+            continue;
+        }
+        ThreadContext ctx;
+        const Result rc = svcGetThreadContext3(&ctx, g_prof_target);
+        svcSetThreadActivity(g_prof_target, ThreadActivity_Runnable);
+        if (R_FAILED(rc)) {
+            ++failed;
+            continue;
+        }
+        ++samples;
+        ++pcs[off(ctx.pc.x)];
+        ++lrs[off(ctx.lr)];
+        if (armGetSystemTick() - last_write >= write_every) {
+            last_write = armGetSystemTick();
+            prof_write(pcs, lrs, samples, failed);
+        }
+    }
+    prof_write(pcs, lrs, samples, failed);
+    std::printf("[profile] %llu samples, %llu unreadable\n",
+                static_cast<unsigned long long>(samples), static_cast<unsigned long long>(failed));
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -320,7 +390,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     threadStart(&game);
+    g_prof_target = game.handle;
+    const bool profiling =
+        R_SUCCEEDED(threadCreate(&g_prof, profiler, nullptr, nullptr, 0x10000, 0x2B, 2));
+    if (profiling) {
+        threadStart(&g_prof);
+        std::printf("[profile] sampling the game thread, written to sonicadv_profile.txt\n");
+    }
     threadWaitForExit(&game);
+    if (profiling) {
+        g_prof_stop = true;
+        threadWaitForExit(&g_prof);
+        threadClose(&g_prof);
+    }
     threadClose(&game);
 
     std::printf("[switch] the launcher returned %d\n", g_rc);
