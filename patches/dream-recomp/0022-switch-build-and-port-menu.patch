@@ -337,10 +337,10 @@ index 8dfec0a..de9b125 100644
  # a triangle. Not a test (it needs a display); run it by hand.
 diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
 new file mode 100644
-index 0000000..33bfd57
+index 0000000..ced156a
 --- /dev/null
 +++ b/render/include/dream/render/port_menu.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,90 @@
 +// The port menu (SA-nx): the launcher's own settings, over a paused game. Device-independent like
 +// the binding screen (input_menu.h): it draws into the RGBA frame on its way to the GPU and is
 +// driven by four calls, so the same menu works from a keyboard on the PC and from the buttons on
@@ -364,18 +364,26 @@ index 0000000..33bfd57
 +    // CPU clock in MHz the platform should ask for, 0 for the system's own. Only offered where
 +    // the platform can set it (the Switch); elsewhere the row is hidden and the value kept.
 +    int cpu_mhz = 0;
++    // GPU clock in MHz, 0 for the system's own; offered alongside the CPU row.
++    int gpu_mhz = 0;
++    // 0: translucent surfaces sorted per pixel, as the hardware does (accurate). 1: sorted per
++    // strip, which is cheaper for the GPU but can draw overlapping translucency in the wrong order
++    // (Sonic's eyes, before the per-pixel sort).
++    int translucency = 0;
 +
 +    std::string to_text() const;
 +    static PortOptions from_text(std::string_view text);
 +    bool operator==(const PortOptions& o) const noexcept {
 +        return show_fps == o.show_fps && screen == o.screen && volume == o.volume &&
-+               cpu_mhz == o.cpu_mhz;
++               cpu_mhz == o.cpu_mhz && gpu_mhz == o.gpu_mhz && translucency == o.translucency;
 +    }
 +};
 +
 +// The clock steps offered, in MHz. 0 is the system's own; the rest are the Switch's own CPU
 +// rates (1785 is the overclock profile the other ports default to).
 +constexpr int kCpuSteps[] = {0, 1224, 1581, 1785};
++// GPU steps, from the Switch's own table: 460 is the top handheld rate, 768 the docked one.
++constexpr int kGpuSteps[] = {0, 460, 614, 768};
 +
 +class PortMenu {
 +public:
@@ -401,8 +409,19 @@ index 0000000..33bfd57
 +    std::string help = "ARROWS MOVE AND CHANGE, RETURN CHOOSES, ESCAPE RESUMES";
 +
 +private:
-+    enum Row : int { kResume = 0, kControls, kFps, kScreen, kVolume, kCpu, kQuit, kRowCount };
-+    bool visible(int row) const { return row != kCpu || clock_; }
++    enum Row : int {
++        kResume = 0,
++        kControls,
++        kFps,
++        kScreen,
++        kVolume,
++        kTranslucency,
++        kCpu,
++        kGpu,
++        kQuit,
++        kRowCount
++    };
++    bool visible(int row) const { return (row != kCpu && row != kGpu) || clock_; }
 +
 +    PortOptions options_{};
 +    bool open_ = false;
@@ -413,7 +432,7 @@ index 0000000..33bfd57
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..c36bc46 100644
+index 65db176..65036b5 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
 @@ -10,8 +10,10 @@
@@ -452,16 +471,19 @@ index 65db176..c36bc46 100644
      // SA-nx: whether translucent surfaces are sorted per pixel, as the hardware does (needs
      // fragmentStoresAndAtomics; DREAM_NO_OIT=1 turns it off to compare against the per-strip
      // sort). False until the first render() has set it up.
-@@ -58,6 +66,8 @@ public:
+@@ -58,6 +66,11 @@ public:
  
      const std::string& error() const noexcept { return error_; }
      std::uint64_t frames = 0;
 +    // SA-nx: nanoseconds spent waiting for the GPU to finish renders, for the launcher's timing log.
 +    std::uint64_t wait_ns = 0;
++    // SA-nx: the port menu's translucency setting. False draws translucent surfaces with the
++    // per-strip sort even where the per-pixel one is available; it can change between frames.
++    bool allow_oit = true;
  
  private:
      Context* ctx_ = nullptr;
-@@ -70,6 +80,8 @@ private:
+@@ -70,6 +83,8 @@ private:
      VkFence fence_ = VK_NULL_HANDLE;
      HostBuffer readback_;
      bool have_pixels_ = false;
@@ -579,10 +601,10 @@ index a9f0841..41b3a97 100644
  void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
 diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
 new file mode 100644
-index 0000000..55b747b
+index 0000000..58031fd
 --- /dev/null
 +++ b/render/src/port_menu.cpp
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,222 @@
 +// See port_menu.h.
 +#include "dream/render/port_menu.h"
 +
@@ -625,9 +647,10 @@ index 0000000..55b747b
 +    return true;
 +}
 +
-+int step_index(int mhz) {
-+    for (int i = 0; i < static_cast<int>(std::size(kCpuSteps)); ++i)
-+        if (kCpuSteps[i] == mhz)
++template <std::size_t N>
++int step_index(const int (&steps)[N], int mhz) {
++    for (int i = 0; i < static_cast<int>(N); ++i)
++        if (steps[i] == mhz)
 +            return i;
 +    return 0;
 +}
@@ -640,6 +663,8 @@ index 0000000..55b747b
 +    s += "SCREEN=" + std::string(screen == 1 ? "stretch" : "4:3") + "\n";
 +    s += "VOLUME=" + std::to_string(volume) + "\n";
 +    s += "CPU_MHZ=" + std::to_string(cpu_mhz) + "\n";
++    s += "GPU_MHZ=" + std::to_string(gpu_mhz) + "\n";
++    s += "TRANSLUCENCY=" + std::string(translucency == 1 ? "fast" : "accurate") + "\n";
 +    return s;
 +}
 +
@@ -663,7 +688,11 @@ index 0000000..55b747b
 +        else if (key == "VOLUME" && to_int(value, v))
 +            o.volume = std::clamp(v / 10 * 10, 0, 100);
 +        else if (key == "CPU_MHZ" && to_int(value, v))
-+            o.cpu_mhz = kCpuSteps[step_index(v)];  // anything not offered falls back to stock
++            o.cpu_mhz = kCpuSteps[step_index(kCpuSteps, v)];  // not offered: stock
++        else if (key == "GPU_MHZ" && to_int(value, v))
++            o.gpu_mhz = kGpuSteps[step_index(kGpuSteps, v)];
++        else if (key == "TRANSLUCENCY")
++            o.translucency = value == "fast" ? 1 : 0;
 +    }
 +    return o;
 +}
@@ -696,10 +725,19 @@ index 0000000..55b747b
 +        case kVolume:
 +            options_.volume = std::clamp(options_.volume + delta * 10, 0, 100);
 +            break;
++        case kTranslucency:
++            options_.translucency = options_.translucency == 1 ? 0 : 1;
++            break;
 +        case kCpu: {
 +            const int n = static_cast<int>(std::size(kCpuSteps));
-+            const int i = std::clamp(step_index(options_.cpu_mhz) + delta, 0, n - 1);
++            const int i = std::clamp(step_index(kCpuSteps, options_.cpu_mhz) + delta, 0, n - 1);
 +            options_.cpu_mhz = kCpuSteps[i];
++            break;
++        }
++        case kGpu: {
++            const int n = static_cast<int>(std::size(kGpuSteps));
++            const int i = std::clamp(step_index(kGpuSteps, options_.gpu_mhz) + delta, 0, n - 1);
++            options_.gpu_mhz = kGpuSteps[i];
 +            break;
 +        }
 +        default:
@@ -776,8 +814,11 @@ index 0000000..55b747b
 +    row(kFps, "SHOW FPS", options_.show_fps ? "< ON >" : "< OFF >");
 +    row(kScreen, "SCREEN", options_.screen == 1 ? "< STRETCH >" : "< 4:3 >");
 +    row(kVolume, "VOLUME", "< " + std::to_string(options_.volume) + "% >");
++    row(kTranslucency, "TRANSLUCENCY", options_.translucency == 1 ? "< FAST >" : "< ACCURATE >");
 +    row(kCpu, "CPU CLOCK",
 +        options_.cpu_mhz == 0 ? "< STOCK >" : "< " + std::to_string(options_.cpu_mhz) + " MHZ >");
++    row(kGpu, "GPU CLOCK",
++        options_.gpu_mhz == 0 ? "< STOCK >" : "< " + std::to_string(options_.gpu_mhz) + " MHZ >");
 +    y += static_cast<int>(s) * 2;
 +    row(kQuit, "QUIT GAME", "");
 +
@@ -787,7 +828,7 @@ index 0000000..55b747b
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..fdb0461 100644
+index 9c24009..b19c3b8 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,6 +1,7 @@
@@ -846,6 +887,15 @@ index 9c24009..fdb0461 100644
      vkResetCommandBuffer(cmd_, 0);
      VkCommandBufferBeginInfo bi{};
      bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+@@ -358,7 +383,7 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+     }
+ 
+     renderer.prepare(cmd_, frame);  // texture uploads happen outside the render pass
+-    const bool oit = oit_available_ && bind_oit(renderer);
++    const bool oit = allow_oit && oit_available_ && bind_oit(renderer);
+     if (oit) {
+         // Empty lists: no fragments, every head at the end marker.
+         vkCmdFillBuffer(cmd_, oit_counter_.handle(), 0, VK_WHOLE_SIZE, 0);
 @@ -470,20 +495,15 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          error_ = "vkQueueSubmit failed";
          return false;
@@ -1453,10 +1503,10 @@ index 0000000..4371e9b
 +}  // namespace dream::render::vk
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
-index 0000000..cae3ece
+index 0000000..3c03633
 --- /dev/null
 +++ b/render/tests/test_port_menu.cpp
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,78 @@
 +// The port menu (SA-nx): options round-trip through their file, a damaged file falls back to
 +// defaults, and the menu moves, changes and closes as the footer says.
 +#include <cstdint>
@@ -1474,17 +1524,22 @@ index 0000000..cae3ece
 +    o.screen = 1;
 +    o.volume = 70;
 +    o.cpu_mhz = 1785;
++    o.gpu_mhz = 768;
++    o.translucency = 1;
 +    const PortOptions back = PortOptions::from_text(o.to_text());
 +    CHECK(back == o);
 +}
 +
 +TEST_CASE("port menu: a damaged options file keeps the defaults for what it cannot read") {
 +    const PortOptions o =
-+        PortOptions::from_text("# comment\nVOLUME=lots\nSCREEN=stretch\r\nCPU_MHZ=9999\ngarbage\n");
++        PortOptions::from_text("# comment\nVOLUME=lots\nSCREEN=stretch\r\nCPU_MHZ=9999\ngarbage\n"
++                               "GPU_MHZ=1\n");
 +    CHECK(o.volume == 100);   // unreadable: default
 +    CHECK(o.screen == 1);     // read, and the Windows line ending did not matter
 +    CHECK(o.cpu_mhz == 0);    // not an offered rate: stock
 +    CHECK_FALSE(o.show_fps);  // absent: default
++    CHECK(o.gpu_mhz == 0);    // not an offered rate: stock
++    CHECK(o.translucency == 0);
 +}
 +
 +TEST_CASE("port menu: moving, changing and closing") {
@@ -1492,7 +1547,7 @@ index 0000000..cae3ece
 +    PortOptions o;
 +    m.open(o, /*can_set_clock=*/false);
 +    CHECK(m.is_open());
-+    // Resume, Controls, FPS, Screen, Volume, (CPU hidden), Quit.
++    // Resume, Controls, FPS, Screen, Volume, Translucency, (CPU and GPU hidden), Quit.
 +    m.move(1);
 +    m.move(1);  // SHOW FPS
 +    CHECK(m.activate() == PortMenu::Action::None);
@@ -1502,13 +1557,19 @@ index 0000000..cae3ece
 +    m.move(1);  // VOLUME
 +    m.adjust(-1);
 +    CHECK(m.options().volume == 90);
-+    m.move(1);  // the CPU row is hidden, so this is QUIT
++    m.move(1);  // TRANSLUCENCY
++    CHECK(m.activate() == PortMenu::Action::None);
++    CHECK(m.options().translucency == 1);
++    m.move(1);  // the clock rows are hidden, so this is QUIT
 +    CHECK(m.activate() == PortMenu::Action::Quit);
 +    CHECK_FALSE(m.is_open());
 +
 +    m.open(o, /*can_set_clock=*/true);
 +    m.move(-1);  // wraps to QUIT
-+    m.move(-1);  // CPU CLOCK, offered this time
++    m.move(-1);  // GPU CLOCK, offered this time
++    m.adjust(1);
++    CHECK(m.options().gpu_mhz == kGpuSteps[1]);
++    m.move(-1);  // CPU CLOCK
 +    m.adjust(1);
 +    CHECK(m.options().cpu_mhz == kCpuSteps[1]);
 +    CHECK(m.back() == PortMenu::Action::Close);
@@ -1525,19 +1586,24 @@ index 0000000..cae3ece
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..8fbce68 100644
+index 824d0b4..262e333 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -24,6 +24,18 @@
+@@ -24,6 +24,23 @@
  
  #include "profiler.h"  // SA-nx: --profile
  
 +// SA-nx: the port menu's CPU clock setting, for a platform that can set one (the Switch layer
 +// assigns it before the launcher starts). Null everywhere else, and then the row is not shown.
 +void (*dream_port_set_cpu_mhz)(int mhz) = nullptr;
++// The GPU clock likewise (SA-nx); the port menu shows both rows when the CPU one is set.
++void (*dream_port_set_gpu_mhz)(int mhz) = nullptr;
 +// SA-nx: what the launcher is doing, for a profiler outside it (switch_main.cpp's): 0 playing,
 +// 1 a menu is open and the game is stopped, 2 the run has ended (report, teardown).
 +volatile int dream_port_phase = 0;
++// SA-nx: called first thing on each helper thread the launcher starts ("aica"), so a platform can
++// place it (the Switch pins it to a core). Null everywhere else.
++void (*dream_port_on_thread)(const char* name) = nullptr;
 +#ifdef __SWITCH__
 +// The Switch's own main() (switch/src/switch_main.cpp) sets up Horizon and calls this on a
 +// thread with a stack big enough for the translated code.
@@ -1547,7 +1613,7 @@ index 824d0b4..8fbce68 100644
  #include "dream/runtime/aica/aica.h"
  #include "dream/runtime/aica/rtc.h"
  #include "dream/runtime/gdrom/disc.h"
-@@ -52,6 +64,7 @@
+@@ -52,6 +69,7 @@
  #include "dream/render/display_list.h"
  #include "dream/render/framebuffer.h"
  #include "dream/render/input_menu.h"
@@ -1555,7 +1621,7 @@ index 824d0b4..8fbce68 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -159,6 +172,15 @@ struct Live {
+@@ -159,6 +177,15 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -1571,7 +1637,7 @@ index 824d0b4..8fbce68 100644
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -243,9 +265,73 @@ struct Live {
+@@ -243,9 +270,88 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -1602,19 +1668,33 @@ index 824d0b4..8fbce68 100644
 +        const double paused_ms = static_cast<double>(perf_paused_ns) / 1e6;
 +        const double audio_ms =
 +            perf_audio_ns ? static_cast<double>(*perf_audio_ns - perf_audio_at) / 1e6 : 0.0;
-+        // Sound runs inside the game's time (the AICA ticks between guest instructions), so it is
-+        // taken out of that bucket rather than added beside it.
-+        const double game_ms = ms - render_ms - present_ms - sleep_ms - paused_ms - audio_ms;
++        // On the game thread, sound runs inside the game's time (the AICA ticks between guest
++        // instructions), so it is taken out of that bucket. On its own thread it is that thread's
++        // busy time, and what the game thread loses to it is the wait when it ran too far ahead.
++        const double sound_wait_ms =
++            perf_sound_wait_ns ? static_cast<double>(*perf_sound_wait_ns - perf_sound_wait_at) / 1e6
++                               : 0.0;
++        const double game_ms = ms - render_ms - present_ms - sleep_ms - paused_ms -
++                               (perf_sound_threaded ? sound_wait_ms : audio_ms);
 +        const double speed = static_cast<double>(guest_cycles - perf_cycles_at) / 200e6 / (wall - paused_ms / 1000.0);
 +        const auto pct = [ms](double v) { return 100.0 * v / ms; };
 +        // The GPU wait now falls inside render or present, wherever the pixels were first needed.
-+        std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, sound %.0f%%, "
-+                    "render %.0f%%, present %.0f%% (gpu wait inside those %.0f%%), sleep %.0f%%, "
-+                    "menu %.0f%%\n",
-+                    static_cast<double>(presented - perf_presented_at) / wall,
-+                    static_cast<double>(rendered - perf_rendered_at) / wall, speed, pct(game_ms),
-+                    pct(audio_ms), pct(render_ms), pct(present_ms), pct(gpu_ms), pct(sleep_ms),
-+                    pct(paused_ms));
++        if (perf_sound_threaded)
++            std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, render "
++                        "%.0f%%, present %.0f%% (gpu wait inside those %.0f%%), waiting for sound "
++                        "%.0f%%, sleep %.0f%%, menu %.0f%% | sound thread busy %.0f%%\n",
++                        static_cast<double>(presented - perf_presented_at) / wall,
++                        static_cast<double>(rendered - perf_rendered_at) / wall, speed,
++                        pct(game_ms), pct(render_ms), pct(present_ms), pct(gpu_ms),
++                        pct(sound_wait_ms), pct(sleep_ms), pct(paused_ms), pct(audio_ms));
++        else
++            std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, sound "
++                        "%.0f%%, render %.0f%%, present %.0f%% (gpu wait inside those %.0f%%), "
++                        "sleep %.0f%%, menu %.0f%%\n",
++                        static_cast<double>(presented - perf_presented_at) / wall,
++                        static_cast<double>(rendered - perf_rendered_at) / wall, speed,
++                        pct(game_ms), pct(audio_ms), pct(render_ms), pct(present_ms), pct(gpu_ms),
++                        pct(sleep_ms), pct(paused_ms));
 +        std::fflush(stdout);
 +        perf_mark = now;
 +        perf_reset(guest_cycles);
@@ -1624,6 +1704,7 @@ index 824d0b4..8fbce68 100644
 +        perf_render_ns = perf_present_ns = perf_sleep_ns = perf_paused_ns = 0;
 +        perf_gpu_at = offscreen.wait_ns;
 +        perf_audio_at = perf_audio_ns ? *perf_audio_ns : 0;
++        perf_sound_wait_at = perf_sound_wait_ns ? *perf_sound_wait_ns : 0;
 +        perf_presented_at = presented;
 +        perf_rendered_at = rendered;
 +        perf_cycles_at = guest_cycles;
@@ -1646,7 +1727,7 @@ index 824d0b4..8fbce68 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -282,7 +368,8 @@ struct Live {
+@@ -282,7 +388,8 @@ struct Live {
          // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
          // are meant to produce the game's own pixels, which is what makes one comparable with
          // another and usable as a reference image.
@@ -1656,7 +1737,7 @@ index 824d0b4..8fbce68 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,6 +377,8 @@ struct Live {
+@@ -290,6 +397,8 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -1665,7 +1746,7 @@ index 824d0b4..8fbce68 100644
                               });
          else
              presenter.upload(cmd, source, shown.width, shown.height);
-@@ -320,6 +409,7 @@ struct Live {
+@@ -320,6 +429,7 @@ struct Live {
          ++presented;
          if (window.pressed(dream::render::vk::Control::ToggleFps)) {
              show_fps = !show_fps;
@@ -1673,7 +1754,7 @@ index 824d0b4..8fbce68 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -373,8 +463,110 @@ struct Live {
+@@ -373,8 +483,119 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -1689,6 +1770,15 @@ index 824d0b4..8fbce68 100644
 +        if (options.cpu_mhz != applied_cpu_mhz && dream_port_set_cpu_mhz) {
 +            applied_cpu_mhz = options.cpu_mhz;
 +            dream_port_set_cpu_mhz(options.cpu_mhz);
++        }
++        if (options.gpu_mhz != applied_gpu_mhz && dream_port_set_gpu_mhz) {
++            applied_gpu_mhz = options.gpu_mhz;
++            dream_port_set_gpu_mhz(options.gpu_mhz);
++        }
++        if (offscreen.allow_oit != (options.translucency == 0)) {
++            offscreen.allow_oit = options.translucency == 0;
++            std::printf("translucency: %s\n", offscreen.allow_oit ? "accurate (per pixel)"
++                                                                   : "fast (per strip)");
 +        }
 +    }
 +
@@ -1784,7 +1874,7 @@ index 824d0b4..8fbce68 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +576,9 @@ struct Live {
+@@ -384,10 +605,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -1798,7 +1888,7 @@ index 824d0b4..8fbce68 100644
              return;
          }
          if (!menu.is_open())
-@@ -660,9 +851,28 @@ struct Live {
+@@ -660,9 +880,32 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -1813,6 +1903,9 @@ index 824d0b4..8fbce68 100644
 +    std::uint64_t perf_gpu_at = 0, perf_presented_at = 0, perf_rendered_at = 0, perf_cycles_at = 0;
 +    std::uint64_t perf_scratch_ns = 0;
 +    const std::uint64_t* perf_audio_ns = nullptr;  // the AICA's sample_tick time, when measured
++    bool perf_sound_threaded = false;              // the AICA runs on its own thread
++    const std::uint64_t* perf_sound_wait_ns = nullptr;
++    std::uint64_t perf_sound_wait_at = 0;
 +    std::uint64_t perf_audio_at = 0;
      // The binding screen (F1, or a pad's select button). The guest is stopped while it is up, so
      // nobody rebinds a control mid-corner.
@@ -1823,19 +1916,22 @@ index 824d0b4..8fbce68 100644
 +    std::string options_path;
 +    float* volume_out = nullptr;  // the sink's volume, once there is a sink
 +    int applied_cpu_mhz = 0;
++    int applied_gpu_mhz = 0;
 +    bool quit_requested = false;
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1288,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1321,9 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
 +        "  --perf-log             every five seconds, log where the game thread's time went\n"
++        "  --aica-thread          run the sound processor on its own thread (default on the Switch;\n"
++        "                         --no-aica-thread keeps it on the game thread)\n"
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1319,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1354,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -1843,7 +1939,7 @@ index 824d0b4..8fbce68 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1445,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1480,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -1851,15 +1947,20 @@ index 824d0b4..8fbce68 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1455,7 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1490,12 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
 +    bool perf_log_flag = false;  // SA-nx: --perf-log, the five-second timing line
++#ifdef __SWITCH__
++    bool aica_thread = true;  // SA-nx: --aica-thread / --no-aica-thread
++#else
++    bool aica_thread = false;
++#endif
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1548,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1588,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -1868,16 +1969,20 @@ index 824d0b4..8fbce68 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1574,8 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1614,12 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
 +        else if (!std::strcmp(argv[i], "--perf-log"))
 +            perf_log_flag = true;
++        else if (!std::strcmp(argv[i], "--aica-thread"))
++            aica_thread = true;
++        else if (!std::strcmp(argv[i], "--no-aica-thread"))
++            aica_thread = false;
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1682,6 +1900,8 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1944,8 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -1886,7 +1991,7 @@ index 824d0b4..8fbce68 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +1918,15 @@ int main(int argc, char** argv) {
+@@ -1698,7 +1962,15 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -1903,7 +2008,7 @@ index 824d0b4..8fbce68 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +1949,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +1993,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -1915,7 +2020,7 @@ index 824d0b4..8fbce68 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +1960,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2004,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -1923,7 +2028,7 @@ index 824d0b4..8fbce68 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +1973,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2017,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -1935,7 +2040,7 @@ index 824d0b4..8fbce68 100644
          };
      }
  #endif
-@@ -1770,6 +2001,15 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2045,15 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -1951,7 +2056,7 @@ index 824d0b4..8fbce68 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2021,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2065,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -1963,15 +2068,40 @@ index 824d0b4..8fbce68 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -2046,6 +2289,7 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2077,23 @@ int main(int argc, char** argv) {
+             pcm.push_back(r);
+         }
+     };
++    // SA-nx: the sound processor on its own thread (Aica::start_thread). On by default on the
++    // Switch, where it was a fifth of the game thread; --aica-thread elsewhere, --no-aica-thread
++    // to keep it on the game thread.
++    if (aica_thread) {
++        aica.on_thread_start = [] {
++            if (dream_port_on_thread)
++                dream_port_on_thread("aica");
++        };
++        aica.start_thread();
++        std::printf("sound processor: on its own thread\n");
++#ifdef DREAM_WITH_RENDERER
++        if (live) {
++            live->perf_sound_threaded = true;
++            live->perf_sound_wait_ns = &aica.sh4_wait_ns;
++        }
++#endif
++    }
+     // The console's clock. Seeded from the host clock so a title shows the right date, but that
+     // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
+     // compared against another. --rtc-seed fixes it.
+@@ -2046,6 +2350,8 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
 +    dream_port_phase = 2;
++    aica.stop_thread();  // before anything below reads the sound processor's counters
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2145,7 +2389,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +2451,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -1981,10 +2111,48 @@ index 824d0b4..8fbce68 100644
              std::printf(" %08x:%llu", top[i].second, static_cast<unsigned long long>(top[i].first));
          std::printf("\n");
 diff --git a/runtime/include/dream/runtime/aica/aica.h b/runtime/include/dream/runtime/aica/aica.h
-index 1ac2d5e..2940b57 100644
+index 1ac2d5e..0859d62 100644
 --- a/runtime/include/dream/runtime/aica/aica.h
 +++ b/runtime/include/dream/runtime/aica/aica.h
-@@ -64,11 +64,17 @@ private:
+@@ -8,8 +8,12 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
++#include <condition_variable>
+ #include <cstdint>
+ #include <functional>
++#include <mutex>
++#include <thread>
+ 
+ #include "dream/runtime/aica/arm7.h"
+ #include "dream/runtime/aica/mixer.h"
+@@ -36,8 +40,24 @@ public:
+                                    kIntMask = 0x7FFu;
+ 
+     Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory);
++    ~Aica() override;
+     void reset();
+ 
++    // SA-nx: run the ARM7, timers and mixer on a thread of their own. The SH-4's virtual clock
++    // still decides how many samples are owed: every kThreadBatch samples of guest time the
++    // scheduler raises the target, and the thread works towards it. The two sides meet only where
++    // the hardware lets them: the SH-4's register accesses take the same lock the thread holds
++    // while it runs a few samples, and sound RAM is shared memory on both sides, as it is on the
++    // console. Interrupts towards the SH-4 are re-evaluated on the SH-4's side at each batch.
++    // The thread may trail the SH-4 by up to kMaxLag samples; past that the SH-4 waits.
++    // Not deterministic, so off unless asked for (the Switch launcher asks).
++    static constexpr std::uint64_t kThreadBatch = 32, kMaxLag = 2048;
++    void start_thread();
++    void stop_thread();
++    bool threaded() const noexcept { return thread_.joinable(); }
++    std::function<void()> on_thread_start;  // e.g. to pin the thread to a core
++    std::uint64_t sh4_wait_ns = 0;          // SH-4 time spent waiting for the thread to catch up
++
+     // SH-4 side (mem::MmioHandler)
+     std::uint32_t read(std::uint32_t addr, unsigned size) override;
+     void write(std::uint32_t addr, std::uint32_t value, unsigned size) override;
+@@ -64,11 +84,25 @@ private:
  public:
      Arm7 arm;
      Mixer mixer;
@@ -1999,11 +2167,19 @@ index 1ac2d5e..2940b57 100644
  
  private:
 +    void sample_tick_body();
++    void thread_main();
++    std::thread thread_;
++    std::mutex lock_;                   // held by the thread while it runs, and by SH-4 accesses
++    std::mutex wake_lock_;
++    std::condition_variable wake_;      // the target moved, or the thread should stop
++    std::condition_variable caught_up_; // the thread finished some samples
++    std::atomic<std::uint64_t> target_{0}, done_{0};
++    std::atomic<bool> stop_{false};
      std::uint32_t reg_read(std::uint32_t offset, unsigned size);
      void reg_write(std::uint32_t offset, std::uint32_t value, unsigned size);
      void store(std::uint32_t offset, std::uint32_t value, unsigned size);
 diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
-index c8d4401..a9aeb09 100644
+index c8d4401..e96da65 100644
 --- a/runtime/src/aica/aica.cpp
 +++ b/runtime/src/aica/aica.cpp
 @@ -2,6 +2,8 @@
@@ -2015,7 +2191,130 @@ index c8d4401..a9aeb09 100644
  namespace dream::aica {
  
  Aica::Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory)
-@@ -236,6 +238,19 @@ void Aica::update_sh4_interrupts() {
+@@ -12,12 +14,90 @@ Aica::Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory)
+       memory_(memory) {
+     reset();
+     event_ = sched_.add("aica.sample", [this](std::uint64_t, std::uint64_t) {
+-        sample_tick();
+-        sched_.request(event_, kSh4CyclesPerSample);
++        if (!threaded()) {
++            sample_tick();
++            sched_.request(event_, kSh4CyclesPerSample);
++            return;
++        }
++        // SA-nx: owe the thread another batch, re-evaluate the SH-4's interrupt line on this side,
++        // and wait if the thread has fallen too far behind.
++        const std::uint64_t target = target_.fetch_add(kThreadBatch) + kThreadBatch;
++        {
++            std::lock_guard<std::mutex> g(wake_lock_);
++        }
++        wake_.notify_one();
++        if (target - done_.load() > kMaxLag) {
++            const auto from = std::chrono::steady_clock::now();
++            std::unique_lock<std::mutex> w(wake_lock_);
++            caught_up_.wait(w, [&] { return stop_.load() || target - done_.load() <= kMaxLag / 2; });
++            sh4_wait_ns += static_cast<std::uint64_t>(
++                std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    std::chrono::steady_clock::now() - from)
++                    .count());
++        }
++        {
++            std::lock_guard<std::mutex> g(lock_);
++            update_sh4_interrupts();
++        }
++        sched_.request(event_, kSh4CyclesPerSample * kThreadBatch);
+     });
+     sched_.request(event_, kSh4CyclesPerSample);
+ }
+ 
++Aica::~Aica() {
++    stop_thread();
++}
++
++void Aica::start_thread() {
++    if (threaded())
++        return;
++    stop_ = false;
++    target_ = done_ = 0;
++    thread_ = std::thread([this] { thread_main(); });
++}
++
++void Aica::stop_thread() {
++    if (!threaded())
++        return;
++    {
++        std::lock_guard<std::mutex> g(wake_lock_);
++        stop_ = true;
++    }
++    wake_.notify_all();
++    caught_up_.notify_all();
++    thread_.join();
++}
++
++void Aica::thread_main() {
++    if (on_thread_start)
++        on_thread_start();
++    constexpr std::uint64_t kChunk = 8;  // samples per hold of the lock
++    for (;;) {
++        {
++            std::unique_lock<std::mutex> w(wake_lock_);
++            wake_.wait(w, [&] { return stop_.load() || done_.load() < target_.load(); });
++            if (stop_.load())
++                return;
++        }
++        while (!stop_.load()) {
++            const std::uint64_t owed = target_.load() - done_.load();
++            if (owed == 0)
++                break;
++            const std::uint64_t n = owed < kChunk ? owed : kChunk;
++            {
++                std::lock_guard<std::mutex> g(lock_);
++                for (std::uint64_t i = 0; i < n; ++i)
++                    sample_tick();
++            }
++            done_.fetch_add(n);
++            {
++                std::lock_guard<std::mutex> g(wake_lock_);
++            }
++            caught_up_.notify_one();
++        }
++    }
++}
++
+ void Aica::reset() {
+     regs_.fill(0);
+     regs_[kArmRst] = 1;  // the ARM starts held in reset; the BIOS or the title releases it
+@@ -139,10 +219,17 @@ void Aica::reg_write(std::uint32_t offset, std::uint32_t value, unsigned size) {
+ }
+ 
+ std::uint32_t Aica::read(std::uint32_t addr, unsigned size) {
++    if (threaded()) {
++        std::lock_guard<std::mutex> g(lock_);
++        return reg_read(addr - kRegBase, size);
++    }
+     return reg_read(addr - kRegBase, size);
+ }
+ 
+ void Aica::write(std::uint32_t addr, std::uint32_t value, unsigned size) {
++    std::unique_lock<std::mutex> g(lock_, std::defer_lock);
++    if (threaded())
++        g.lock();
+     ++sh4_side_reg_writes;
+     reg_write(addr - kRegBase, value, size);
+ }
+@@ -224,6 +311,11 @@ void Aica::update_arm_interrupts() {
+ }
+ 
+ void Aica::update_sh4_interrupts() {
++    // SA-nx: Holly belongs to the SH-4's thread. On the sound thread this is left to the next
++    // batch event, which re-evaluates the line on the SH-4's side (at most kThreadBatch samples,
++    // about 0.7 ms of guest time, later).
++    if (threaded() && std::this_thread::get_id() == thread_.get_id())
++        return;
+     const bool pending = (reg16(kMcieb) & reg16(kMcipd)) != 0;
+     if (pending) {
+         if (!holly_.raised(holly::Irq::AicaIrq)) {
+@@ -236,6 +328,19 @@ void Aica::update_sh4_interrupts() {
  }
  
  void Aica::sample_tick() {
@@ -2035,3 +2334,316 @@ index c8d4401..a9aeb09 100644
      ++samples;
      arm.run(Arm7::kCyclesPerSample);
      step_timers();
+diff --git a/runtime/src/gdrom/disc.cpp b/runtime/src/gdrom/disc.cpp
+index e6b08a9..dc83422 100644
+--- a/runtime/src/gdrom/disc.cpp
++++ b/runtime/src/gdrom/disc.cpp
+@@ -5,6 +5,8 @@
+ #include <cstring>
+ #include <fstream>
+ #include <map>
++#include <utility>
++#include <vector>
+ #include <sstream>
+ 
+ #include <libchdr/chd.h>
+@@ -142,7 +144,10 @@ public:
+             t.sectors = static_cast<std::uint32_t>((fsize - offset) / ssize);
+             t.data = type == 4;
+             tracks_.push_back(t);
+-            files_[number] = {fpath.string(), offset};
++            File entry;
++            entry.path = fpath.string();
++            entry.offset = offset;
++            files_[number] = std::move(entry);
+         }
+         if (tracks_.empty()) {
+             error = "GDI lists no tracks";
+@@ -164,9 +169,22 @@ public:
+         }
+         const std::uint64_t pos =
+             f.offset + static_cast<std::uint64_t>(lba - t->lba) * t->sector_size;
+-        if (std::fseek(f.handle, static_cast<long>(pos), SEEK_SET) != 0)
+-            return false;
+-        return std::fread(out, 1, t->sector_size, f.handle) == t->sector_size;
++        // SA-nx: sectors come out of a 64-sector window read in one go. One fseek and fread per
++        // sector was one file-system request each on the Switch (2.6% of the game thread in
++        // test5's profile, all on the game thread); the disc is read-only, so the window never
++        // goes stale.
++        if (pos < f.window_pos || pos + t->sector_size > f.window_pos + f.window_len) {
++            constexpr std::size_t kWindowSectors = 64;
++            f.window.resize(kWindowSectors * t->sector_size);
++            if (std::fseek(f.handle, static_cast<long>(pos), SEEK_SET) != 0)
++                return false;
++            f.window_pos = pos;
++            f.window_len = std::fread(f.window.data(), 1, f.window.size(), f.handle);
++            if (f.window_len < t->sector_size)
++                return false;
++        }
++        std::memcpy(out, f.window.data() + (pos - f.window_pos), t->sector_size);
++        return true;
+     }
+ 
+     ~GdiDisc() override {
+@@ -180,6 +198,9 @@ private:
+         std::string path;
+         std::uint64_t offset = 0;
+         FILE* handle = nullptr;
++        std::vector<std::uint8_t> window;  // read-ahead (SA-nx)
++        std::uint64_t window_pos = 0;
++        std::size_t window_len = 0;
+     };
+     std::map<unsigned, File> files_;
+ };
+diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
+index b900b12..6031542 100644
+--- a/runtime/src/sh4/abi_bare.cpp
++++ b/runtime/src/sh4/abi_bare.cpp
+@@ -48,6 +48,13 @@ constexpr std::size_t kFnCacheSize = 1u << 12;
+ struct FnCacheEntry {
+     std::uint32_t phys;
+     GuestFn fn;  // null means the slot is empty; only hits are cached
++    // SA-nx: a signed (overlay) entry is cached too, with its signature, and is only used while
++    // guest memory still matches it: one compare of a few words instead of a binary search of the
++    // whole table and then the compare. A different overlay loaded at the address fails the check
++    // and takes the full search, which caches the new answer. Object callbacks in the stage
++    // modules are called this way; the lookup was 3.5% of the Switch's game thread (test6).
++    const std::uint16_t* signature;
++    std::uint32_t signature_words;
+ };
+ FnCacheEntry g_fn_cache[kFnCacheSize]{};
+ 
+@@ -61,6 +68,8 @@ void flush_fn_cache() noexcept {
+     for (auto& e : g_fn_cache) {
+         e.phys = 0;
+         e.fn = nullptr;
++        e.signature = nullptr;
++        e.signature_words = 0;
+     }
+ }
+ 
+@@ -147,8 +156,17 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+     const std::uint32_t phys = address & 0x1FFFFFFFu;
+     FnCacheEntry& slot = g_fn_cache[fn_cache_slot(phys)];
+-    if (slot.fn != nullptr && slot.phys == phys)
+-        return slot.fn;
++    if (slot.fn != nullptr && slot.phys == phys) {
++        if (!slot.signature)
++            return slot.fn;
++        if (m) {
++            bool same = true;
++            for (std::uint32_t i = 0; same && i < slot.signature_words; ++i)
++                same = m->read16(address + 2 * i) == slot.signature[i];
++            if (same)
++                return slot.fn;
++        }
++    }
+     const auto& t = table();
+     if (interpreted(phys))
+         return nullptr;
+@@ -161,6 +179,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+             // change while the table and the interpret set stand.
+             slot.phys = phys;
+             slot.fn = it->fn;
++            slot.signature = nullptr;
++            slot.signature_words = 0;
+             return it->fn;
+         }
+         if (!m)
+@@ -168,8 +188,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+         bool same = true;
+         for (std::uint32_t i = 0; same && i < it->signature_words; ++i)
+             same = m->read16(address + 2 * i) == it->signature[i];
+-        if (same)
++        if (same) {
++            slot.phys = phys;
++            slot.fn = it->fn;
++            slot.signature = it->signature;
++            slot.signature_words = it->signature_words;
+             return it->fn;
++        }
+     }
+     return nullptr;
+ }
+diff --git a/runtime/tests/test_gdrom.cpp b/runtime/tests/test_gdrom.cpp
+index 0ac9967..38239a5 100644
+--- a/runtime/tests/test_gdrom.cpp
++++ b/runtime/tests/test_gdrom.cpp
+@@ -1,3 +1,7 @@
++#include <cstdio>
++#include <filesystem>
++#include <utility>
++#include <vector>
+ #include <cstring>
+ #include <string>
+ 
+@@ -66,3 +70,54 @@ TEST_CASE("disc: unsupported and missing images report errors") {
+     CHECK(open_disc("/nonexistent/x.chd", err) == nullptr);
+     CHECK(!err.empty());
+ }
++
++TEST_CASE("gdi: sectors read in any order match the track files byte for byte") {
++    // SA-nx: GdiDisc reads 64-sector windows. Sectors asked for out of order, across window edges,
++    // backwards and across tracks must still be exactly the bytes in the files.
++    namespace fs = std::filesystem;
++    const fs::path dir = fs::temp_directory_path() / "dream_gdi_window_test";
++    fs::create_directories(dir);
++    const auto byte_at = [](unsigned track, std::uint64_t i) {
++        return static_cast<std::uint8_t>((i * 131u + track * 7u + (i >> 9)) & 0xFFu);
++    };
++    const unsigned sizes[3] = {2352, 2352, 2352};
++    const unsigned counts[3] = {150, 10, 200};  // track 3 spans several windows
++    const unsigned lbas[3] = {0, 11000, 45000};
++    for (unsigned t = 0; t < 3; ++t) {
++        std::FILE* f = std::fopen((dir / ("track0" + std::to_string(t + 1) + ".bin")).string().c_str(), "wb");
++        REQUIRE(f != nullptr);
++        for (std::uint64_t i = 0; i < std::uint64_t(sizes[t]) * counts[t]; ++i)
++            std::fputc(byte_at(t, i), f);
++        std::fclose(f);
++    }
++    {
++        std::FILE* g = std::fopen((dir / "disc.gdi").string().c_str(), "w");
++        REQUIRE(g != nullptr);
++        std::fprintf(g, "3\n1 0 4 2352 track01.bin 0\n2 11000 0 2352 track02.bin 0\n"
++                        "3 45000 4 2352 track03.bin 0\n");
++        std::fclose(g);
++    }
++    std::string err;
++    auto disc = open_disc((dir / "disc.gdi").string(), err);
++    REQUIRE_MESSAGE(disc != nullptr, err);
++    std::vector<std::pair<unsigned, unsigned>> order;  // (track, sector)
++    for (unsigned s = 0; s < counts[2]; s += 37) order.push_back({2, s});
++    for (unsigned s = counts[2]; s-- > 0;) order.push_back({2, s});  // backwards
++    order.push_back({0, 149});
++    order.push_back({1, 3});
++    order.push_back({2, 63});
++    order.push_back({2, 64});
++    order.push_back({0, 0});
++    order.push_back({2, 199});
++    std::vector<std::uint8_t> sector(2352);
++    for (const auto& [t, s] : order) {
++        REQUIRE(disc->read_raw(lbas[t] + s, sector.data()));
++        bool same = true;
++        for (unsigned i = 0; same && i < 2352; ++i)
++            same = sector[i] == byte_at(t, std::uint64_t(s) * 2352 + i);
++        CHECK_MESSAGE(same, "track " << t + 1 << " sector " << s);
++    }
++    CHECK_FALSE(disc->read_raw(45000 + 200, sector.data()));  // past the end of track 3
++    disc.reset();
++    fs::remove_all(dir);
++}
+diff --git a/runtime/tests/test_mixer.cpp b/runtime/tests/test_mixer.cpp
+index e0fa5d3..3f9e5dd 100644
+--- a/runtime/tests/test_mixer.cpp
++++ b/runtime/tests/test_mixer.cpp
+@@ -2,7 +2,11 @@
+ // registers produces output that follows the envelope, a noise channel produces output, the DSP
+ // idles on an empty programme, and the mix is deterministic.
+ #include <cstdint>
++#include <atomic>
++#include <chrono>
+ #include <cstdlib>
++#include <thread>
++#include <vector>
+ 
+ #include "dream/runtime/aica/aica.h"
+ #include "dream/runtime/system.h"
+@@ -143,3 +147,66 @@ TEST_CASE("mixer: a 32-bit register write keys a channel on, from either CPU") {
+         CHECK(r.aica.mixer.key_offs == 1);
+     }
+ }
++
++TEST_CASE("aica thread: the sound processor on its own thread produces the same samples") {
++    // SA-nx: Aica::start_thread. Driven by the same virtual clock, the thread owes and produces
++    // the same number of samples, and a channel keyed on through the SH-4's registers sounds the
++    // same as on the SH-4's thread (the mixer and the ARM are the same code; only the thread
++    // changes). The thread may trail by up to kMaxLag samples, so the comparison is made after
++    // stop_thread(), which waits for nothing but ends the run where it stands: the clock is
++    // advanced in steps and the thread is allowed to catch up before each check.
++    Rig a, b;
++    for (Rig* r : {&a, &b}) {
++        r->square_wave(0x1000, 64, 8000);
++        r->program_channel(0x1000, 64);
++        r->key_on();
++    }
++    std::vector<std::int16_t> out_a, out_b;
++    a.aica.on_sample = [&](std::int16_t l, std::int16_t) { out_a.push_back(l); };
++    std::atomic<std::size_t> made_b{0};  // read while the thread runs; out_b only after it stops
++    b.aica.on_sample = [&](std::int16_t l, std::int16_t) {
++        out_b.push_back(l);
++        made_b.fetch_add(1);
++    };
++    b.aica.start_thread();
++    REQUIRE(b.aica.threaded());
++    // 64 batches of 32 samples: 2048 samples of guest time.
++    const std::uint64_t cycles = A::kSh4CyclesPerSample * A::kThreadBatch * 64;
++    a.sys.sched.advance(cycles);
++    b.sys.sched.advance(cycles);
++    // Let the thread finish what it is owed.
++    for (int spins = 0; spins < 2000 && made_b.load() < out_a.size(); ++spins)
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    b.aica.stop_thread();
++    CHECK_FALSE(b.aica.threaded());
++    // The threaded side counts a batch per event, starting one sample in (the first event fires
++    // after one sample's worth of cycles), so it may owe up to one batch fewer.
++    CHECK(out_b.size() + A::kThreadBatch >= out_a.size());
++    REQUIRE(out_b.size() > 1000);
++    const std::size_t n = std::min(out_a.size(), out_b.size());
++    bool same = true;
++    for (std::size_t i = 0; same && i < n; ++i)
++        same = out_a[i] == out_b[i];
++    CHECK(same);
++}
++
++TEST_CASE("aica thread: the SH-4's register accesses while the thread runs are safe") {
++    // SA-nx: register reads and writes from the SH-4's side while the thread is mid-batch take the
++    // same lock (run under ThreadSanitizer to check). Keying a channel off and on again from the
++    // SH-4 side must still reach the mixer.
++    Rig r;
++    r.square_wave(0x1000, 64, 8000);
++    r.program_channel(0x1000, 64);
++    r.aica.start_thread();
++    std::uint32_t seen = 0;
++    for (int i = 0; i < 50; ++i) {
++        r.key_on();
++        r.sys.sched.advance(A::kSh4CyclesPerSample * A::kThreadBatch);
++        seen |= r.aica.read(A::kRegBase + 0x2810, 2);  // a monitor register the mixer updates
++        r.key_off();
++        r.sys.sched.advance(A::kSh4CyclesPerSample * A::kThreadBatch);
++    }
++    r.aica.stop_thread();
++    CHECK(r.aica.mixer.key_ons >= 50);
++    (void)seen;
++}
+diff --git a/runtime/tests/test_overlay.cpp b/runtime/tests/test_overlay.cpp
+index 471e93b..dcd53b1 100644
+--- a/runtime/tests/test_overlay.cpp
++++ b/runtime/tests/test_overlay.cpp
+@@ -48,3 +48,26 @@ TEST_CASE("overlay: one address dispatches to the translation whose code is in R
+     CHECK(hits_b == 1);
+     CHECK(sys.untranslated.total() == 1);
+ }
++
++TEST_CASE("overlay: the lookup cache follows overlays swapped back and forth") {
++    // SA-nx: signed entries are cached with their signature and checked against RAM on every
++    // hit. Repeated calls, and overlays swapped in and out, must always reach the translation
++    // whose code is in RAM now.
++    System sys;
++    sys.install();
++    sh4::register_functions(overlay_table, 2);
++    auto& m = sys.memory;
++    const int a0 = hits_a, b0 = hits_b;
++    for (int round = 0; round < 3; ++round) {
++        m.write16(0x8C0F0000u, 0x6206);
++        m.write16(0x8C0F0002u, 0xD002);
++        for (int i = 0; i < 4; ++i)
++            sh4::call_indirect(sys.ctx, m, 0x8C0F0000u);
++        m.write16(0x8C0F0000u, 0x64F6);
++        m.write16(0x8C0F0002u, 0x60F6);
++        for (int i = 0; i < 4; ++i)
++            sh4::call_indirect(sys.ctx, m, 0x0C0F0000u);
++    }
++    CHECK(hits_a - a0 == 12);
++    CHECK(hits_b - b0 == 12);
++}

@@ -2,6 +2,27 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test6 result; switch-test7 (sound thread, clocks, lookups, disc)
+
+- switch-test6 (1785 MHz): gameplay about 0.59x (test5 about 0.55x). GPU fence wait 17.8% of the
+  game thread (22.3%), FPS counter 1.3% (3.3%). The wait remains because the GPU is still busy
+  when the frame is needed: drawing itself is slow on the Switch. Suspect: the per-pixel
+  translucency (unverified). Mark: looks the same, nothing broke, marginal gain.
+- Goal set by Mark: full speed at 1785 MHz first, then a researched strategy for stock clocks.
+- switch-test7:
+  - Aica::start_thread (default on the Switch, --aica-thread / --no-aica-thread): ARM7, timers and
+    mixer on core 2; the SH-4's clock owes batches of 32 samples, the thread may trail by up to
+    2048 before the SH-4 waits; SH-4 register access takes the thread's lock; Holly's line is
+    re-evaluated on the SH-4 side each batch. Tests: same samples as on the game thread; SH-4
+    register access mid-run; clean under ThreadSanitizer; 40 repeated runs.
+  - Port menu: GPU clock (stock, 460, 614, 768) and translucency (accurate per pixel, or fast per
+    strip, switchable between frames). switch_main.cpp: one clock helper for CPU and GPU.
+  - find_function caches signed (overlay) entries with their signature, checked on each hit.
+    Test: overlays swapped back and forth.
+  - GdiDisc reads 64-sector windows. Test: a generated GDI read out of order across windows,
+    backwards and across tracks.
+  - Timing line: with the sound thread, its busy share and the game's waits for it.
+
 ## 2026-10-30: switch-test5 profile (play only); switch-test6: GPU overlap, cheap counter
 
 - switch-test5 profile: 126,585 playing samples (1785 MHz, FPS counter on), 1,408 in a menu,

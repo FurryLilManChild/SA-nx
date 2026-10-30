@@ -31,7 +31,9 @@
 
 int dream_boot_main(int argc, char** argv);
 extern void (*dream_port_set_cpu_mhz)(int mhz);
+extern void (*dream_port_set_gpu_mhz)(int mhz);
 extern volatile int dream_port_phase;  // the launcher: 0 playing, 1 menu, 2 ended
+extern void (*dream_port_on_thread)(const char* name);
 extern "C" char __start__;  // libnx's crt0: the start of this module, for crash offsets
 
 namespace {
@@ -113,11 +115,21 @@ std::uint64_t off(std::uint64_t a) {
 }
 
 // --- clocks ---------------------------------------------------------------------------------
-// The port menu's CPU setting. A rate is only ever raised, the old one goes back at exit, and
-// when Horizon OC is running its own profile wins (fighting it froze consoles in other ports).
-ClkrstSession g_cpu;
-bool g_clk_open = false;
-u32 g_cpu_old = 0, g_cpu_set = 0;
+// The port menu's CPU and GPU settings. A rate is only ever raised, the old one goes back at exit,
+// and when Horizon OC is running its own profile wins (fighting it froze consoles in other ports).
+// The system resets clocks when the console is docked or undocked, or the game regains focus, so
+// the chosen rates are put back on those events.
+struct Clock {
+    PcvModuleId module;
+    const char* name;
+    ClkrstSession session{};
+    bool open = false;
+    u32 old_hz = 0, set_hz = 0;
+};
+Clock g_cpu_clock{PcvModuleId_CpuBus, "CPU"};
+Clock g_gpu_clock{PcvModuleId_GPU, "GPU"};
+bool g_clkrst = false;
+bool g_hooked = false;
 AppletHookCookie g_clk_hook;
 
 bool service_running(const char* name) {
@@ -132,8 +144,11 @@ bool service_running(const char* name) {
 }
 
 void clk_reapply() {
-    if (g_clk_open && g_cpu_set && appletGetFocusState() == AppletFocusState_InFocus)
-        clkrstSetClockRate(&g_cpu, g_cpu_set);
+    if (appletGetFocusState() != AppletFocusState_InFocus)
+        return;
+    for (Clock* c : {&g_cpu_clock, &g_gpu_clock})
+        if (c->open && c->set_hz)
+            clkrstSetClockRate(&c->session, c->set_hz);
 }
 
 void clk_hook(AppletHookType hook, void*) {
@@ -142,51 +157,82 @@ void clk_hook(AppletHookType hook, void*) {
         clk_reapply();
 }
 
-void set_cpu_mhz(int mhz) {
-    if (!g_clk_open) {
+// The Switch's GPU table has 460.8 and 614.4 MHz; the menu shows them rounded.
+u32 to_hz(const Clock& c, int mhz) {
+    if (c.module == PcvModuleId_GPU && mhz == 460)
+        return 460800000u;
+    if (c.module == PcvModuleId_GPU && mhz == 614)
+        return 614400000u;
+    return static_cast<u32>(mhz) * 1000000u;
+}
+
+void set_clock(Clock& c, int mhz) {
+    if (!c.open) {
         if (mhz == 0)
             return;
         if (service_running("hoc:clk")) {
-            std::printf("[clock] Horizon OC is running: its profile sets the CPU clock\n");
+            std::printf("[clock] Horizon OC is running: its profile sets the %s clock\n", c.name);
             return;
         }
-        if (!hosversionAtLeast(8, 0, 0) || R_FAILED(clkrstInitialize()) ||
-            R_FAILED(clkrstOpenSession(&g_cpu, PcvModuleId_CpuBus, 3))) {
-            std::printf("[clock] clkrst unavailable: CPU clock unchanged\n");
+        if (!g_clkrst) {
+            if (!hosversionAtLeast(8, 0, 0) || R_FAILED(clkrstInitialize())) {
+                std::printf("[clock] clkrst unavailable: %s clock unchanged\n", c.name);
+                return;
+            }
+            g_clkrst = true;
+        }
+        if (R_FAILED(clkrstOpenSession(&c.session, c.module, 3))) {
+            std::printf("[clock] no clkrst session for the %s: unchanged\n", c.name);
             return;
         }
-        g_clk_open = true;
-        clkrstGetClockRate(&g_cpu, &g_cpu_old);
-        appletHook(&g_clk_hook, clk_hook, nullptr);
+        c.open = true;
+        clkrstGetClockRate(&c.session, &c.old_hz);
+        if (!g_hooked) {
+            appletHook(&g_clk_hook, clk_hook, nullptr);
+            g_hooked = true;
+        }
     }
     if (mhz == 0) {
-        if (g_cpu_set && g_cpu_old)
-            clkrstSetClockRate(&g_cpu, g_cpu_old);
-        g_cpu_set = 0;
-        std::printf("[clock] CPU back to %u MHz\n", g_cpu_old / 1000000u);
+        if (c.set_hz && c.old_hz)
+            clkrstSetClockRate(&c.session, c.old_hz);
+        c.set_hz = 0;
+        std::printf("[clock] %s back to %u MHz\n", c.name, c.old_hz / 1000000u);
         return;
     }
-    const u32 want = static_cast<u32>(mhz) * 1000000u;
-    if (g_cpu_old >= want && !g_cpu_set) {
-        std::printf("[clock] CPU already at %u MHz: left alone\n", g_cpu_old / 1000000u);
+    const u32 want = to_hz(c, mhz);
+    if (c.old_hz >= want && !c.set_hz) {
+        std::printf("[clock] %s already at %u MHz: left alone\n", c.name, c.old_hz / 1000000u);
         return;
     }
-    clkrstSetClockRate(&g_cpu, want);
+    clkrstSetClockRate(&c.session, want);
     u32 now = 0;
-    clkrstGetClockRate(&g_cpu, &now);
-    g_cpu_set = now ? now : want;
-    std::printf("[clock] CPU %u -> %u MHz\n", g_cpu_old / 1000000u, now / 1000000u);
+    clkrstGetClockRate(&c.session, &now);
+    c.set_hz = now ? now : want;
+    std::printf("[clock] %s %u -> %u MHz\n", c.name, c.old_hz / 1000000u, now / 1000000u);
+}
+
+void set_cpu_mhz(int mhz) {
+    set_clock(g_cpu_clock, mhz);
+}
+
+void set_gpu_mhz(int mhz) {
+    set_clock(g_gpu_clock, mhz);
 }
 
 void clk_restore() {
-    if (!g_clk_open)
-        return;
-    appletUnhook(&g_clk_hook);
-    if (g_cpu_set && g_cpu_old)
-        clkrstSetClockRate(&g_cpu, g_cpu_old);
-    clkrstCloseSession(&g_cpu);
-    clkrstExit();
-    g_clk_open = false;
+    if (g_hooked)
+        appletUnhook(&g_clk_hook);
+    for (Clock* c : {&g_cpu_clock, &g_gpu_clock}) {
+        if (!c->open)
+            continue;
+        if (c->set_hz && c->old_hz)
+            clkrstSetClockRate(&c->session, c->old_hz);
+        clkrstCloseSession(&c->session);
+        c->open = false;
+    }
+    if (g_clkrst)
+        clkrstExit();
+    g_clkrst = false;
 }
 
 // --- the game ------------------------------------------------------------------------------
@@ -251,7 +297,7 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
 }
 
 // --- sampling profiler --------------------------------------------------------------------
-// About 500 times a second a thread on core 2 pauses the game thread, reads its registers and the
+// About 500 times a second a thread on core 0 pauses the game thread, reads its registers and the
 // chain of frame records on its stack (each caller's return address), and lets it go again. Only
 // samples taken while the game is playing count: menu time and the end-of-run report and teardown
 // are counted separately (dream_port_phase, set by the launcher). Every 20 seconds the counts are
@@ -428,6 +474,19 @@ int main(int argc, char** argv) {
     }
 
     dream_port_set_cpu_mhz = set_cpu_mhz;
+    dream_port_set_gpu_mhz = set_gpu_mhz;
+    // Helper threads the launcher starts. Core 1 is the game's; the sound processor gets core 2.
+    // Core 0 keeps the main thread (asleep while the game runs), SDL's audio thread and the
+    // profiler.
+    dream_port_on_thread = [](const char* name) {
+        int core = -1;
+        if (!std::strcmp(name, "aica"))
+            core = 2;
+        if (core < 0)
+            return;
+        const Result rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+        std::printf("[switch] thread %s on core %d%s\n", name, core, R_FAILED(rc) ? " (refused)" : "");
+    };
     // The first run starts with the CPU at 1785 MHz: the stock 1020 MHz is far too slow for the
     // recompiled game (test1 ran there). Once the file exists, the port menu's choice stands.
     if (!exists("sdmc:/switch/sonicadv/sonicadv_options.txt")) {
@@ -476,7 +535,7 @@ int main(int argc, char** argv) {
     g_stack_lo = reinterpret_cast<std::uint64_t>(game.stack_mirror);
     g_stack_hi = g_stack_lo + game.stack_sz;
     const bool profiling =
-        R_SUCCEEDED(threadCreate(&g_prof, profiler, nullptr, nullptr, 0x10000, 0x2B, 2));
+        R_SUCCEEDED(threadCreate(&g_prof, profiler, nullptr, nullptr, 0x10000, 0x2B, 0));
     if (profiling) {
         threadStart(&g_prof);
         std::printf("[profile] sampling the game thread, written to sonicadv_profile.txt\n");
