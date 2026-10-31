@@ -2,6 +2,16 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: capture replayer, first run
+
+- Character select (captures 013 and 015) reproduces on the Switch from the captured frame alone:
+  the first render, the game's way, did not finish within finish()'s one-second limit, and the
+  replayer then skipped that capture's other experiments (its mistake). So the slowdown is in
+  drawing that content on the Switch, not in the live game's state. Emerald Coast (capture 002):
+  every experiment about 1.9 ms of GPU time, 6.3 ms wall.
+- Replayer fixed: Offscreen::finish_timeout_ns (30 s in the replayer, 1 s in the game), cheapest
+  experiments first, three samples of a slow one.
+
 ## 2026-10-31: the capture replayer (sa_replay.nro)
 
 - The probe showed the resolve shader fast on NVK alone, so the cause is in how the game's pass

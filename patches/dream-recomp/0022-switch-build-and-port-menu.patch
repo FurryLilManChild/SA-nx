@@ -440,7 +440,7 @@ index 0000000..2587b34
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..c837758 100644
+index 65db176..597309b 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
 @@ -10,12 +10,15 @@
@@ -461,7 +461,7 @@ index 65db176..c837758 100644
  
  #include "dream/render/vk/context.h"
  #include "dream/render/vk/renderer.h"
-@@ -43,21 +46,76 @@ public:
+@@ -43,21 +46,79 @@ public:
      std::uint32_t width() const noexcept { return extent_.width; }
      std::uint32_t height() const noexcept { return extent_.height; }
  
@@ -522,6 +522,9 @@ index 65db176..c837758 100644
 +        bool full_scissor = false;  // the resolve over the whole target, not the translucent box
 +        bool no_mid_stamps = false; // no timestamps between the gather and the resolve
 +    } experiment;
++    // SA-nx: how long finish() waits for the GPU before reporting a lost frame (the replayer
++    // raises it, so a slow experiment is measured rather than abandoned).
++    std::uint64_t finish_timeout_ns = 1'000'000'000ull;
 +    // SA-nx: GPU time per pass, from timestamps (zero where the device has none), and what the
 +    // translucency pass covered, summed over renders; the launcher logs the differences.
 +    struct GpuTimes {
@@ -542,7 +545,7 @@ index 65db176..c837758 100644
  
  private:
      Context* ctx_ = nullptr;
-@@ -70,6 +128,24 @@ private:
+@@ -70,6 +131,24 @@ private:
      VkFence fence_ = VK_NULL_HANDLE;
      HostBuffer readback_;
      bool have_pixels_ = false;
@@ -567,7 +570,7 @@ index 65db176..c837758 100644
      // Per-pixel translucency (SA-nx).
      bool create_oit();
      void destroy_oit();
-@@ -77,6 +153,8 @@ private:
+@@ -77,6 +156,8 @@ private:
      bool oit_available_ = false;
      const Renderer* oit_bound_ = nullptr;
      std::uint32_t oit_capacity_ = 0;
@@ -1194,7 +1197,7 @@ index 0000000..0a3194d
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..d602bf4 100644
+index 9c24009..77e6fdd 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,7 +1,11 @@
@@ -1317,7 +1320,7 @@ index 9c24009..d602bf4 100644
 +    // One second is far longer than any frame takes; waiting for ever would turn a lost device
 +    // into a hung launcher with nothing on screen to say so.
 +    const auto wait_from = std::chrono::steady_clock::now();
-+    const VkResult waited = vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull);
++    const VkResult waited = vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, finish_timeout_ns);
 +    wait_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                                              std::chrono::steady_clock::now() - wait_from)
 +                                              .count());

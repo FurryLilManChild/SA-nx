@@ -141,23 +141,24 @@ int main(int argc, char** argv) {
         set(x);
         experiments.push_back(x);
     };
-    add("game", "as the game draws it (accurate)", [](Experiment&) {});
-    add("lean", "lean (8 kept)", [](Experiment& x) { x.lean = true; });
-    add("split", "resolve in its own pass instance", [](Experiment& x) { x.e.split = true; });
-    add("fullscissor", "resolve over the whole screen", [](Experiment& x) { x.e.full_scissor = true; });
-    add("split+full", "both (the probe's way)", [](Experiment& x) {
-        x.e.split = true;
-        x.e.full_scissor = true;
-    });
-    add("nostamps", "no timestamp between gather and resolve",
-        [](Experiment& x) { x.e.no_mid_stamps = true; });
-    add("gatheronly", "gather, no resolve", [](Experiment& x) { x.e.skip_resolve = true; });
-    add("resolveonly", "resolve over empty lists", [](Experiment& x) { x.e.skip_gather = true; });
+    // Cheapest first, so a run that ends early still has them.
     add("strip", "per-strip sort, no per-pixel pass", [](Experiment& x) { x.oit = false; });
     add("triangle", "per-triangle sort", [](Experiment& x) {
         x.oit = false;
         x.triangles = true;
     });
+    add("resolveonly", "resolve over empty lists", [](Experiment& x) { x.e.skip_gather = true; });
+    add("gatheronly", "gather, no resolve", [](Experiment& x) { x.e.skip_resolve = true; });
+    add("split", "resolve in its own pass instance", [](Experiment& x) { x.e.split = true; });
+    add("split+full", "split, resolve over the whole screen (the probe's way)", [](Experiment& x) {
+        x.e.split = true;
+        x.e.full_scissor = true;
+    });
+    add("fullscissor", "resolve over the whole screen", [](Experiment& x) { x.e.full_scissor = true; });
+    add("nostamps", "no timestamp between gather and resolve",
+        [](Experiment& x) { x.e.no_mid_stamps = true; });
+    add("lean", "lean (8 kept)", [](Experiment& x) { x.lean = true; });
+    add("game", "as the game draws it (accurate)", [](Experiment&) {});
 
     vk::Context ctx;
     if (!ctx.create({}, false)) {
@@ -185,6 +186,7 @@ int main(int argc, char** argv) {
         vk::FrameGeometry g;
         g.alpha_ref = static_cast<float>(c.regs[0x11C / 4] & 0xFFu) / 255.0f;
         off.readback = false;
+        off.finish_timeout_ns = 30'000'000'000ull;  // measure a slow experiment, do not drop it
         log("\n%s: %zu translucent polygons\n", c.name.c_str(), dl.frame().lists[2].size());
         log("%-12s %9s %9s %9s %9s %9s  %-9s %s\n", "experiment", "wall ms", "first", "gather",
             "resolve", "total", "picture", "what");
@@ -197,7 +199,7 @@ int main(int argc, char** argv) {
             double first = 0;
             auto gpu0 = off.gpu;
             bool failed = false;
-            for (int rep = 0; rep < 8; ++rep) {
+            for (int rep = 0; rep < 6; ++rep) {
                 if (rep == 1)
                     gpu0 = off.gpu;  // the GPU times leave out the first render
                 const auto t0 = std::chrono::steady_clock::now();
@@ -213,8 +215,8 @@ int main(int argc, char** argv) {
                     first = ms;
                 else
                     wall.push_back(ms);
-                if (ms > 3000.0)
-                    break;
+                if (ms > 400.0 && rep >= 2)
+                    break;  // slow: three samples are enough
             }
             if (failed)
                 break;  // the device may be lost
