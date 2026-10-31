@@ -2,6 +2,18 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: the capture replayer (sa_replay.nro)
+
+- The probe showed the resolve shader fast on NVK alone, so the cause is in how the game's pass
+  wraps it. switch/replay draws captures 013, 015 (character select) and 002 (Emerald Coast)
+  through the game's own Offscreen and Renderer on the Switch, 8 renders per experiment:
+  the game's way, lean, the resolve in a second instance of the pass after a barrier (split),
+  the resolve over the whole screen, both, no timestamp between gather and resolve, gather only,
+  resolve only (empty lists), per strip, per triangle. Offscreen::Experiment holds the switches
+  (all off in the game). Writes sdmc:/switch/sonicadv/replay.txt. On lavapipe: all run; split
+  gives the game's picture exactly (a drop-in fix if it is fast); full-screen scissor changes the
+  picture outside the box (the opaque copy only covers the box), so it is a diagnostic only.
+
 ## 2026-10-31: Stage 1 results (probe, switch-test13)
 
 - Probe (CPU 1785, GPU 768, memory 1600): NVK resolves character select's lists in 1.19 ms of GPU

@@ -440,7 +440,7 @@ index 0000000..2587b34
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..c0cf552 100644
+index 65db176..c837758 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
 @@ -10,12 +10,15 @@
@@ -461,7 +461,7 @@ index 65db176..c0cf552 100644
  
  #include "dream/render/vk/context.h"
  #include "dream/render/vk/renderer.h"
-@@ -43,21 +46,67 @@ public:
+@@ -43,21 +46,76 @@ public:
      std::uint32_t width() const noexcept { return extent_.width; }
      std::uint32_t height() const noexcept { return extent_.height; }
  
@@ -513,6 +513,15 @@ index 65db176..c0cf552 100644
 +    bool allow_oit = true;
 +    // SA-nx: the lean resolve, 8 layers kept per pixel instead of 32 ("accurate (lean)").
 +    bool lean_oit = false;
++    // SA-nx: switches for the capture replayer (switch/replay), to find what makes the per-pixel
++    // pass slow on the Switch. All off in the game.
++    struct Experiment {
++        bool skip_gather = false;   // no gather draws: every list empty
++        bool skip_resolve = false;  // no resolve draw
++        bool split = false;         // the resolve in a second instance of the pass, after a barrier
++        bool full_scissor = false;  // the resolve over the whole target, not the translucent box
++        bool no_mid_stamps = false; // no timestamps between the gather and the resolve
++    } experiment;
 +    // SA-nx: GPU time per pass, from timestamps (zero where the device has none), and what the
 +    // translucency pass covered, summed over renders; the launcher logs the differences.
 +    struct GpuTimes {
@@ -533,7 +542,7 @@ index 65db176..c0cf552 100644
  
  private:
      Context* ctx_ = nullptr;
-@@ -70,6 +119,24 @@ private:
+@@ -70,6 +128,24 @@ private:
      VkFence fence_ = VK_NULL_HANDLE;
      HostBuffer readback_;
      bool have_pixels_ = false;
@@ -558,7 +567,7 @@ index 65db176..c0cf552 100644
      // Per-pixel translucency (SA-nx).
      bool create_oit();
      void destroy_oit();
-@@ -77,6 +144,8 @@ private:
+@@ -77,6 +153,8 @@ private:
      bool oit_available_ = false;
      const Renderer* oit_bound_ = nullptr;
      std::uint32_t oit_capacity_ = 0;
@@ -1185,7 +1194,7 @@ index 0000000..0a3194d
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..44a60b0 100644
+index 9c24009..d602bf4 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,7 +1,11 @@
@@ -1426,20 +1435,51 @@ index 9c24009..44a60b0 100644
          vkCmdCopyImage(cmd_, colour_.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         opaque_copy_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
          VkImageMemoryBarrier to_read = to_dst;
-@@ -430,19 +566,75 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -430,19 +566,104 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          obi.renderArea.extent = extent_;
          vkCmdBeginRenderPass(cmd_, &obi, VK_SUBPASS_CONTENTS_INLINE);
          vkCmdSetViewport(cmd_, 0, 1, &viewport);
 -        vkCmdSetScissor(cmd_, 0, 1, &scissor);
-+        vkCmdSetScissor(cmd_, 0, 1, &tbox);
-         renderer.draw(cmd_, frame, geometry, extent_, Renderer::Lists::TranslucentGather);
-+        if (queries_)
-+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
-         vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
+-        renderer.draw(cmd_, frame, geometry, extent_, Renderer::Lists::TranslucentGather);
+-        vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
 -        renderer.draw_resolve(cmd_);
 +        vkCmdSetScissor(cmd_, 0, 1, &tbox);
-+        renderer.draw_resolve(cmd_, lean_oit);
++        if (!experiment.skip_gather)
++            renderer.draw(cmd_, frame, geometry, extent_, Renderer::Lists::TranslucentGather);
++        if (experiment.split) {
++            // The gather's instance ends with its resolve subpass empty; a second instance of
++            // the same pass (so the same pipelines) skips the gather subpass and resolves.
++            vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
++            vkCmdEndRenderPass(cmd_);
++            if (queries_)
++                vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
++            VkMemoryBarrier lb{};
++            lb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++            lb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++            lb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
++                               VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
++                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++            vkCmdPipelineBarrier(cmd_,
++                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
++                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
++                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++                                 0, 1, &lb, 0, nullptr, 0, nullptr);
++            vkCmdBeginRenderPass(cmd_, &obi, VK_SUBPASS_CONTENTS_INLINE);
++            vkCmdSetViewport(cmd_, 0, 1, &viewport);
++            vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
++        } else {
++            if (queries_ && !experiment.no_mid_stamps)
++                vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
++            vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
++        }
++        const VkRect2D whole{{0, 0}, extent_};
++        vkCmdSetScissor(cmd_, 0, 1, experiment.full_scissor ? &whole : &tbox);
++        if (!experiment.skip_resolve)
++            renderer.draw_resolve(cmd_, lean_oit);
          vkCmdEndRenderPass(cmd_);
++        if (queries_ && experiment.no_mid_stamps && !experiment.split)
++            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
 +        if (queries_)
 +            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 3);
 +        // How many fragments the gather appended (past the capacity, how many it had to drop).
@@ -1461,8 +1501,8 @@ index 9c24009..44a60b0 100644
 +    } else if (queries_) {
 +        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
 +        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 3);
-     }
- 
++    }
++
 +    // SA-nx: the readback is only recorded when asked for (the guest reads its framebuffer back);
 +    // otherwise pixels() makes one on demand, and the window takes the frame straight from the
 +    // colour image (colour_image()).
@@ -1476,8 +1516,8 @@ index 9c24009..44a60b0 100644
 +    if (vkEndCommandBuffer(cmd_) != VK_SUCCESS) {
 +        error_ = "vkEndCommandBuffer failed";
 +        return false;
-+    }
-+
+     }
+ 
 +    vkResetFences(ctx_->device(), 1, &fence_);
 +    VkSubmitInfo si{};
 +    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1505,7 +1545,7 @@ index 9c24009..44a60b0 100644
                             readback_.handle(), 1, &copy);
      // The CPU reads the buffer after the fence: make the copy's writes available to the host.
      VkBufferMemoryBarrier to_host{};
-@@ -454,38 +646,148 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -454,38 +675,148 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
      to_host.buffer = readback_.handle();
      to_host.offset = 0;
      to_host.size = VK_WHOLE_SIZE;
@@ -1551,12 +1591,12 @@ index 9c24009..44a60b0 100644
 +        out.offset = {0, 0};
 +        out.extent = extent_;
 +        return true;
-     }
++    }
 +    out.offset = {l, t};
 +    out.extent = {static_cast<std::uint32_t>(r - l), static_cast<std::uint32_t>(b - t)};
 +    return true;
 +}
- 
++
 +float Offscreen::translucent_depth(const Frame& frame, const FrameGeometry& geometry,
 +                                   const VkRect2D& box) const {
 +    const float sx = static_cast<float>(extent_.width) / geometry.width;
@@ -1575,11 +1615,11 @@ index 9c24009..44a60b0 100644
 +            area += 0.5 * std::fabs(static_cast<double>((x[1] - x[0]) * (y[2] - y[0]) -
 +                                                        (x[2] - x[0]) * (y[1] - y[0])));
 +        }
-+    }
+     }
 +    const double box_area = static_cast<double>(box.extent.width) * box.extent.height;
 +    return box_area > 0 ? static_cast<float>(area / box_area) : 0.0f;
 +}
-+
+ 
 +const std::uint32_t* Offscreen::pixels() {
 +    if (!finish() || !have_pixels_)
 +        return nullptr;
