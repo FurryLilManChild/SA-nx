@@ -2,6 +2,34 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: Stage 1: the resolve probe, switch-test13 (render thread, wait-loop skip)
+
+- Plan agreed with Mark: Stage 1 measures NVK against deko3d before any port (the probe), and
+  test13 moves our drawing off the game thread. Stage 2 (a deko3d renderer for the Switch) only if
+  the probe backs it; Stage 3 the game-code speedups.
+- switch/probe (sa_probe.nro): runs the resolve as the game does (full-screen triangle, the
+  per-pixel buffers, texelFetch of the opaque colour, push constants) through NVK and, from the
+  same GLSL compiled by uam, through deko3d. Variants: test12's resolve (32 and 8 kept), test11's
+  and test10's exactly as shipped (rebuilt from git), the list walked without sorting, and only
+  the first fragment. Scenarios: character select and Emerald Coast lists dumped by rcap from
+  captures 013 and 002 (RCAP_DUMP_OIT, new Offscreen::read_oit), and 1, 2 and 4 even layers over
+  83% of the screen. Sets CPU 1785, GPU 768, memory 1600 for the run, restores them, writes
+  sdmc:/switch/sonicadv/probe.txt (deko3d first, flushed per line). On lavapipe the Vulkan side
+  runs and test10, 11 and 12 give the same checksum on every scenario.
+- switch-test13:
+  - Render thread (boot_main render_post/render_loop/render_wait, core 0): the game thread
+    decodes the display list, copies the palette and stride registers and the list of rewritten
+    video memory, and hands over; texture decoding, building and submitting the GPU work happen on
+    the render thread. present() and anything else that touches the renderer waits for it first.
+    Textures are still read from live video memory. Log: render thread busy and the game
+    thread's wait for it. --no-render-thread or DREAM_RENDER_THREAD=0 turns it off.
+  - Wait-loop skip (--idle-skip, sh4/idle_skip.h, not in abi.h so no game-code rebuild): the
+    game's loop at 0x8C641F98 and 0x8C641FD8 calls the empty function at 0x8C64162C (rts; nop,
+    checked at start) until an interrupt changes its flag; called from there, the clock jumps to
+    the next event. switch-test12's profile: 10.8% (fn_0c641e40) and 4.8% (fn_0c64162c) of the
+    game thread at full speed, about 8% in slow stretches. Log line `idle:` with the guest time
+    skipped. `--idle-skip none` in sonicadv_args.txt turns it off.
+
 ## 2026-10-31: switch-test12 result
 
 - Accurate with the array-free resolve: memory card select (22 translucent polygons, 1.2 layers per

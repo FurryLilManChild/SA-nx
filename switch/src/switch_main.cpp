@@ -512,13 +512,15 @@ int main(int argc, char** argv) {
     dream_port_set_cpu_mhz = set_cpu_mhz;
     dream_port_set_gpu_mhz = set_gpu_mhz;
     dream_port_set_mem_mhz = set_mem_mhz;
-    // Helper threads the launcher starts. Core 1 is the game's; the sound processor gets core 2.
-    // Core 0 keeps the main thread (asleep while the game runs), SDL's audio thread and the
-    // profiler.
+    // Helper threads the launcher starts. Core 1 is the game's; the sound processor gets core 2;
+    // the render thread core 0, with the main thread (asleep while the game runs), SDL's audio
+    // thread and the profiler.
     dream_port_on_thread = [](const char* name) {
         int core = -1;
         if (!std::strcmp(name, "aica"))
             core = 2;
+        else if (!std::strcmp(name, "render"))
+            core = 0;
         if (core < 0)
             return;
         const Result rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
@@ -536,7 +538,11 @@ int main(int argc, char** argv) {
 
     g_args = {"sonicadv", "--config", "sonicadv.toml", "--window", "--boot-sr", "0x600000F1",
               "--vmu", "save/vmu_A1.bin", "--report", "sonicadv_report.txt", "--options",
-              "sonicadv_options.txt"};
+              "sonicadv_options.txt",
+              // The game's wait loop: 0x8C641F98 and 0x8C641FD8 call the empty function at
+              // 0x8C64162C until an interrupt changes a flag (switch-test12 profile: 10.8% of the
+              // game thread at full speed). The clock jumps to the next event instead.
+              "--idle-skip", "0x0C64162C:0x0C641FA0,0x0C641FE0"};
     // Extra arguments, one per line, for testing without a new build.
     if (std::ifstream extra("sonicadv_args.txt"); extra) {
         std::string line;

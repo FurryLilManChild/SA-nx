@@ -22,4 +22,5 @@ if(NINTENDO_SWITCH)
     VERSION "${SANX_VERSION}")
   nx_create_nro(sonicadv_boot NACP ${CMAKE_CURRENT_BINARY_DIR}/sonicadv.nacp
     ICON ${CMAKE_SOURCE_DIR}/switch/icon.jpg)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/switch/probe ${CMAKE_BINARY_DIR}/probe)
 endif()

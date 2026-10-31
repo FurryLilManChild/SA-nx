@@ -440,10 +440,10 @@ index 0000000..2587b34
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..c50666a 100644
+index 65db176..c0cf552 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
-@@ -10,8 +10,10 @@
+@@ -10,12 +10,15 @@
  //   * Render size and window size stop being the same number. Drawing at two or four times the
  //     guest's resolution is then a change to one argument rather than a change to the design.
  //
@@ -456,7 +456,12 @@ index 65db176..c50666a 100644
  #pragma once
  
  #include <cstdint>
-@@ -43,21 +45,63 @@ public:
+ #include <string>
++#include <vector>
+ 
+ #include "dream/render/vk/context.h"
+ #include "dream/render/vk/renderer.h"
+@@ -43,21 +46,67 @@ public:
      std::uint32_t width() const noexcept { return extent_.width; }
      std::uint32_t height() const noexcept { return extent_.height; }
  
@@ -476,6 +481,10 @@ index 65db176..c50666a 100644
 +    // The last rendered frame as RGBA8888, width() * height() pixels, row 0 at the top, after
 +    // waiting for it. Null before the first successful render().
 +    const std::uint32_t* pixels();
++    // SA-nx: the last render's per-pixel lists, for tools (rcap writes them for the resolve
++    // probe): the head of each pixel's list (width() * height()) and the nodes appended (four
++    // words each). False when the last render had no per-pixel pass.
++    bool read_oit(std::vector<std::uint32_t>& heads, std::vector<std::uint32_t>& nodes);
      // SA-nx: whether translucent surfaces are sorted per pixel, as the hardware does (needs
      // fragmentStoresAndAtomics; DREAM_NO_OIT=1 turns it off to compare against the per-strip
      // sort). False until the first render() has set it up.
@@ -524,7 +533,7 @@ index 65db176..c50666a 100644
  
  private:
      Context* ctx_ = nullptr;
-@@ -70,6 +114,24 @@ private:
+@@ -70,6 +119,24 @@ private:
      VkFence fence_ = VK_NULL_HANDLE;
      HostBuffer readback_;
      bool have_pixels_ = false;
@@ -549,6 +558,15 @@ index 65db176..c50666a 100644
      // Per-pixel translucency (SA-nx).
      bool create_oit();
      void destroy_oit();
+@@ -77,6 +144,8 @@ private:
+     bool oit_available_ = false;
+     const Renderer* oit_bound_ = nullptr;
+     std::uint32_t oit_capacity_ = 0;
++    std::uint32_t last_fragments_ = 0;  // SA-nx: the last per-pixel pass's count (read_oit)
++    bool counted_last_ = false;
+     DeviceBuffer oit_counter_, oit_heads_, oit_nodes_;
+     AttachmentImage opaque_copy_;
+     VkSampler oit_sampler_ = VK_NULL_HANDLE;
 diff --git a/render/include/dream/render/vk/present.h b/render/include/dream/render/vk/present.h
 index 4424f49..d0c3e12 100644
 --- a/render/include/dream/render/vk/present.h
@@ -1167,7 +1185,7 @@ index 0000000..0a3194d
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..d239d23 100644
+index 9c24009..44a60b0 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,7 +1,11 @@
@@ -1279,7 +1297,7 @@ index 9c24009..d239d23 100644
          if (pool_)
              vkDestroyCommandPool(dev, pool_, nullptr);  // frees cmd_ with it
          if (framebuffer_)
-@@ -345,9 +388,66 @@ void Offscreen::destroy() {
+@@ -345,9 +388,68 @@ void Offscreen::destroy() {
      ctx_ = nullptr;
  }
  
@@ -1306,6 +1324,8 @@ index 9c24009..d239d23 100644
 +        std::uint32_t words[4]{};
 +        std::memcpy(words, oit_count_out_.mapped(), sizeof words);
 +        const std::uint32_t n = words[0];
++        last_fragments_ = n;
++        counted_last_ = true;
 +        stats.long_lists += words[1];
 +        stats.unterminated += words[2];
 +        stats.longest_walk = std::max(stats.longest_walk, words[3]);
@@ -1346,7 +1366,7 @@ index 9c24009..d239d23 100644
      vkResetCommandBuffer(cmd_, 0);
      VkCommandBufferBeginInfo bi{};
      bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-@@ -357,8 +457,38 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -357,8 +459,38 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          return false;
      }
  
@@ -1386,7 +1406,7 @@ index 9c24009..d239d23 100644
      if (oit) {
          // Empty lists: no fragments, every head at the end marker.
          vkCmdFillBuffer(cmd_, oit_counter_.handle(), 0, VK_WHOLE_SIZE, 0);
-@@ -392,6 +522,8 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -392,6 +524,8 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
      renderer.draw(cmd_, frame, geometry, extent_,
                    oit ? Renderer::Lists::Opaque : Renderer::Lists::All);
      vkCmdEndRenderPass(cmd_);
@@ -1395,7 +1415,7 @@ index 9c24009..d239d23 100644
  
      if (oit) {
          // The resolve reads the opaque image while writing the colour attachment, so it reads a
-@@ -411,7 +543,9 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -411,7 +545,9 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          VkImageCopy ic{};
          ic.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
          ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -1406,7 +1426,7 @@ index 9c24009..d239d23 100644
          vkCmdCopyImage(cmd_, colour_.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         opaque_copy_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
          VkImageMemoryBarrier to_read = to_dst;
-@@ -430,19 +564,75 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -430,19 +566,75 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          obi.renderArea.extent = extent_;
          vkCmdBeginRenderPass(cmd_, &obi, VK_SUBPASS_CONTENTS_INLINE);
          vkCmdSetViewport(cmd_, 0, 1, &viewport);
@@ -1441,8 +1461,8 @@ index 9c24009..d239d23 100644
 +    } else if (queries_) {
 +        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
 +        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 3);
-+    }
-+
+     }
+ 
 +    // SA-nx: the readback is only recorded when asked for (the guest reads its framebuffer back);
 +    // otherwise pixels() makes one on demand, and the window takes the frame straight from the
 +    // colour image (colour_image()).
@@ -1466,14 +1486,14 @@ index 9c24009..d239d23 100644
 +    if (vkQueueSubmit(ctx_->queue(), 1, &si, fence_) != VK_SUCCESS) {
 +        error_ = "vkQueueSubmit failed";
 +        return false;
-     }
++    }
 +    pending_ = true;
 +    ++frames;
 +    if (sync_)
 +        return finish();
 +    return true;
 +}
- 
++
 +void Offscreen::record_readback(VkCommandBuffer cmd) {
      // The render pass left the colour image as a transfer source, so the copy needs no barrier of
      // its own; the subpass dependency above orders it.
@@ -1485,7 +1505,7 @@ index 9c24009..d239d23 100644
                             readback_.handle(), 1, &copy);
      // The CPU reads the buffer after the fence: make the copy's writes available to the host.
      VkBufferMemoryBarrier to_host{};
-@@ -454,37 +644,100 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -454,38 +646,148 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
      to_host.buffer = readback_.handle();
      to_host.offset = 0;
      to_host.size = VK_WHOLE_SIZE;
@@ -1494,23 +1514,8 @@ index 9c24009..d239d23 100644
                           nullptr, 1, &to_host, 0, nullptr);
 -    if (vkEndCommandBuffer(cmd_) != VK_SUCCESS) {
 -        error_ = "vkEndCommandBuffer failed";
--        return false;
--    }
 +}
- 
--    vkResetFences(ctx_->device(), 1, &fence_);
--    VkSubmitInfo si{};
--    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
--    si.commandBufferCount = 1;
--    si.pCommandBuffers = &cmd_;
--    if (vkQueueSubmit(ctx_->queue(), 1, &si, fence_) != VK_SUCCESS) {
--        error_ = "vkQueueSubmit failed";
--        return false;
--    }
--    // One second is far longer than any frame takes; waiting for ever would turn a lost device
--    // into a hung launcher with nothing on screen to say so.
--    if (vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull) != VK_SUCCESS) {
--        error_ = "the GPU did not finish the frame within a second";
++
 +bool Offscreen::translucent_bounds(const Frame& frame, const FrameGeometry& geometry,
 +                                   VkRect2D& out) const {
 +    const auto& list = frame.lists[static_cast<unsigned>(ListType::Translucent)];
@@ -1547,16 +1552,11 @@ index 9c24009..d239d23 100644
 +        out.extent = extent_;
 +        return true;
      }
--    readback_.invalidate();
--    have_pixels_ = true;
--    ++frames;
 +    out.offset = {l, t};
 +    out.extent = {static_cast<std::uint32_t>(r - l), static_cast<std::uint32_t>(b - t)};
-     return true;
- }
++    return true;
++}
  
--const std::uint32_t* Offscreen::pixels() const noexcept {
--    if (!have_pixels_)
 +float Offscreen::translucent_depth(const Frame& frame, const FrameGeometry& geometry,
 +                                   const VkRect2D& box) const {
 +    const float sx = static_cast<float>(extent_.width) / geometry.width;
@@ -1582,7 +1582,7 @@ index 9c24009..d239d23 100644
 +
 +const std::uint32_t* Offscreen::pixels() {
 +    if (!finish() || !have_pixels_)
-         return nullptr;
++        return nullptr;
 +    if (!pixels_current_) {
 +        // The last render skipped the readback: copy the colour image now, and wait for it.
 +        vkResetCommandBuffer(cmd_, 0);
@@ -1606,9 +1606,74 @@ index 9c24009..d239d23 100644
 +            return nullptr;
 +        pixels_current_ = true;
 +    }
-     return static_cast<const std::uint32_t*>(readback_.mapped());
++    return static_cast<const std::uint32_t*>(readback_.mapped());
++}
++
++bool Offscreen::read_oit(std::vector<std::uint32_t>& heads, std::vector<std::uint32_t>& nodes) {
++    if (!finish() || !counted_last_)
++        return false;
++    const VkDeviceSize head_bytes = static_cast<VkDeviceSize>(extent_.width) * extent_.height * 4;
++    const std::uint32_t count = std::min(last_fragments_, oit_capacity_);
++    const VkDeviceSize node_bytes = static_cast<VkDeviceSize>(count) * 16;
++    HostBuffer out;
++    if (!out.ensure(*ctx_, head_bytes + node_bytes + 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++                    /*read_back=*/true))
++        return false;
++    vkResetCommandBuffer(cmd_, 0);
++    VkCommandBufferBeginInfo bi{};
++    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    if (vkBeginCommandBuffer(cmd_, &bi) != VK_SUCCESS)
++        return false;
++    const VkBufferCopy hc{0, 0, head_bytes};
++    vkCmdCopyBuffer(cmd_, oit_heads_.handle(), out.handle(), 1, &hc);
++    if (node_bytes) {
++        const VkBufferCopy nc{0, head_bytes, node_bytes};
++        vkCmdCopyBuffer(cmd_, oit_nodes_.handle(), out.handle(), 1, &nc);
++    }
++    VkMemoryBarrier hb{};
++    hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
++    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb,
++                         0, nullptr, 0, nullptr);
++    if (vkEndCommandBuffer(cmd_) != VK_SUCCESS)
++        return false;
+     vkResetFences(ctx_->device(), 1, &fence_);
+     VkSubmitInfo si{};
+     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+     si.commandBufferCount = 1;
+     si.pCommandBuffers = &cmd_;
+-    if (vkQueueSubmit(ctx_->queue(), 1, &si, fence_) != VK_SUCCESS) {
+-        error_ = "vkQueueSubmit failed";
++    if (vkQueueSubmit(ctx_->queue(), 1, &si, fence_) != VK_SUCCESS)
+         return false;
+-    }
+-    // One second is far longer than any frame takes; waiting for ever would turn a lost device
+-    // into a hung launcher with nothing on screen to say so.
+-    if (vkWaitForFences(ctx_->device(), 1, &fence_, VK_TRUE, 1'000'000'000ull) != VK_SUCCESS) {
+-        error_ = "the GPU did not finish the frame within a second";
++    pending_ = true;
++    if (!finish())
+         return false;
+-    }
+-    readback_.invalidate();
+-    have_pixels_ = true;
+-    ++frames;
++    out.invalidate();
++    const auto* words = static_cast<const std::uint32_t*>(out.mapped());
++    heads.assign(words, words + head_bytes / 4);
++    nodes.assign(words + head_bytes / 4, words + (head_bytes + node_bytes) / 4);
+     return true;
  }
  
+-const std::uint32_t* Offscreen::pixels() const noexcept {
+-    if (!have_pixels_)
+-        return nullptr;
+-    return static_cast<const std::uint32_t*>(readback_.mapped());
+-}
+-
+ }  // namespace dream::render::vk
 diff --git a/render/src/vk/present.cpp b/render/src/vk/present.cpp
 index f3d3c96..4fc00a3 100644
 --- a/render/src/vk/present.cpp
@@ -2642,7 +2707,7 @@ index 0000000..eb38d9f
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..dee5749 100644
+index 824d0b4..b512527 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,27 @@
@@ -2673,7 +2738,24 @@ index 824d0b4..dee5749 100644
  #include "dream/runtime/aica/aica.h"
  #include "dream/runtime/aica/rtc.h"
  #include "dream/runtime/gdrom/disc.h"
-@@ -52,6 +73,7 @@
+@@ -34,6 +55,7 @@
+ #include "dream/runtime/mem/dc_memory.h"
+ #include "dream/runtime/pvr/core.h"
+ #include "dream/runtime/sh4/abi.h"
++#include "dream/runtime/sh4/idle_skip.h"
+ #include "dream/runtime/sh4/dmac.h"
+ #include "dream/runtime/sh4/ops.h"
+ #include "dream/runtime/system.h"
+@@ -46,12 +68,16 @@
+ #include "dream/audio/sink.h"
+ #endif
+ #ifdef DREAM_WITH_RENDERER
++#include <atomic>
++#include <condition_variable>
++#include <mutex>
+ #include <thread>
+ 
+ #include "dream/render/background.h"
  #include "dream/render/display_list.h"
  #include "dream/render/framebuffer.h"
  #include "dream/render/input_menu.h"
@@ -2681,7 +2763,15 @@ index 824d0b4..dee5749 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -159,6 +181,15 @@ struct Live {
+@@ -123,6 +149,7 @@ void print_guest_backtrace() {
+ // direction: its framebuffer emulation is off unless a title needs it.
+ struct Live {
+     Live(dream::mem::DcMemory& memory, const dream::pvr::Core& pvr) : memory_(memory), pvr_(pvr) {}
++    ~Live() { stop_render_thread(); }  // SA-nx: before what the render thread uses goes away
+ 
+     // `scale` multiplies the resolution the geometry is drawn at. The frame is resampled back to
+     // the guest's own framebuffer on the way into video memory, so a higher setting sharpens the
+@@ -159,6 +186,22 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -2691,13 +2781,20 @@ index 824d0b4..dee5749 100644
 +            std::uint64_t& into;
 +            ~Timed() { into += Live::ns_since(from); }
 +        } timed{render_from, perf_render_ns};
++        // SA-nx: the previous render may still be with the render thread; everything below
++        // touches what it uses.
++        render_wait();
++        if (render_threaded && !writeback && gpu_present) {
++            render_post(stream);
++            return;
++        }
 +        // SA-nx: the previous render may still be on the GPU (Offscreen::render no longer waits).
 +        // Finish it before anything below can drop or replace a texture it is reading.
 +        offscreen.finish();
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -184,6 +215,9 @@ struct Live {
+@@ -184,6 +227,9 @@ struct Live {
          memory_.take_vram_writes([this](std::uint32_t begin, std::uint32_t end) {
              vram_invalidated += renderer.textures().invalidate_range(begin, end);
          });
@@ -2707,7 +2804,112 @@ index 824d0b4..dee5749 100644
          if (!offscreen.render(renderer, frame, geometry)) {
              if (!reported_error) {
                  reported_error = true;
-@@ -243,9 +277,152 @@ struct Live {
+@@ -195,6 +241,104 @@ struct Live {
+         ++rendered;
+     }
+ 
++    // SA-nx: the render thread. The game thread decodes the display list and takes a copy of the
++    // registers the render reads (palette, stride) and of the video memory the guest rewrote; the
++    // render thread then does the rest (texture decoding, building and submitting the GPU work),
++    // while the game runs on. Anything else that uses the renderer waits for it first
++    // (render_wait). The picture is the same: the same list, the same registers, drawn in order.
++    // Textures are still decoded from live video memory, which the guest could be writing at that
++    // moment; the console's own graphics chip reads it while the CPU runs in the same way.
++    void render_post(const std::vector<std::uint32_t>& stream) {
++        last_stream = stream;
++        decoder.reset();
++        decoder.feed_stream(stream.data(), stream.size());
++        if (dream::render::add_background(decoder.frame(), pvr_.reg_block(), memory_.vram(),
++                                          dream::mem::DcMemory::kVramSize))
++            ++backgrounds;
++        geometry.alpha_ref = static_cast<float>(pvr_.reg(0x11C) & 0xFFu) / 255.0f;
++        job_palette_.assign(pvr_.reg_block() + 0x1000 / 4, pvr_.reg_block() + 0x1000 / 4 + 1024);
++        job_palette_format_ = palette_format();
++        job_stride_ = (pvr_.reg(0x0E4) & 31u) * 32u;
++        job_ranges_.clear();
++        memory_.take_vram_writes([this](std::uint32_t begin, std::uint32_t end) {
++            job_ranges_.push_back({begin, end});
++        });
++        offscreen.readback = false;
++        write_back();  // with no write-back this only notes the target buffer
++        {
++            std::lock_guard<std::mutex> lock(render_mu_);
++            render_job_ = true;
++        }
++        render_cv_.notify_all();
++        ++rendered;
++    }
++
++    void render_loop() {
++        for (;;) {
++            {
++                std::unique_lock<std::mutex> lock(render_mu_);
++                render_cv_.wait(lock, [this] { return render_job_ || render_stop_; });
++                if (!render_job_)
++                    return;
++            }
++            const auto from = std::chrono::steady_clock::now();
++            offscreen.finish();  // before a texture the last render read can be dropped
++            if (renderer.textures().set_palette(job_palette_.data(), job_palette_format_))
++                ++job_palette_changes_;
++            renderer.textures().set_stride_width(job_stride_);
++            for (const auto& [begin, end] : job_ranges_)
++                job_invalidated_ += renderer.textures().invalidate_range(begin, end);
++            const bool ok = offscreen.render(renderer, decoder.frame(), geometry);
++            render_thread_ns += ns_since(from);
++            {
++                std::lock_guard<std::mutex> lock(render_mu_);
++                job_failed_ = job_failed_ || !ok;
++                render_job_ = false;
++            }
++            render_cv_.notify_all();
++        }
++    }
++
++    // Waits for the render thread to be done with its job; the counters it kept come back here.
++    void render_wait() {
++        if (!render_threaded)
++            return;
++        const auto from = std::chrono::steady_clock::now();
++        std::unique_lock<std::mutex> lock(render_mu_);
++        render_cv_.wait(lock, [this] { return !render_job_; });
++        render_wait_ns += ns_since(from);
++        vram_invalidated += job_invalidated_;
++        palette_changes += job_palette_changes_;
++        job_invalidated_ = job_palette_changes_ = 0;
++        if (job_failed_ && !reported_error) {
++            reported_error = true;
++            std::fprintf(stderr, "render: %s\n", offscreen.error().c_str());
++        }
++        job_failed_ = false;
++    }
++
++    void start_render_thread() {
++        render_threaded = true;
++        render_thread_ = std::thread([this] {
++            if (dream_port_on_thread)
++                dream_port_on_thread("render");
++            render_loop();
++        });
++    }
++
++    void stop_render_thread() {
++        if (!render_thread_.joinable())
++            return;
++        render_wait();
++        {
++            std::lock_guard<std::mutex> lock(render_mu_);
++            render_stop_ = true;
++        }
++        render_cv_.notify_all();
++        render_thread_.join();
++        render_threaded = false;
++    }
++
+     // True for a buffer the renderer has drawn into at some point. A title alternates between two
+     // and does not swap the displayed one on every render, so asking whether the displayed buffer
+     // is *the* most recent target is too strict; asking whether it is one of ours is the question
+@@ -243,9 +387,167 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -2752,11 +2954,14 @@ index 824d0b4..dee5749 100644
 +        if (perf_sound_threaded)
 +            std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, render "
 +                        "%.0f%%, present %.0f%% (gpu wait inside those %.0f%%), waiting for sound "
-+                        "%.0f%%, sleep %.0f%%, menu %.0f%% | sound thread busy %.0f%%\n",
++                        "%.0f%%, sleep %.0f%%, menu %.0f%% | sound thread busy %.0f%% | render "
++                        "thread busy %.0f%%, game thread waited for it %.0f%%\n",
 +                        static_cast<double>(presented - perf_presented_at) / wall,
 +                        static_cast<double>(rendered - perf_rendered_at) / wall, speed,
 +                        pct(game_ms), pct(render_ms), pct(present_ms), pct(gpu_ms),
-+                        pct(sound_wait_ms), pct(sleep_ms), pct(paused_ms), pct(audio_ms));
++                        pct(sound_wait_ms), pct(sleep_ms), pct(paused_ms), pct(audio_ms),
++                        pct(static_cast<double>(render_thread_ns.load() - render_thread_at) / 1e6),
++                        pct(static_cast<double>(render_wait_ns) / 1e6));
 +        else
 +            std::printf("perf: %.1f fps shown, %.1f renders/s, speed %.2fx | game %.0f%%, sound "
 +                        "%.0f%%, render %.0f%%, present %.0f%% (gpu wait inside those %.0f%%), "
@@ -2816,6 +3021,15 @@ index 824d0b4..dee5749 100644
 +            offscreen.stats.fragments_max = 0;
 +            offscreen.stats.longest_walk = 0;
 +        }
++        // SA-nx: the guest's wait loops that were skipped (--idle-skip).
++        if (const auto& is = dream::sh4::idle_skip_stats(); is.calls != perf_idle_last.calls) {
++            const double guest_s = static_cast<double>(guest_cycles - perf_cycles_at) / 200e6;
++            const double skipped_s = static_cast<double>(is.cycles - perf_idle_last.cycles) / 200e6;
++            std::printf("idle: %llu waits skipped, %.0f ms of guest time (%.0f%%)\n",
++                        static_cast<unsigned long long>(is.skips - perf_idle_last.skips),
++                        skipped_s * 1000.0, guest_s > 0 ? 100.0 * skipped_s / guest_s : 0.0);
++            perf_idle_last = is;
++        }
 +        perf_gpu_last = g;
 +        perf_stats_last = st;
 +        std::fflush(stdout);
@@ -2831,6 +3045,8 @@ index 824d0b4..dee5749 100644
 +        perf_presented_at = presented;
 +        perf_rendered_at = rendered;
 +        perf_cycles_at = guest_cycles;
++        render_thread_at = render_thread_ns.load();
++        render_wait_ns = 0;
 +    }
 +
      bool present(std::uint64_t frame, std::uint64_t guest_cycles) {
@@ -2841,6 +3057,7 @@ index 824d0b4..dee5749 100644
 +            ~Timed() { into += Live::ns_since(from); }
 +        } timed{present_from, paused() ? perf_scratch_ns : perf_present_ns};  // menu time is
 +                                                                            // counted as menu
++        render_wait();  // SA-nx: the frame being shown, and everything below, is the render thread's
 +        if (perf_enabled)
 +            perf_log(guest_cycles);
 +        dream_port_phase = paused() ? 1 : 0;
@@ -2861,7 +3078,7 @@ index 824d0b4..dee5749 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -277,12 +454,27 @@ struct Live {
+@@ -277,12 +579,27 @@ struct Live {
              window.recreate_swapchain();
              return true;
          }
@@ -2890,7 +3107,7 @@ index 824d0b4..dee5749 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,9 +482,18 @@ struct Live {
+@@ -290,9 +607,18 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -2909,7 +3126,7 @@ index 824d0b4..dee5749 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -318,8 +519,13 @@ struct Live {
+@@ -318,8 +644,13 @@ struct Live {
          if (!window.end_frame(image))
              window.recreate_swapchain();
          ++presented;
@@ -2923,7 +3140,7 @@ index 824d0b4..dee5749 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -330,7 +536,29 @@ struct Live {
+@@ -330,7 +661,29 @@ struct Live {
              screenshot();
          if (capture_at && presented == capture_at)
              capture();
@@ -2954,7 +3171,7 @@ index 824d0b4..dee5749 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +601,129 @@ struct Live {
+@@ -373,8 +726,129 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -3084,7 +3301,7 @@ index 824d0b4..dee5749 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +733,9 @@ struct Live {
+@@ -384,10 +858,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -3098,7 +3315,27 @@ index 824d0b4..dee5749 100644
              return;
          }
          if (!menu.is_open())
-@@ -660,9 +1008,42 @@ struct Live {
+@@ -652,6 +1125,19 @@ struct Live {
+     std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
+                   decoded_frames = 0, backgrounds = 0;
+     std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
++    // SA-nx: the render thread (render_post, render_loop, render_wait).
++    bool render_threaded = false;
++    std::thread render_thread_;
++    std::mutex render_mu_;
++    std::condition_variable render_cv_;
++    bool render_job_ = false, render_stop_ = false, job_failed_ = false;
++    std::vector<std::uint32_t> job_palette_;
++    dream::render::PaletteFormat job_palette_format_{};
++    std::uint32_t job_stride_ = 0;
++    std::vector<std::pair<std::uint32_t, std::uint32_t>> job_ranges_;
++    std::uint64_t job_invalidated_ = 0, job_palette_changes_ = 0;
++    std::atomic<std::uint64_t> render_thread_ns{0};
++    std::uint64_t render_wait_ns = 0, render_thread_at = 0;
+     std::uint32_t target_address = 0;
+     std::uint64_t guest_frame = 0;
+     std::vector<std::uint32_t> last_stream;
+@@ -660,9 +1146,43 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -3117,6 +3354,7 @@ index 824d0b4..dee5749 100644
 +    std::uint64_t perf_render_ns = 0, perf_present_ns = 0, perf_sleep_ns = 0, perf_paused_ns = 0;
 +    std::uint64_t perf_gpu_at = 0, perf_presented_at = 0, perf_rendered_at = 0, perf_cycles_at = 0;
 +    std::chrono::steady_clock::time_point slow_from{};  // SA-nx: dream_port_slow's window
++    dream::sh4::IdleSkipStats perf_idle_last;
 +    std::uint64_t slow_cycles = 0;
 +    std::uint64_t perf_scratch_ns = 0;
 +    dream::render::vk::Offscreen::GpuTimes perf_gpu_last{};
@@ -3141,18 +3379,20 @@ index 824d0b4..dee5749 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1459,10 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1598,12 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
 +        "  --perf-log             every five seconds, log where the game thread's time went\n"
 +        "  --pipeline-cache FILE  keep built GPU pipelines in FILE and build them all at start\n"
++        "  --idle-skip F:C[,C..]  F is an empty guest function a wait loop calls; called from\n"
++        "                         return address C, jump the clock to the next event\n"
 +        "  --aica-thread          run the sound processor on its own thread (default on the Switch;\n"
 +        "                         --no-aica-thread keeps it on the game thread)\n"
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1493,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1634,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -3160,7 +3400,7 @@ index 824d0b4..dee5749 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1619,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1760,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -3168,12 +3408,14 @@ index 824d0b4..dee5749 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1629,13 @@ int main(int argc, char** argv) {
+@@ -1242,6 +1770,15 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
 +    bool perf_log_flag = false;  // SA-nx: --perf-log, the five-second timing line
 +    std::string pipeline_cache_file;  // SA-nx: --pipeline-cache FILE (default on the Switch)
++    std::string idle_skip;            // SA-nx: --idle-skip FUNCTION:CALLER[,CALLER...]
++    bool render_thread = true;        // SA-nx: --no-render-thread
 +#ifdef __SWITCH__
 +    bool aica_thread = true;  // SA-nx: --aica-thread / --no-aica-thread
 +#else
@@ -3182,7 +3424,7 @@ index 824d0b4..dee5749 100644
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1728,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1871,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -3191,7 +3433,7 @@ index 824d0b4..dee5749 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1754,14 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1897,18 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -3199,6 +3441,10 @@ index 824d0b4..dee5749 100644
 +            perf_log_flag = true;
 +        else if (!std::strcmp(argv[i], "--pipeline-cache") && i + 1 < argc)
 +            pipeline_cache_file = argv[++i];
++        else if (!std::strcmp(argv[i], "--idle-skip") && i + 1 < argc)
++            idle_skip = argv[++i];
++        else if (!std::strcmp(argv[i], "--no-render-thread"))
++            render_thread = false;
 +        else if (!std::strcmp(argv[i], "--aica-thread"))
 +            aica_thread = true;
 +        else if (!std::strcmp(argv[i], "--no-aica-thread"))
@@ -3206,7 +3452,15 @@ index 824d0b4..dee5749 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1682,6 +2086,8 @@ int main(int argc, char** argv) {
+@@ -1398,6 +1949,7 @@ int main(int argc, char** argv) {
+             return 2;
+         }
+     }
++    (void)render_thread;  // SA-nx: only read when there is a renderer
+     if (config.empty()) {
+         std::fprintf(stderr, "--config is required\n");
+         return 2;
+@@ -1682,6 +2234,8 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -3215,7 +3469,7 @@ index 824d0b4..dee5749 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +2104,30 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2252,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -3243,11 +3497,19 @@ index 824d0b4..dee5749 100644
 +                            .count(),
 +                        pipeline_cache_file.c_str());
 +        }
++        // SA-nx: our drawing work on its own thread (render_post); --no-render-thread or
++        // DREAM_RENDER_THREAD=0 keeps it on the game thread as before.
++        if (render_thread && live->gpu_present &&
++            !(std::getenv("DREAM_RENDER_THREAD") &&
++              !std::strcmp(std::getenv("DREAM_RENDER_THREAD"), "0"))) {
++            live->start_render_thread();
++            std::printf("render: on its own thread\n");
++        }
 +        std::printf("F1 (or a pad's select button; Minus on the Switch) opens the menu\n");
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +2150,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2306,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -3259,7 +3521,7 @@ index 824d0b4..dee5749 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2161,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2317,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -3267,7 +3529,7 @@ index 824d0b4..dee5749 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2174,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2330,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -3279,7 +3541,7 @@ index 824d0b4..dee5749 100644
          };
      }
  #endif
-@@ -1770,6 +2202,15 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2358,15 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -3295,7 +3557,7 @@ index 824d0b4..dee5749 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2222,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2378,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -3307,7 +3569,7 @@ index 824d0b4..dee5749 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2234,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2390,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -3331,16 +3593,51 @@ index 824d0b4..dee5749 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -2046,6 +2507,8 @@ int main(int argc, char** argv) {
+@@ -2036,6 +2653,30 @@ int main(int argc, char** argv) {
+         {
+             (void)interpret_all;
+             (void)entry;
++            // SA-nx: --idle-skip FUNCTION:CALLER[,CALLER...] (idle_skip.h).
++            if (!idle_skip.empty()) {
++                std::vector<std::uint32_t> callers;
++                std::uint32_t function = 0;
++                std::string error;
++                const auto colon = idle_skip.find(':');
++                if (colon != std::string::npos) {
++                    function = static_cast<std::uint32_t>(std::strtoul(idle_skip.c_str(), nullptr, 0));
++                    for (std::size_t at = colon + 1; at < idle_skip.size();) {
++                        const auto comma = idle_skip.find(',', at);
++                        callers.push_back(static_cast<std::uint32_t>(
++                            std::strtoul(idle_skip.substr(at, comma - at).c_str(), nullptr, 0)));
++                        at = comma == std::string::npos ? idle_skip.size() : comma + 1;
++                    }
++                }
++                if (function && !callers.empty() &&
++                    dream::sh4::enable_idle_skip(sys.memory, function, callers, error))
++                    std::printf("idle skip: the empty function at 0x%08X, %zu wait loops\n",
++                                function, callers.size());
++                else
++                    std::printf("idle skip: not enabled (%s)\n",
++                                error.empty() ? "expected FUNCTION:CALLER[,CALLER...]"
++                                              : error.c_str());
++            }
+             dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
+         }
+     } catch (const StopRun& s) {
+@@ -2046,6 +2687,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
 +    dream_port_phase = 2;
++#ifdef DREAM_WITH_RENDERER
++    if (live)
++        live->stop_render_thread();  // SA-nx: before the report reads the renderer's counters
++#endif
 +    aica.stop_thread();  // before anything below reads the sound processor's counters
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2145,7 +2608,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +2792,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -3417,6 +3714,47 @@ index 1ac2d5e..0859d62 100644
      std::uint32_t reg_read(std::uint32_t offset, unsigned size);
      void reg_write(std::uint32_t offset, std::uint32_t value, unsigned size);
      void store(std::uint32_t offset, std::uint32_t value, unsigned size);
+diff --git a/runtime/include/dream/runtime/sh4/idle_skip.h b/runtime/include/dream/runtime/sh4/idle_skip.h
+new file mode 100644
+index 0000000..768ccbd
+--- /dev/null
++++ b/runtime/include/dream/runtime/sh4/idle_skip.h
+@@ -0,0 +1,35 @@
++// SA-nx: skipping a guest's busy-wait loops (the "idle-loop fast-forward" of
++// docs/runtime-interrupts.md, done per game rather than by the translator).
++//
++// A game that waits for an interrupt by calling an empty function over and over spends host time
++// running guest cycles in which nothing can change: everything that could end the wait is an
++// event at a time the scheduler already knows. When the empty function is called from one of the
++// named return addresses, the virtual clock jumps to the next event instead, which is what the
++// spinning would have reached. Kept out of abi.h on purpose: the translated code includes that,
++// and changing it rebuilds all of it.
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace dream {
++class Memory;
++}
++
++namespace dream::sh4 {
++
++struct IdleSkipStats {
++    std::uint64_t calls = 0;    // calls of the empty function
++    std::uint64_t skips = 0;    // of those, from a wait loop with time to skip
++    std::uint64_t cycles = 0;   // guest cycles skipped
++};
++
++// `function` must be an empty function in guest memory (rts; nop): checked here, and refused
++// with a reason in `error` otherwise. `callers` are the return addresses (PR) of its calls inside
++// wait loops. One function at a time; a second call replaces the first.
++bool enable_idle_skip(::dream::Memory& m, std::uint32_t function,
++                      const std::vector<std::uint32_t>& callers, std::string& error);
++const IdleSkipStats& idle_skip_stats() noexcept;
++
++}  // namespace dream::sh4
 diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
 index c8d4401..e96da65 100644
 --- a/runtime/src/aica/aica.cpp
@@ -3635,10 +3973,18 @@ index e6b08a9..dc83422 100644
      std::map<unsigned, File> files_;
  };
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index b900b12..f1fe4c5 100644
+index b900b12..cd4d6ef 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
-@@ -44,23 +44,53 @@ namespace {
+@@ -9,6 +9,7 @@
+ #include <vector>
+ 
+ #include "dream/runtime/sh4/abi.h"
++#include "dream/runtime/sh4/idle_skip.h"
+ #ifdef DREAM_DEV_INTERPRETER
+ #include "dream/runtime/devinterp/replay.h"
+ #endif
+@@ -44,23 +45,53 @@ namespace {
  // address, so an address whose first entry is unsigned has no overlay at all and its answer is a
  // property of the table alone. Those are cached; everything else takes the slow path every time,
  // exactly as before.
@@ -3693,12 +4039,70 @@ index b900b12..f1fe4c5 100644
      }
  }
  
-@@ -147,8 +177,17 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+@@ -144,11 +175,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+     flush_fn_cache();  // same reason as the range above
+ }
+ 
++namespace {
++// SA-nx: idle_skip.h. The empty function's address (0: none) and the wait loops' return addresses.
++std::uint32_t g_idle_fn = 0;
++std::vector<std::uint32_t> g_idle_callers;
++IdleSkipStats g_idle_stats;
++
++void idle_empty_fn(Ctx& c, ::dream::Memory& m) {
++    // What the translation of `rts; nop` does, plus the skip.
++    const std::uint32_t entry_pr = take_entry_pr(c, g_idle_fn);
++    if (c.cycles >= c.next_event) {
++        c.pc = g_idle_fn;
++        deliver_irq(c, m);
++    }
++    c.cycles += 2;
++    ++g_idle_stats.calls;
++    const std::uint32_t back = c.pr & 0x1FFFFFFFu;
++    for (std::uint32_t caller : g_idle_callers)
++        if (back == caller) {
++            if (c.next_event > c.cycles) {
++                ++g_idle_stats.skips;
++                g_idle_stats.cycles += c.next_event - c.cycles;
++                c.cycles = c.next_event;  // the loop's next check delivers the event
++            }
++            break;
++        }
++    if (c.pr != entry_pr)
++        nonlocal_return(c, m, c.pr);
++}
++}  // namespace
++
++bool enable_idle_skip(::dream::Memory& m, std::uint32_t function,
++                      const std::vector<std::uint32_t>& callers, std::string& error) {
++    if (m.read16(function) != 0x000Bu || m.read16(function + 2) != 0x0009u) {
++        error = "not an empty function (rts; nop) at " + hex(function);
++        return false;
++    }
++    g_idle_fn = function & 0x1FFFFFFFu;
++    g_idle_callers.clear();
++    for (std::uint32_t a : callers)
++        g_idle_callers.push_back(a & 0x1FFFFFFFu);
++    flush_fn_cache();
++    return true;
++}
++
++const IdleSkipStats& idle_skip_stats() noexcept {
++    return g_idle_stats;
++}
++
  GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
      const std::uint32_t phys = address & 0x1FFFFFFFu;
      FnCacheEntry& slot = g_fn_cache[fn_cache_slot(phys)];
 -    if (slot.fn != nullptr && slot.phys == phys)
 -        return slot.fn;
++    if (g_idle_fn != 0 && phys == g_idle_fn) {
++        slot.phys = phys;
++        slot.fn = &idle_empty_fn;
++        slot.signature = nullptr;
++        slot.signature_words = 0;
++        return &idle_empty_fn;
++    }
 +    if (slot.fn != nullptr && slot.phys == phys) {
 +        if (!slot.signature)
 +            return slot.fn;
@@ -3713,7 +4117,7 @@ index b900b12..f1fe4c5 100644
      const auto& t = table();
      if (interpreted(phys))
          return nullptr;
-@@ -161,6 +200,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -161,6 +256,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
              // change while the table and the interpret set stand.
              slot.phys = phys;
              slot.fn = it->fn;
@@ -3722,7 +4126,7 @@ index b900b12..f1fe4c5 100644
              return it->fn;
          }
          if (!m)
-@@ -168,8 +209,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -168,8 +265,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
          bool same = true;
          for (std::uint32_t i = 0; same && i < it->signature_words; ++i)
              same = m->read16(address + 2 * i) == it->signature[i];
@@ -3737,7 +4141,7 @@ index b900b12..f1fe4c5 100644
      }
      return nullptr;
  }
-@@ -316,6 +362,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -316,6 +418,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {

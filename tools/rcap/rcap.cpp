@@ -34,6 +34,14 @@ int main(int argc,char**argv){
   if(!off.render(r,dl.frame(),g)){std::printf("render: %s\n",off.error().c_str());return 1;}
   const std::uint32_t* px0=off.pixels(); (void)px0;
   std::printf("layers per pixel (estimate): %.2f, translucent polygons %zu, fragments %u of %u, long lists %llu, unterminated %llu, longest %u\n", static_cast<double>(off.stats.depth_max), dl.frame().lists[2].size(), off.stats.fragments_max, off.stats.capacity, (unsigned long long)off.stats.long_lists, (unsigned long long)off.stats.unterminated, off.stats.longest_walk);
+  // RCAP_DUMP_OIT=FILE: the per-pixel lists this render built, for the resolve probe
+  // (switch/probe): "SAOIT1\0\0", width, height, node count, heads, then the nodes.
+  if(const char* dump=std::getenv("RCAP_DUMP_OIT")){
+    std::vector<std::uint32_t> heads,nodes;
+    if(!off.read_oit(heads,nodes)){std::puts("no per-pixel lists to dump");return 1;}
+    FILE*d=std::fopen(dump,"wb"); const std::uint32_t hdr[3]={off.width(),off.height(),static_cast<std::uint32_t>(nodes.size()/4)};
+    std::fwrite("SAOIT1\0\0",1,8,d); std::fwrite(hdr,4,3,d); std::fwrite(heads.data(),4,heads.size(),d); std::fwrite(nodes.data(),4,nodes.size(),d); std::fclose(d);
+    std::printf("wrote %s: %u nodes\n",dump,hdr[2]);}
   const std::uint32_t* px=off.pixels(); FILE*f=std::fopen(argv[2],"wb");
   std::fprintf(f,"P6 %u %u 255\n",off.width(),off.height());
   for(std::uint32_t i=0;i<off.width()*off.height();i++){unsigned char c[3]={(unsigned char)px[i],(unsigned char)(px[i]>>8),(unsigned char)(px[i]>>16)};std::fwrite(c,1,3,f);}
