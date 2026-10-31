@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test11 result
+
+- Mark's first run was lost: the log and profile start fresh each launch, and the test's second
+  launch (to check pipelines built ahead) overwrote them. Rerun as one launch.
+- Pipelines: `pipelines: 6 built ahead from earlier runs in 6 ms` before the first frame.
+- Accurate, character select: resolve 657 ms per render (test9: 405 ms); 181 translucent polygons,
+  1.5 layers per pixel, no long or unterminated lists counted. Menus (memory card select and
+  others): resolve 60 to 260 ms with 15 to 111 translucent polygons and about 2.2 layers; a single
+  full-screen layer resolves in 0.2 ms. Emerald Coast accurate: resolve 0.3 to 3.9 ms, speed 0.82x
+  to 1.00x. The cost tracks pixels with two or more fragments, at roughly half a million GPU
+  cycles per pixel, far beyond the work; rcap on lavapipe is fast and correct. Cause not known:
+  either the walks are much longer on the Switch than the counters say, or NVK handles the
+  per-pixel index array very badly. The single-array resolve did not help (Mark: Accurate felt
+  slower, menus very slow).
+- Per triangle: GPU 0.7 to 1.2 ms per render everywhere, character select included; Emerald Coast
+  0.72x to 1.00x, game thread bound.
+
 ## 2026-10-30: switch-test10 result; switch-test11 (single-array resolve, per triangle, pipelines at launch)
 
 - switch-test10 (Mark): the safety valves sent most of play down the per-strip sort, which hides
