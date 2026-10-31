@@ -2,6 +2,24 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: Stage 1 results (probe, switch-test13)
+
+- Probe (CPU 1785, GPU 768, memory 1600): NVK resolves character select's lists in 1.19 ms of GPU
+  time with test12's shader (2.03 ms wall); test11 0.89 ms, test10 1.02 ms. deko3d: 1.57 ms wall
+  for test12, 6.79 ms for test10 (uam handles test10's arrays worse). Emerald Coast's lists: NVK
+  0.51 ms, deko3d 0.70 ms. Pictures match between the APIs on every real scenario. So the resolve
+  shader on its own is fast on NVK; the 386 to 657 ms resolves in the game come from something
+  around it in the game's pass, not from the shader or the driver's compiler as such, and deko3d
+  would not be faster at this. Odd: on 4 even layers NVK's test12 (kMax 32) picture differs from
+  every other result (lean, test11, test10, deko3d all agree); not seen on the real scenarios.
+- switch-test13 (Mark: Emerald Coast "WAS faster", full speed on accurate apart from occasional
+  dips): mostly 0.96x to 1.00x; render thread 11 to 16% busy, the game thread waits for it 7 to 11%
+  normally. The wait-loop skip jumps about 50% of guest time in Emerald Coast (the game runs at 30
+  renders a second and waits out the other frame). Dips (0.74x, 0.83x, 0.88x) line up with the
+  game thread waiting for the render thread 16 to 27%, and with slow resolves (3.4 ms average in
+  one window, one over 30 ms): the same problem as character select, smaller. Character select is
+  still about 0.4 fps.
+
 ## 2026-10-31: Stage 1: the resolve probe, switch-test13 (render thread, wait-loop skip)
 
 - Plan agreed with Mark: Stage 1 measures NVK against deko3d before any port (the probe), and
