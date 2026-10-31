@@ -150,11 +150,8 @@ int main(int argc, char** argv) {
     add("resolveonly", "resolve over empty lists", [](Experiment& x) { x.e.skip_gather = true; });
     add("gatheronly", "gather, no resolve", [](Experiment& x) { x.e.skip_resolve = true; });
     add("split", "resolve in its own pass instance", [](Experiment& x) { x.e.split = true; });
-    add("split+full", "split, resolve over the whole screen (the probe's way)", [](Experiment& x) {
-        x.e.split = true;
-        x.e.full_scissor = true;
-    });
-    add("fullscissor", "resolve over the whole screen", [](Experiment& x) { x.e.full_scissor = true; });
+    add("boxscissor", "resolve scissored to the translucent box (before the fix)",
+        [](Experiment& x) { x.e.box_scissor = true; });
     add("nostamps", "no timestamp between gather and resolve",
         [](Experiment& x) { x.e.no_mid_stamps = true; });
     add("lean", "lean (8 kept)", [](Experiment& x) { x.lean = true; });

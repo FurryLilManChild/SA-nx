@@ -2,6 +2,23 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: found it: the resolve's scissor; switch-test14
+
+- Capture replayer, second run (character select, captures 013 and 015; GPU ms per render):
+  the game's way 1,693 (resolve 1,691); resolve over empty lists 1,691; lean 448; split pass
+  1,693; no mid timestamps 1,693; gather only 1.7; resolve over the whole screen 3.0 (resolve
+  1.3); split and whole screen 3.0; per strip 0.6; per triangle 0.65. Emerald Coast: every
+  experiment about 1.95. So the slow path is the resolve's full-screen triangle scissored to the
+  translucent box (switch-test8 added the box): on NVK it costs 450 to 1,700 ms even with no
+  fragment to resolve, and nothing without the scissor. Emerald Coast was fast because its box is
+  the whole screen. Character select was first reported at 1.5 fps in switch-test8. The NVK
+  internals behind it are not known (guard band or scissor handling of a huge triangle on GM20B
+  is a guess).
+- switch-test14: the resolve covers the whole target, and the opaque copy is the whole image, so
+  pixels outside the box (no fragments) write back the opaque colour. rcap: all six captures
+  byte-identical, accurate and lean. The gather keeps the box scissor (1.2 ms on the Switch).
+  Offscreen::Experiment::box_scissor brings the old way back for the replayer.
+
 ## 2026-10-31: capture replayer, first run
 
 - Character select (captures 013 and 015) reproduces on the Switch from the captured frame alone:

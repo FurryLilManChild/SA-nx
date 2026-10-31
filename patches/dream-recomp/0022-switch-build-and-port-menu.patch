@@ -440,7 +440,7 @@ index 0000000..2587b34
 +
 +}  // namespace dream::render
 diff --git a/render/include/dream/render/vk/offscreen.h b/render/include/dream/render/vk/offscreen.h
-index 65db176..597309b 100644
+index 65db176..f8e82ec 100644
 --- a/render/include/dream/render/vk/offscreen.h
 +++ b/render/include/dream/render/vk/offscreen.h
 @@ -10,12 +10,15 @@
@@ -519,7 +519,7 @@ index 65db176..597309b 100644
 +        bool skip_gather = false;   // no gather draws: every list empty
 +        bool skip_resolve = false;  // no resolve draw
 +        bool split = false;         // the resolve in a second instance of the pass, after a barrier
-+        bool full_scissor = false;  // the resolve over the whole target, not the translucent box
++        bool box_scissor = false;   // the resolve scissored to the translucent box (the slow way)
 +        bool no_mid_stamps = false; // no timestamps between the gather and the resolve
 +    } experiment;
 +    // SA-nx: how long finish() waits for the GPU before reporting a lost frame (the replayer
@@ -1197,7 +1197,7 @@ index 0000000..0a3194d
 +
 +}  // namespace dream::render
 diff --git a/render/src/vk/offscreen.cpp b/render/src/vk/offscreen.cpp
-index 9c24009..77e6fdd 100644
+index 9c24009..8d34ae9 100644
 --- a/render/src/vk/offscreen.cpp
 +++ b/render/src/vk/offscreen.cpp
 @@ -1,7 +1,11 @@
@@ -1427,18 +1427,15 @@ index 9c24009..77e6fdd 100644
  
      if (oit) {
          // The resolve reads the opaque image while writing the colour attachment, so it reads a
-@@ -411,7 +545,9 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -411,6 +545,7 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          VkImageCopy ic{};
          ic.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
          ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
--        ic.extent = {extent_.width, extent_.height, 1};
-+        ic.srcOffset = {tbox.offset.x, tbox.offset.y, 0};
-+        ic.dstOffset = ic.srcOffset;
-+        ic.extent = {tbox.extent.width, tbox.extent.height, 1};
++        // SA-nx: the whole image, because the resolve covers the whole target (below).
+         ic.extent = {extent_.width, extent_.height, 1};
          vkCmdCopyImage(cmd_, colour_.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         opaque_copy_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
-         VkImageMemoryBarrier to_read = to_dst;
-@@ -430,19 +566,104 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -430,19 +565,109 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
          obi.renderArea.extent = extent_;
          vkCmdBeginRenderPass(cmd_, &obi, VK_SUBPASS_CONTENTS_INLINE);
          vkCmdSetViewport(cmd_, 0, 1, &viewport);
@@ -1476,8 +1473,13 @@ index 9c24009..77e6fdd 100644
 +                vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2);
 +            vkCmdNextSubpass(cmd_, VK_SUBPASS_CONTENTS_INLINE);
 +        }
++        // SA-nx: the resolve's full-screen triangle is drawn over the whole target. Scissored to
++        // the translucent box, NVK on the Switch took 450 to 1,700 ms per resolve even with every
++        // list empty (capture replayer, character select), against 1.3 ms unscissored; Emerald
++        // Coast was only fast because its box is the whole screen. Pixels outside the box have no
++        // fragments and write back the opaque colour, so the picture is the same.
 +        const VkRect2D whole{{0, 0}, extent_};
-+        vkCmdSetScissor(cmd_, 0, 1, experiment.full_scissor ? &whole : &tbox);
++        vkCmdSetScissor(cmd_, 0, 1, experiment.box_scissor ? &tbox : &whole);
 +        if (!experiment.skip_resolve)
 +            renderer.draw_resolve(cmd_, lean_oit);
          vkCmdEndRenderPass(cmd_);
@@ -1548,7 +1550,7 @@ index 9c24009..77e6fdd 100644
                             readback_.handle(), 1, &copy);
      // The CPU reads the buffer after the fence: make the copy's writes available to the host.
      VkBufferMemoryBarrier to_host{};
-@@ -454,38 +675,148 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
+@@ -454,38 +679,148 @@ bool Offscreen::render(Renderer& renderer, const Frame& frame, const FrameGeomet
      to_host.buffer = readback_.handle();
      to_host.offset = 0;
      to_host.size = VK_WHOLE_SIZE;
