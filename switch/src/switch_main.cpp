@@ -5,7 +5,8 @@
 //   sdmc:/switch/sonicadv/1ST_READ.BIN        the game's main program, from the disc
 //   sdmc:/switch/sonicadv/disc/               the GDI and its tracks
 //   sdmc:/switch/sonicadv/save/vmu_A1.bin     the memory card (created on first run)
-//   sdmc:/switch/sonicadv/sonicadv.log        stdout, sonicadv.err.log stderr (fresh each launch)
+//   sdmc:/switch/sonicadv/sonicadv.log        stdout, sonicadv.err.log stderr (fresh each launch;
+//                                             the previous launch's as sonicadv.prev.log)
 //   sdmc:/switch/sonicadv/sonicadv_args.txt   optional extra launcher arguments, one per line
 //   sdmc:/switch/sonicadv/crash_XXXXXXXX.txt  written by a crash
 //   sdmc:/switch/sonicadv/sonicadv_profile.txt where the game thread spends its time (below)
@@ -33,6 +34,7 @@ int dream_boot_main(int argc, char** argv);
 extern void (*dream_port_set_cpu_mhz)(int mhz);
 extern void (*dream_port_set_gpu_mhz)(int mhz);
 extern void (*dream_port_set_mem_mhz)(int mhz);
+extern volatile int dream_port_slow;  // 1: the last half second ran below 0.95x
 extern volatile int dream_port_phase;  // the launcher: 0 playing, 1 menu, 2 ended
 extern void (*dream_port_on_thread)(const char* name);
 extern "C" char __start__;  // libnx's crt0: the start of this module, for crash offsets
@@ -57,6 +59,16 @@ void flusher(void*) {
 
 void open_logs() {
     mkdir(kDir, 0777);
+    // The previous launch's logs are kept beside the new ones (a relaunch used to wipe a run).
+    // The SD card's FAT refuses a rename onto an existing file: delete, then rename.
+    std::remove("sdmc:/switch/sonicadv/sonicadv.prev.log");
+    std::rename("sdmc:/switch/sonicadv/sonicadv.log", "sdmc:/switch/sonicadv/sonicadv.prev.log");
+    std::remove("sdmc:/switch/sonicadv/sonicadv.prev.err.log");
+    std::rename("sdmc:/switch/sonicadv/sonicadv.err.log",
+                "sdmc:/switch/sonicadv/sonicadv.prev.err.log");
+    std::remove("sdmc:/switch/sonicadv/sonicadv_profile.prev.txt");
+    std::rename("sdmc:/switch/sonicadv/sonicadv_profile.txt",
+                "sdmc:/switch/sonicadv/sonicadv_profile.prev.txt");
     std::freopen("sdmc:/switch/sonicadv/sonicadv.log", "w", stdout);
     std::freopen("sdmc:/switch/sonicadv/sonicadv.err.log", "w", stderr);
     static char out_buf[64 * 1024], err_buf[16 * 1024];
@@ -345,6 +357,10 @@ struct Profile {
     std::unordered_map<std::uint64_t, std::uint32_t> pcs;        // where the thread was
     std::unordered_map<std::string, std::uint32_t> stacks;      // pc, lr, then callers
     std::uint64_t samples = 0, failed = 0, in_menu = 0, after_run = 0;
+    // The same samples again, split by speed (dream_port_slow): [0] full speed, [1] below 0.95x.
+    std::unordered_map<std::uint64_t, std::uint32_t> pcs_by[2];
+    std::unordered_map<std::string, std::uint32_t> stacks_by[2];
+    std::uint64_t samples_by[2] = {0, 0};
 };
 
 std::uint64_t mod(std::uint64_t a) {
@@ -361,22 +377,30 @@ void prof_write(const Profile& p) {
                  (unsigned long long)p.samples, (unsigned long long)p.failed,
                  (unsigned long long)p.in_menu, (unsigned long long)p.after_run,
                  (unsigned long long)g_module_base, (unsigned long long)g_module_end);
-    {
+    auto pcs = [f](const char* name, const std::unordered_map<std::uint64_t, std::uint32_t>& m) {
         std::vector<std::pair<std::uint32_t, std::uint64_t>> v;
-        for (const auto& [a, n] : p.pcs) v.push_back({n, a});
+        for (const auto& [a, n] : m) v.push_back({n, a});
         std::sort(v.rbegin(), v.rend());
-        std::fprintf(f, "== pc %zu\n", v.size());
+        std::fprintf(f, "== %s %zu\n", name, v.size());
         for (std::size_t i = 0; i < v.size() && i < 2500; ++i)
             std::fprintf(f, "%llx %u\n", (unsigned long long)v[i].second, v[i].first);
-    }
-    {
+    };
+    auto stacks = [f](const char* name, const std::unordered_map<std::string, std::uint32_t>& m) {
         std::vector<std::pair<std::uint32_t, const std::string*>> v;
-        for (const auto& [k, n] : p.stacks) v.push_back({n, &k});
+        for (const auto& [k, n] : m) v.push_back({n, &k});
         std::sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
-        std::fprintf(f, "== stacks %zu\n", v.size());
+        std::fprintf(f, "== %s %zu\n", name, v.size());
         for (std::size_t i = 0; i < v.size() && i < 2500; ++i)
             std::fprintf(f, "%u %s\n", v[i].first, v[i].second->c_str());
-    }
+    };
+    std::fprintf(f, "split: %llu samples at full speed, %llu below 0.95x\n",
+                 (unsigned long long)p.samples_by[0], (unsigned long long)p.samples_by[1]);
+    pcs("pc", p.pcs);
+    stacks("stacks", p.stacks);
+    pcs("pc_fast", p.pcs_by[0]);
+    pcs("pc_slow", p.pcs_by[1]);
+    stacks("stacks_fast", p.stacks_by[0]);
+    stacks("stacks_slow", p.stacks_by[1]);
     std::fprintf(f, "== end\n");
     std::fclose(f);
     // The SD card's FAT refuses a rename onto an existing file: delete, then rename.
@@ -429,13 +453,17 @@ void profiler(void*) {
             ++p.after_run;
             continue;
         }
+        const int slow = dream_port_slow ? 1 : 0;
         ++p.samples;
+        ++p.samples_by[slow];
         ++p.pcs[mod(ctx.pc.x)];
+        ++p.pcs_by[slow][mod(ctx.pc.x)];
         int n = std::snprintf(key, sizeof key, "%llx %llx", (unsigned long long)mod(ctx.pc.x),
                               (unsigned long long)mod(ctx.lr));
         for (int i = 0; i < depth && n > 0 && n < static_cast<int>(sizeof key) - 12; ++i)
             n += std::snprintf(key + n, sizeof key - n, " %llx", (unsigned long long)mod(chain[i]));
         ++p.stacks[std::string(key)];
+        ++p.stacks_by[slow][std::string(key)];
         if (armGetSystemTick() - last_write >= write_every) {
             last_write = armGetSystemTick();
             prof_write(p);

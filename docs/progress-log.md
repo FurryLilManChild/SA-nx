@@ -2,6 +2,26 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test12 (resolve without a working array, profile split by speed)
+
+- oit_resolve.frag: no per-pixel array. The list is counted, then walked once per fragment blended,
+  each time taking the farthest fragment after the last one blended (ties: submission order, then
+  the newer node, as the stable sort did). Past kMax fragments the kMax-th nearest is found first
+  and only fragments from it on are blended. rcap: captures 002, 006, 009, 013, 015, 016
+  byte-identical, accurate and lean (013 and 015 have lists of 10 and 11, so lean's dropping is
+  exercised).
+- Counter word 4: the longest list walked in a render (counted only past 4 nodes, to keep pixels off
+  one atomic); log `longest list`. rcap: 7 to 11.
+- Profiler: samples also split by `dream_port_slow` (the launcher: the last half second of play ran
+  below 0.95x); sections pc_fast, pc_slow, stacks_fast, stacks_slow.
+- The previous launch's log, error log and profile are kept as sonicadv.prev.log,
+  sonicadv.prev.err.log and sonicadv_profile.prev.txt.
+- Mark: the game slows when ground fills the view and runs smoothly looking at sky. The Dreamcast's
+  graphics chip has no transform stage, so the game's code positions every vertex on the CPU; on
+  the port that is translated code on the game thread. Also measured: our renderer's CPU work and
+  the present run on the game thread, 12 to 23% of it in Emerald Coast (switch-test11), highest in
+  the slow stretches.
+
 ## 2026-10-31: switch-test11 result
 
 - Mark's first run was lost: the log and profile start fresh each launch, and the test's second
