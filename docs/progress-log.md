@@ -2,6 +2,22 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test12 result
+
+- Accurate with the array-free resolve: memory card select (22 translucent polygons, 1.2 layers per
+  pixel, longest list 5 nodes) 386 ms per resolve; other menus 130 to 145 ms (longest list 9 to 12).
+  Mark: character select the worst yet. Emerald Coast: resolve 0.5 to 6 ms, longest lists 8 to 28,
+  speed 0.74x to 1.00x (mostly 0.83x to 0.85x with the renderer 16% of the game thread).
+- So the lists are short and complete, and the resolve keeps no array, yet a few reads per pixel
+  take hundreds of milliseconds; lavapipe runs the same frames in milliseconds. Most likely NVK's
+  shader compiler (NAK) on Maxwell; a bug of ours that only NVK trips on is not ruled out. Flycast
+  runs the same kind of per-pixel sort on the Switch through OpenGL (nouveau's older compiler).
+- Profile split: the slow side mixes in the GPU-bound menus (svcWaitSynchronization 50%), so the
+  ground cost is not cleanly separated. Rising in slow stretches: fn_0c037990 (FTRV and store
+  queue writes: model drawing) 2.0% to 3.8%, Renderer::draw 1.3% to 2.6%, do_write32 1.0% to 2.0%,
+  Ta::feed and DisplayList::handle_vertex. fn_0c641e40 and fn_0c64162c are larger at full speed
+  (10.8%, 4.8%): probably the game's own wait loop.
+
 ## 2026-10-31: switch-test12 (resolve without a working array, profile split by speed)
 
 - oit_resolve.frag: no per-pixel array. The list is counted, then walked once per fragment blended,
