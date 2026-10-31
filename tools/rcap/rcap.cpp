@@ -31,6 +31,8 @@ int main(int argc,char**argv){
   off.readback = std::getenv("RCAP_NO_READBACK") == nullptr;  // pixels() then copies on demand
   off.lean_oit = std::getenv("RCAP_LEAN") != nullptr;  // the 8-layer resolve
   if(!off.render(r,dl.frame(),g)){std::printf("render: %s\n",off.error().c_str());return 1;}
+  const std::uint32_t* px0=off.pixels(); (void)px0;
+  std::printf("layers per pixel (estimate): %.2f, translucent polygons %zu, fragments %u of %u, long lists %llu, unterminated %llu\n", static_cast<double>(off.stats.depth_max), dl.frame().lists[2].size(), off.stats.fragments_max, off.stats.capacity, (unsigned long long)off.stats.long_lists, (unsigned long long)off.stats.unterminated);
   const std::uint32_t* px=off.pixels(); FILE*f=std::fopen(argv[2],"wb");
   std::fprintf(f,"P6 %u %u 255\n",off.width(),off.height());
   for(std::uint32_t i=0;i<off.width()*off.height();i++){unsigned char c[3]={(unsigned char)px[i],(unsigned char)(px[i]>>8),(unsigned char)(px[i]>>16)};std::fwrite(c,1,3,f);}

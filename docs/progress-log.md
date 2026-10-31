@@ -2,6 +2,32 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test9 result; switch-test10 (list counters, safety valves, menu on Minus)
+
+- switch-test9 GPU timing (Mark; CPU 1785, GPU 768, memory 1600): Emerald Coast 1.7 to 2.7 ms per
+  render with the per-pixel pass on nearly every frame, accurate or lean alike; speed mostly 0.95x
+  to 1.00x, some stretches 0.85x to 0.92x with the game thread 80 to 86% busy (CPU-bound now).
+  Character select: resolve 405 ms per render accurate, 97 ms lean (gather 1.4 ms), 179 to 181
+  translucent polygons over 83% of the screen; after a character is picked (176 polygons, 79%)
+  2.7 ms. Mark: lean helped; Plus (for the old Minus+Plus menu) is Start and picked a character.
+- The deep-stack explanation was wrong. Captures 013 and 015 are character select (181 translucent
+  polygons): rcap counts about 316,000 fragments (about 1.2 per pixel), no list past 64 nodes, none
+  unterminated. The 4.2x ratio between 32 and 8 kept layers matches a walk stopped by the 4096-node
+  guard (the replacement scan is proportional to kMax), so the Switch's lists on that screen are
+  suspected to be damaged or cyclic. Not confirmed.
+- switch-test10:
+  - Window (Switch): the menu is Minus alone; Plus is only Start.
+  - Counter buffer gains long_lists and unterminated, written by the resolve; the counter words
+    are copied to a host buffer after each per-pixel pass. Log: fragments per render, peak,
+    capacity, overflows, pixels over 64 layers, pixels whose list never ends.
+  - Safety valve: a frame whose translucent layers (estimated from polygon areas over the
+    rectangle) exceed 12 per pixel uses the per-strip sort; and a render whose resolve takes over
+    30 ms sends the next 600 renders down the per-strip sort. Both are counted in the log. The
+    estimate on the captures: 0.7 to 1.5 layers.
+  - rcap: all captures unchanged.
+  - NRO sha256 5c0a8ad2767853a094b00e4159381faf44ddb90f63deab55279c9860058579ce (the bridge timed
+    out on many parts tonight; resent one at a time and checked).
+
 ## 2026-10-30: switch-test8 result; switch-test9 (GPU timing, lean translucency)
 
 - switch-test8 (Mark played the whole of Emerald Coast at CPU 1785, GPU 768, memory 1600,
