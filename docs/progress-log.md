@@ -2,6 +2,33 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-30: switch-test10 result; switch-test11 (single-array resolve, per triangle, pipelines at launch)
+
+- switch-test10 (Mark): the safety valves sent most of play down the per-strip sort, which hides
+  the problem instead of fixing it. Mark's requirement: full speed with accurate characters and
+  translucency, no silent fallback. Both valves are removed; slow resolves are still counted.
+- Research: Flycast (GPL-2.0) has three modes: per pixel, per triangle (its default) and per strip.
+  Its per-pixel resolve keeps one array of node indexes per pixel and reads depth and blend data
+  from the node buffer when sorting, rather than copying whole fragments into several local
+  arrays. Our resolve copied colour, depth and order into three arrays of 32 entries. On NVK
+  those arrays live in per-thread local memory; suspected (not confirmed) to be why character
+  select took 405 ms per resolve with about 1.2 fragments per pixel.
+- switch-test11:
+  - oit_resolve.frag: Flycast-style single index array; a pixel with no fragments returns at once.
+    rcap: captures 002, 006, 009, 013, 015, 016 byte-identical to before, accurate and lean.
+  - Per triangle (menu value TRIANGLE, file value `triangle`): translucent strips are split into
+    triangles, each keyed on its farthest vertex and sorted stably back to front; odd triangles of
+    a culled strip get the cull face flipped. rcap against accurate: 9,451 to 15,772 pixels differ
+    (per strip: 9,882 to 16,219); errors on the Emerald Coast shoreline water layers and small
+    ones on Sonic's glove at character select. It is an approximation, as in Flycast.
+  - Menu order: Accurate, Lean, Triangle, Strip (Strip was called Fast; the file value `fast` is
+    kept).
+  - Pipelines: every pipeline variant seen is listed in `sonicadv_pipelines.bin.keys` with a Vulkan
+    pipeline cache in `sonicadv_pipelines.bin` (SD card, app folder). At launch they are all built
+    before the first frame, plus the per-pixel pipelines; saved every 300 presents when new ones
+    appeared. Log lines `pipelines: N built ahead` and `pipelines: saved N`.
+  - dcdisc.pytest fails on the cloud machine only because pycdlib is not installed there.
+
 ## 2026-10-30: switch-test9 result; switch-test10 (list counters, safety valves, menu on Minus)
 
 - switch-test9 GPU timing (Mark; CPU 1785, GPU 768, memory 1600): Emerald Coast 1.7 to 2.7 ms per

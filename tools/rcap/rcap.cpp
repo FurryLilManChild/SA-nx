@@ -30,6 +30,7 @@ int main(int argc,char**argv){
   vk::FrameGeometry g; g.alpha_ref=static_cast<float>(regs[0x11C/4]&0xFFu)/255.0f;
   off.readback = std::getenv("RCAP_NO_READBACK") == nullptr;  // pixels() then copies on demand
   off.lean_oit = std::getenv("RCAP_LEAN") != nullptr;  // the 8-layer resolve
+  r.sort_triangles = std::getenv("RCAP_TRIANGLES") != nullptr;  // per-triangle sort (with DREAM_NO_OIT=1)
   if(!off.render(r,dl.frame(),g)){std::printf("render: %s\n",off.error().c_str());return 1;}
   const std::uint32_t* px0=off.pixels(); (void)px0;
   std::printf("layers per pixel (estimate): %.2f, translucent polygons %zu, fragments %u of %u, long lists %llu, unterminated %llu\n", static_cast<double>(off.stats.depth_max), dl.frame().lists[2].size(), off.stats.fragments_max, off.stats.capacity, (unsigned long long)off.stats.long_lists, (unsigned long long)off.stats.unterminated);
