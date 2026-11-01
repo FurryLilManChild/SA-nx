@@ -23,6 +23,9 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 - `tools/recut_patches.sh` writes 0022 with `--binary` (the test program's .bin).
 - Not done yet: T, PR and the FP registers stay in the context; spin-loop marking beyond the one
   idle skip. Expectation: a real but unmeasured gain on the game thread; the Switch run decides.
+- Build: 328 of 328 steps, no warnings or errors. NRO sha256
+  3b2ec07b43949b9231311e5f9f1573060e8895b0a6a268476473aeb2c448b0a3 (165,761,055 bytes), placed in
+  `out\sd\switch\sonicadv\` and verified there; ELF kept as test19.elf.
 
 ## 2026-11-01: switch-test18 result: where stock clocks stand
 
