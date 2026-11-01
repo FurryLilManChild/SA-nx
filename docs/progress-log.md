@@ -2,6 +2,25 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test18 result: where stock clocks stand
+
+- One launch: Emerald Coast at 1785/614/1600 (GPU 614 this time), then stock (1020/307/1331),
+  then per-strip translucency at stock, then the clocks stepped back up (1224, 1581, GPU 460, 614,
+  768, memory 1600, CPU 1785).
+- 1785/768/1600, Emerald Coast: 1.00x in most windows, game thread 59 to 77% (about 71% on
+  average); switch-test14's comparable windows averaged about 68%. The -O2 units made no
+  difference that shows above the scene-to-scene noise. Opening movie window: 0.83x (test17:
+  about 0.84x average).
+- Stock 1020/307/1331, Emerald Coast: 0.58x to 0.60x with the game thread 70 to 78% busy and
+  waiting on the render thread 9 to 16% (GPU at 307 MHz), dipping to 0.21x. Game-thread time per
+  guest second: about 1.2 to 1.3 at stock against about 0.7 at 1785, the clock ratio (1.75).
+  1224 MHz: 0.48x in a heavier stretch. Per-strip translucency at stock: no visible gain (Mark),
+  as expected with the CPU the limit.
+- So stock needs the game thread's work per frame cut to about 55% of today's (about 1.8x faster)
+  plus the GPU waits at 307 MHz. Compiler optimisation of the hot units does not move it; the cost
+  is the shape of the translated code (guest registers in the context struct, reloaded after
+  stores; cycle and interrupt checks; the memory layer about 12 to 14%; indirect calls).
+
 ## 2026-10-31: switch-test18 (towards stock clocks: hot units at -O2; play-module list)
 
 - Mark wants a real attempt at stock clocks before release (the build is release-ready at 1785).
