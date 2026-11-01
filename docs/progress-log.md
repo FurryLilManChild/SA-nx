@@ -2,6 +2,26 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test14 result: menus and character select fixed
+
+- Replayer on Mark's Switch with the fix: character select 3.0 ms GPU per render the game's way
+  (resolve 1.3), against 1,693 with the old box scissor (still in as "boxscissor"). Pictures equal
+  to the game's way in every resolve experiment.
+- Game (accurate, 1785/768/1600): menus and character select at 1.00x; Emerald Coast mostly 1.00x
+  (game thread 59 to 80%, render thread 8 to 17%, no resolve over 30 ms all run). Remaining dips:
+  0.65x to 0.98x stretches with the game thread at 85 to 97% (game code bound; the slow-side
+  profile has the model-drawing code fn_0c037990/0c037294/0c037350 at about 14%, the memory layer
+  12%, the scheduler 4.5%, and 15% svcWaitProcessWideKeyAtomic, the game thread waiting on a
+  condition variable); some of them are probably the movie or loading, which the log cannot tell
+  apart yet.
+- Mark's list: (1) for release, music must not crackle during dips; (2) the movies are slow (lower
+  priority); (3) control mapping and resolution scaling in the port menu.
+- Sound: the sink is a queue; when the game falls behind the device runs dry and plays silence
+  between blocks (the crackle). Movies: SofDec decoded by the game's own code, frames through the
+  YUV converter (already per macroblock in pvr/core.cpp). Controls: the port menu's Controls row
+  already opens the binding screen (Switch buttons mapped in window_switch.cpp). Scale: --scale
+  exists at launch only.
+
 ## 2026-10-31: found it: the resolve's scissor; switch-test14
 
 - Capture replayer, second run (character select, captures 013 and 015; GPU ms per render):
