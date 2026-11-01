@@ -2,6 +2,16 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test17 result
+
+- Movie (opening): 0.74x to 0.90x, about 0.84x on average (switch-test15: 0.68x to 0.84x, about
+  0.77x); game thread 89 to 95%. Mark: marginally better, not full speed, low priority now.
+- Resolution switching (test16 and 17 logs) works: ADVERTISE (8C9000E8) gives 640x480, stages the
+  chosen size, menu changes apply at once. One fault: right after boot, before any module is
+  loaded, 0x8C900000 holds 0x4154414B ("KATA", leftover text), which pick_target took for a
+  gameplay module, so the first screens (logos, opening) drew at the in-game size. Fix: match the
+  first word against the gameplay modules' own first words instead.
+
 ## 2026-10-31: switch-test17 (the movie player at full optimisation, direct YUV writes)
 
 - games/sonicadv/CMakeLists.txt: gen/sonicadv_reloc_8ceb0000.cpp (MOVIE.BIN, Sofdec, 1.2 MB of
