@@ -4581,6 +4581,58 @@ index e6b08a9..dc83422 100644
      };
      std::map<unsigned, File> files_;
  };
+diff --git a/runtime/src/pvr/core.cpp b/runtime/src/pvr/core.cpp
+index 8300e77..3d5d39d 100644
+--- a/runtime/src/pvr/core.cpp
++++ b/runtime/src/pvr/core.cpp
+@@ -226,6 +226,15 @@ void Core::write_burst(std::uint32_t addr, const std::uint32_t* words) {
+ // TA_YUV_TEX_BASE into the 64-bit view of texture memory as the texture path above does.
+ void Core::yuv_word(std::uint32_t value) {
+     ++yuv_words;
++    if (yuv_fill_ + 4 <= yuv_mb_.size()) {  // SA-nx: the whole word fits (always, in practice)
++        std::memcpy(yuv_mb_.data() + yuv_fill_, &value, 4);  // little-endian: byte 0 first
++        yuv_fill_ += 4;
++        if (yuv_fill_ < yuv_mb_.size())
++            return;
++        yuv_fill_ = 0;
++        yuv_macroblock();
++        return;
++    }
+     for (unsigned b = 0; b < 4; ++b) {
+         if (yuv_fill_ >= yuv_mb_.size())
+             break;
+@@ -255,14 +264,29 @@ void Core::yuv_macroblock() {
+         return y[block * 64 + (row & 7u) * 8 + (x & 7u)];
+     };
+ 
++    // SA-nx: straight into video memory when nothing is watching stores. A movie writes about
++    // two million of these words a second, and each went through write32's dispatch and
++    // resolve() (switch-test15's movie profile: the converter and that path about 10%). Same
++    // bytes at the same place as the 64-bit view write below, and the same page notes for the
++    // texture cache, one per row.
++    const bool direct = !memory_.journaling && !memory_.tracing_writes();
++    std::uint8_t* const vram = memory_.vram();
+     for (unsigned row = 0; row < 16; ++row) {
++        const std::uint32_t row_off = base + (mby * 16 + row) * pitch + (mbx * 16) * 2;
+         for (unsigned x = 0; x < 16; x += 2) {
+             const unsigned c = (row >> 1) * 8 + (x >> 1);  // chroma is half resolution both ways
+             const std::uint32_t word = static_cast<std::uint32_t>(u[c]) | (luma(x, row) << 8) |
+                                        (static_cast<std::uint32_t>(v[c]) << 16) |
+                                        (luma(x + 1, row) << 24);
+-            const std::uint32_t off = base + (mby * 16 + row) * pitch + (mbx * 16 + x) * 2;
+-            memory_.write32(0x04000000u | (off & 0x00FFFFFCu), word);
++            const std::uint32_t off = row_off + x * 2;
++            if (direct) {
++                std::uint8_t* p = vram + (off & 0x007FFFFCu);  // area 1, the 64-bit view
++                std::memcpy(p, &word, 4);
++                if (x == 0 || (off & 0x00000FFCu) == 0)  // a row's first word, or a new page
++                    memory_.note_vram_write(p, 4);
++            } else {
++                memory_.write32(0x04000000u | (off & 0x00FFFFFCu), word);
++            }
+             ++texture_words;
+         }
+     }
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
 index b900b12..cd4d6ef 100644
 --- a/runtime/src/sh4/abi_bare.cpp
@@ -4941,4 +4993,44 @@ index 471e93b..dcd53b1 100644
 +    }
 +    CHECK(hits_a - a0 == 12);
 +    CHECK(hits_b - b0 == 12);
++}
+diff --git a/runtime/tests/test_pvr.cpp b/runtime/tests/test_pvr.cpp
+index d6e0738..3575775 100644
+--- a/runtime/tests/test_pvr.cpp
++++ b/runtime/tests/test_pvr.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <vector>
+ 
+ #include "dream/runtime/pvr/core.h"
+@@ -152,3 +153,30 @@ TEST_CASE("pvr: STARTRENDER completes on the clock; texture and frame-buffer pat
+         m.write32(0x10000000u + 4 * i, i == 0 ? Rig::pcw(pvr::kEndOfList, pvr::kOpaque) : 0);
+     CHECK(r.core.ta.chunks == before + 1);
+ }
++
++// SA-nx: the YUV converter writes its texels straight into video memory when nothing watches
++// stores; the bytes and the texture-cache page notes must be what the write32 path produced.
++TEST_CASE("pvr: YUV converter, direct video memory writes match the write32 path") {
++    auto run = [](bool journal) {
++        Rig r;
++        auto& m = r.sys.memory;
++        m.write32(0xA05F8000u + 0x148u, 0x00100000u);  // TA_YUV_TEX_BASE
++        m.write32(0xA05F8000u + 0x14Cu, 0x00000101u);  // TA_YUV_TEX_CTRL: 2x2 macroblocks
++        m.journaling = journal;                        // journaling forces the write32 path
++        for (unsigned mb = 0; mb < 4; ++mb)
++            for (unsigned w = 0; w < 96; ++w)
++                m.write32(0x10800000u, (mb * 977u + w * 2654435761u) ^ (w << 13));
++        m.journaling = false;
++        m.journal.clear();
++        std::vector<std::uint8_t> bytes(m.vram() + 0x100000, m.vram() + 0x100000 + 64 * 32);
++        std::vector<std::pair<std::uint32_t, std::uint32_t>> pages;
++        m.take_vram_writes([&](std::uint32_t b, std::uint32_t e) { pages.push_back({b, e}); });
++        CHECK(r.core.yuv_words == 4 * 96);
++        CHECK(r.core.texture_words == 4 * 128);
++        return std::make_pair(bytes, pages);
++    };
++    const auto slow = run(true), fast = run(false);
++    CHECK(fast.first == slow.first);
++    CHECK(fast.second == slow.second);
++    CHECK(std::count(fast.first.begin(), fast.first.end(), 0) < 64);  // it wrote the texture
 +}

@@ -2,6 +2,19 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test17 (the movie player at full optimisation, direct YUV writes)
+
+- games/sonicadv/CMakeLists.txt: gen/sonicadv_reloc_8ceb0000.cpp (MOVIE.BIN, Sofdec, 1.2 MB of
+  translated code) compiles with -O2 -fno-strict-aliasing (MSVC /O2); every other unit keeps
+  -O1. Only that unit and the runtime rebuild (ninja -n: 5 steps). switch-test15's movie profile:
+  translated code 64%, fn_0ceb1504 alone 32.5%.
+- pvr/core.cpp: yuv_word copies the whole word; yuv_macroblock writes its 128 texel words straight
+  into video memory (64-bit view, vram + (off & 0x7FFFFC)) with a page note per row and per new
+  page, unless the memory is journaling or tracing stores (then write32 as before). New test
+  "pvr: YUV converter, direct video memory writes match the write32 path": four macroblocks, the
+  video memory bytes and the dirty pages identical both ways.
+- No change to resolution (switch-test16 not yet reported).
+
 ## 2026-10-31: switch-test16 (resolution in play only, live)
 
 - Mark: test16 is only the resolution change; the movie work is test17.
