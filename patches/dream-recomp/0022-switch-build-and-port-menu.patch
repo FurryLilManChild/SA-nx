@@ -561,18 +561,19 @@ index 0000000..e55e77a
 +    return failures ? 1 : 0;
 +}
 diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
-index 08a8560..c3a145c 100644
+index 08a8560..f36eefa 100644
 --- a/cmake/DreamAddGame.cmake
 +++ b/cmake/DreamAddGame.cmake
-@@ -109,11 +109,20 @@ function(dream_add_game id)
+@@ -109,11 +109,21 @@ function(dream_add_game id)
    endif()
  
    separate_arguments(DREAM_TRANSLATE_EXTRA_FLAGS)
 +  # SA-nx: a cross build (the Switch) cannot run the dream-translate it builds; it names one built
-+  # for the build machine instead, and the translation then does not depend on the target's.
++  # for the build machine instead, and the translation then depends on that file (rebuilt by hand
++  # in the host tree), so an emitter change regenerates the game.
 +  if(DREAM_HOST_TRANSLATE)
 +    set(_translate ${DREAM_HOST_TRANSLATE})
-+    set(_translate_dep "")
++    set(_translate_dep ${DREAM_HOST_TRANSLATE})
 +  else()
 +    set(_translate dream-translate)
 +    set(_translate_dep dream-translate)
@@ -587,6 +588,34 @@ index 08a8560..c3a145c 100644
      COMMENT "Translating ${ARG_TITLE}"
      VERBATIM)
  
+diff --git a/docs/emitter-design.md b/docs/emitter-design.md
+index fa711c7..f6e5b8a 100644
+--- a/docs/emitter-design.md
++++ b/docs/emitter-design.md
+@@ -25,10 +25,19 @@ it).
+ 
+ ## Register model
+ 
+-Guest registers live in the context struct (`runtime/include/dream/runtime/sh4/ctx.h`), and the
+-emitter accesses them as `c.r[n]`. No register caching in host locals in v1: it doubles the
+-emitter's complexity for a gain the host compiler largely recovers on its own once the function is
+-inlined into a few hundred lines of straight-line C++. Revisit after WP1.5 numbers exist.
++Guest registers live in the context struct (`runtime/include/dream/runtime/sh4/ctx.h`). v1 accessed
++them as `c.r[n]` everywhere, expecting the host compiler to keep them in registers. It does not:
++every guest store goes through `Memory`, which the compiler must assume can alias the context, so
++each register was reloaded after every store (SA-nx measured this on the Switch).
++
++SA-nx: with `EmitOptions::local_regs` (the default; `--no-local-regs` turns it off) the general
++registers a function uses are host locals (`gpr0` to `gpr15`), loaded from `c.r` after the entry
++poll and before the resume switch. They are written back (spilled) before every point where code
++outside the body can see or change `c.r`, and read again after the ones that return: direct and
++indirect calls, interrupt polls that deliver, `write_sr` (a bank switch swaps r0-r7), `trapa`,
++`unimplemented`, and before `rte`, every return and every tail call. A resumed body loads its locals
++from `c.r` like a plain entry. Floating point registers, T, PR, MACH/MACL and the cycle counter stay
++in the context. `tests/sh4/programs/p14_bank` pins the bank-switch case.
+ 
+ The T bit is kept in `c.t` (0/1) and folded back into `c.sr` only where SR is observed (`STC SR`,
+ `RTE`, `TRAPA`, interrupt delivery). Every emitted comparison writes `c.t` directly.
 diff --git a/render/CMakeLists.txt b/render/CMakeLists.txt
 index 8dfec0a..de9b125 100644
 --- a/render/CMakeLists.txt
@@ -5052,3 +5081,418 @@ index d6e0738..3575775 100644
 +    CHECK(fast.second == slow.second);
 +    CHECK(std::count(fast.first.begin(), fast.first.end(), 0) < 64);  // it wrote the texture
 +}
+diff --git a/tests/sh4/programs/p14_bank.bin b/tests/sh4/programs/p14_bank.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c58169e9f66fc39d1d698fcec1f3e5a42a66f90
+GIT binary patch
+literal 36
+pcmZR4z{Js<sqjj}OTufFCZ8wk13r%?rfK@@{%jx?GdBY#0|3Wp36B5(
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/sh4/programs/p14_bank.s b/tests/sh4/programs/p14_bank.s
+new file mode 100644
+index 0000000..8fb33d5
+--- /dev/null
++++ b/tests/sh4/programs/p14_bank.s
+@@ -0,0 +1,26 @@
++! SA-nx: a register-bank switch in the middle of a function (LDC Rm,SR and LDC.L @Rm+,SR that flip
++! SR.RB). With guest registers in host locals (EmitOptions::local_regs) the locals must be written
++! back before write_sr swaps r0-r7 with the other bank and read again after it, or r0 keeps the
++! value of the wrong bank. Encoded by hand (no SH toolchain in the session that added it); the
++! words are listed so the .bin can be checked.
++	.text
++	.global _bank
++_bank:
++	mov	#1,r0		! e001  bank A r0 = 1
++	stc	sr,r8		! 0802
++	mov	r8,r9		! 6983
++	mov	#0x20,r10	! ea20
++	shll16	r10		! 4a28
++	shll8	r10		! 4a18  r10 = SR.RB
++	xor	r10,r9		! 29aa  r9 = SR with RB flipped
++	ldc	r9,sr		! 490e  to bank B
++	mov	#5,r0		! e005  bank B r0 = 5
++	ldc	r8,sr		! 480e  back to bank A: r0 is 1 again
++	stc	r0_bank,r2	! 0282  r2 = bank B r0 = 5
++	mov.l	r9,@-r15	! 2f96
++	ldc.l	@r15+,sr	! 4f07  to bank B through memory
++	mov	#6,r0		! e006  bank B r0 = 6
++	ldc	r8,sr		! 480e  back to bank A
++	stc	r0_bank,r3	! 0382  r3 = 6
++	rts			! 000b
++	nop			! 0009
+diff --git a/tests/sh4/programs/programs.cmake b/tests/sh4/programs/programs.cmake
+index bdb126a..c1c99f7 100644
+--- a/tests/sh4/programs/programs.cmake
++++ b/tests/sh4/programs/programs.cmake
+@@ -18,6 +18,8 @@ set(DREAM_SH4_PROGRAMS
+   "p12_selfcmp|p12_selfcmp.bin|0x8c010000|0x8c010000:0x8c01005c:selfcmp"
+   # Own base: position independent, kept out of the shared function table like p10.
+   "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail 0x8c040014:0x8c040020:tailpr_main2 0x8c040024:0x8c040032:tailpr_main3 0x8c040034:0x8c04003e:tailpr_jret"
++  # Own base: a bank switch inside a function (SA-nx, registers in host locals).
++  "p14_bank|p14_bank.bin|0x8c050000|0x8c050000:0x8c050024:bank"
+   # GCC-compiled C unit (tests/sh4/cprogs, `make specs` prints this line)
+   "c1_idioms|../cprogs/c1_idioms.bin|0x8c010000|0x8c010000:0x8c010024:div_mod 0x8c010028:0x8c010072:udiv_mix 0x8c010080:0x8c0100e4:dense_switch 0x8c0100e8:0x8c010100:mul64 0x8c010100:0x8c010132:sub64 0x8c010134:0x8c010178:pack_bytes 0x8c010180:0x8c0101d6:vec_transform 0x8c0101d8:0x8c010222:sort_words 0x8c010224:0x8c010246:dot3 0x8c010248:0x8c01026a:clamp_scale 0x8c010270:0x8c01027c:float_to_fixed 0x8c010280:0x8c010526:fib 0x8c01052c:0x8c010552:str_len 0x8c010554:0x8c010574:mem_copy 0x8c010578:0x8c0106b8:udivsi3_i4i 0x8c01059e:0x8c0105d4:udivsi3_i4i_059e 0x8c0105cc:0x8c0105d4:udivsi3_i4i_05cc 0x8c0105d4:0x8c010648:udivsi3_i4i_05d4 0x8c010648:0x8c010796:sdivsi3_i4i 0x8c010674:0x8c0106b8:sdivsi3_i4i_0674 0x8c01069a:0x8c0106b8:sdivsi3_i4i_069a"
+ )
+diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
+index 4cee63e..a3dead3 100644
+--- a/tests/sh4/test_programs.cpp
++++ b/tests/sh4/test_programs.cpp
+@@ -302,3 +302,16 @@ TEST_CASE("p7_fpuedge: FPU edge cases match the interpreter's captured state") {
+     }
+     CHECK(c.fpscr == 0x00040001u);
+ }
++
++TEST_CASE("p14_bank: SR.RB flips inside a function swap r0-r7 at the right point") {
++    dream::BareMemory m;
++    load_image(m, "p14_bank.bin", 0x8C050000);
++    Ctx c = fresh();
++    const std::uint32_t sp = c.r[15];
++    dream::gen::bank(c, m);
++    CHECK(c.r[0] == 1u);  // the bank the function started in
++    CHECK(c.r[2] == 5u);  // the other bank's r0 after the LDC switch
++    CHECK(c.r[3] == 6u);  // and after the LDC.L switch
++    CHECK(c.r[15] == sp);
++    CHECK(c.sr == 0x700000F0u);
++}
+diff --git a/translator/include/dream/translator/emit.h b/translator/include/dream/translator/emit.h
+index e47a463..7a46513 100644
+--- a/translator/include/dream/translator/emit.h
++++ b/translator/include/dream/translator/emit.h
+@@ -48,6 +48,9 @@ struct EmitOptions {
+     // it costs a constructor and destructor per call even when no harness is installed.
+     bool replay_hooks = false;
+     bool irq_checks = true;  // interrupt polls at entry and back-edges (ADR 7)
++    // SA-nx: guest general registers in host locals between calls, interrupt polls and returns
++    // (ADR 4), written back to the context around them. --no-local-regs turns it off.
++    bool local_regs = true;
+     bool overlay = false;    // table entries carry the code words they were translated from
+     // Split the unit's function bodies over this many translation units (SA-nx). A 6.7 MB binary
+     // emits about 160 MB of C++, which no compiler handles well as one file. Part 0 also holds the
+diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
+index 26c7374..d0d076a 100644
+--- a/translator/src/emit/emit.cpp
++++ b/translator/src/emit/emit.cpp
+@@ -39,7 +39,65 @@ std::string label(std::uint32_t a) {
+     std::snprintf(buf, sizeof buf, "L_%08x", a);
+     return buf;
+ }
++// SA-nx: guest general registers in host locals (EmitOptions::local_regs). While a body is being
++// emitted with it on, R(n) names a local and records it. Every point where code outside the body
++// can see or change c.r (a call, an interrupt poll that delivers, write_sr, trapa, rte, a return)
++// is bracketed by kSpill (locals to c.r) and kLoad (c.r to locals) markers, which run() replaces
++// with the registers the body used once it is complete. Between those points the compiler keeps
++// the registers in host registers instead of reloading them from the context after every store.
++struct LocalRegs {
++    bool on = false;
++    std::uint32_t used = 0;
++};
++LocalRegs g_local;
++const std::string kSpill = "\x01S\x01";
++const std::string kLoad = "\x01L\x01";
++const std::string kDecl = "\x01Q\x01";  // not D: \x01D would read as one hex escape
++std::string SP() {
++    return g_local.on ? kSpill : std::string();
++}
++std::string LD() {
++    return g_local.on ? kLoad : std::string();
++}
++// Replaces the markers in a finished body with the registers it names. The set comes from the
++// text itself, not from every R() call, because some lowerings name operands they do not use.
++std::string localise(const std::string& body) {
++    std::uint32_t used = 0;
++    for (std::size_t i = body.find("gpr"); i != std::string::npos; i = body.find("gpr", i + 3)) {
++        std::size_t j = i + 3;
++        unsigned n = 0;
++        while (j < body.size() && body[j] >= '0' && body[j] <= '9') n = n * 10 + (body[j++] - '0');
++        if (j > i + 3 && n < 16)
++            used |= 1u << n;
++    }
++    std::string decl, spill, load;
++    for (unsigned n = 0; n < 16; ++n)
++        if (used & (1u << n)) {
++            const std::string k = std::to_string(n);
++            decl += (decl.empty() ? "    std::uint32_t " : ", ") + std::string("gpr") + k + " = c.r[" + k + "]";
++            spill += "c.r[" + k + "] = gpr" + k + "; ";
++            load += " gpr" + k + " = c.r[" + k + "];";
++        }
++    if (!decl.empty())
++        decl += ";\n";
++    std::string out;
++    out.reserve(body.size() + body.size() / 4);
++    for (std::size_t i = 0; i < body.size();) {
++        if (body[i] == '\x01' && i + 2 < body.size() && body[i + 2] == '\x01') {
++            const char k = body[i + 1];
++            out += k == 'S' ? spill : k == 'L' ? load : decl;
++            i += 3;
++        } else {
++            out += body[i++];
++        }
++    }
++    return out;
++}
+ std::string R(unsigned n) {
++    if (g_local.on) {
++        g_local.used |= 1u << n;
++        return "gpr" + std::to_string(n);
++    }
+     return "c.r[" + std::to_string(n) + "]";
+ }
+ std::string S32(const std::string& e) {
+@@ -265,6 +323,8 @@ public:
+         if (opt_.irq_checks)
+             out << "    if (c.cycles >= c.next_event) { c.pc = resume_pc ? resume_pc : "
+                 << hexu(spec_.entry) << "; deliver_irq(c, m); }\n";
++        g_local = LocalRegs{opt_.local_regs, 0};
++        out << kDecl;
+         out << "    if (resume_pc) {\n        switch (resume_pc) {\n";
+         for (std::uint32_t b : blocks_)
+             out << "            case " << hexu(b) << ": goto " << label(b) << ";\n";
+@@ -295,20 +355,28 @@ public:
+                         // landing one instruction into a prologue, or shared code): control
+                         // continues in that function, so tail-call it.
+                         out << "    // falls through into the function at " << hex(stop) << "\n";
+-                        out << "    " << tail_call_expr(stop) << " return;\n";
++                        out << "    " << SP() << tail_call_expr(stop) << " return;\n";
+                     } else {
+                         // Control continues at `stop`, which no function of this unit starts at:
+                         // hand it to the runtime (the miss handler interprets it in dev builds
+                         // and it shows up in the untranslated-target log either way).
+                         out << "    // falls off the end of the function range at " << hex(stop)
+                             << "\n";
+-                        out << "    c.pc = " << hexu(stop) << "; call_indirect(c, m, " << hexu(stop)
++                        out << "    c.pc = " << hexu(stop) << "; " << SP() << "call_indirect(c, m, " << hexu(stop)
+                             << "); return;\n";
+                     }
+                 }
+             }
+         }
+-        out << "}\n";
++        // Unreachable when every path ends in a transfer; keeps c.r right if one does not.
++        out << SP() << "}\n";
++        std::string body = out.str();
++        if (g_local.on)
++            body = localise(body);
++        g_local = LocalRegs{};
++        out.str("");
++        out.clear();
++        out << body;
+         out << "void " << name << "(Ctx& c, Memory& m) { ";
+         if (opt_.replay_hooks) {
+             // The mode this function was compiled for travels with the hook, so a development run
+@@ -891,8 +959,8 @@ private:
+     std::string irq_check_if_backedge(std::uint32_t target, std::uint32_t pc) const {
+         // Braced: GCC's -Wmisleading-indentation rejects `if (x) f(); goto L;` on one line.
+         return (opt_.irq_checks && target <= pc)
+-                   ? "if (c.cycles >= c.next_event) { c.pc = " + hexu(target) +
+-                         "; deliver_irq(c, m); } "
++                   ? "if (c.cycles >= c.next_event) { c.pc = " + hexu(target) + "; " + SP() +
++                         "deliver_irq(c, m); " + LD() + "} "
+                    : "";
+     }
+ 
+@@ -916,7 +984,7 @@ private:
+                 out << "    if (" << cond << ") { c.cycles += 1; " << irq_check_if_backedge(t, pc)
+                     << "goto " << label(t) << "; }\n";
+             } else {
+-                out << "    if (" << cond << ") { c.cycles += 1; " << tail_call_expr(t)
++                out << "    if (" << cond << ") { c.cycles += 1; " << SP() << tail_call_expr(t)
+                     << " return; }\n";
+             }
+             return pc + 2;
+@@ -932,7 +1000,7 @@ private:
+         const bool illegal_slot =
+             sh4::has_delay_slot(slot.op) || slot.op == Op::BT || slot.op == Op::BF;
+         const std::string slot_code = illegal_slot
+-                                          ? "unimplemented(c, " + hexu(slot.raw) + ", " +
++                                          ? SP() + "unimplemented(c, " + hexu(slot.raw) + ", " +
+                                                 hexu(pc + 2) + "); // illegal slot instruction"
+                                           : lower(pc + 2, slot);
+         auto emit_slot = [&] {
+@@ -954,7 +1022,7 @@ private:
+                     out << "        if (taken) { " << irq_check_if_backedge(t, pc) << "goto "
+                         << label(t) << "; }\n";
+                 } else {
+-                    out << "        if (taken) { " << tail_call_expr(t) << " return; }\n";
++                    out << "        if (taken) { " << SP() << tail_call_expr(t) << " return; }\n";
+                 }
+                 break;
+             }
+@@ -965,7 +1033,7 @@ private:
+                     out << "        " << irq_check_if_backedge(t, pc) << "goto " << label(t)
+                         << ";\n";
+                 } else {
+-                    out << "        " << tail_call_expr(t) << " return;\n";
++                    out << "        " << SP() << tail_call_expr(t) << " return;\n";
+                 }
+                 break;
+             }
+@@ -973,7 +1041,8 @@ private:
+                 const std::uint32_t t = sh4::pcrel_target(ins, pc);
+                 out << "        c.pr = " << hexu(pc + 4) << ";\n";
+                 emit_slot();
+-                out << "        c.pc = " << hexu(pc) << "; " << call_target_expr(t) << "\n";
++                out << "        c.pc = " << hexu(pc) << "; " << SP() << call_target_expr(t) << LD()
++                    << "\n";
+                 break;
+             }
+             case Op::BSRF:
+@@ -987,8 +1056,8 @@ private:
+                 if (constant && known_.count(direct)) {
+                     out << "        c.pr = " << hexu(pc + 4) << ";\n";
+                     emit_slot();
+-                    out << "        c.pc = " << hexu(pc) << "; " << call_target_expr(direct)
+-                        << "\n";
++                    out << "        c.pc = " << hexu(pc) << "; " << SP() << call_target_expr(direct)
++                        << LD() << "\n";
+                     ++result_.direct_calls;
+                     break;
+                 }
+@@ -999,7 +1068,8 @@ private:
+                     out << "        const std::uint32_t target = " << R(ins.m) << ";\n";
+                 out << "        c.pr = " << hexu(pc + 4) << ";\n";
+                 emit_slot();
+-                out << "        c.pc = " << hexu(pc) << "; call_indirect(c, m, target);\n";
++                out << "        c.pc = " << hexu(pc) << "; " << SP() << "call_indirect(c, m, target);"
++                    << LD() << "\n";
+                 break;
+             }
+             case Op::BRAF:
+@@ -1021,7 +1091,7 @@ private:
+                         out << "            case " << hexu(t) << ": "
+                             << irq_check_if_backedge(t, pc) << "goto " << label(t) << ";\n";
+                     }
+-                    out << "            default: c.pc = " << hexu(pc)
++                    out << "            default: " << SP() << "c.pc = " << hexu(pc)
+                         << "; set_tail_entry_pr(entry_pr, target); jump_indirect(c, m, target); "
+                            "return;\n";
+                     out << "        }\n";
+@@ -1029,6 +1099,8 @@ private:
+                     if (ins.op == Op::BRAF)
+                         note(pc, ins,
+                              "computed jump with no recovered table: emitted as tail call");
++                    if (g_local.on)
++                        out << "        " << SP() << "\n";
+                     // A jump to the address this function must return to is a return: Sonic
+                     // Adventure's task yield (0x0C099990) ends `mov.l @r15+,r0; jmp @r0`. As a
+                     // tail call it re-entered the caller's middle as a second activation, and
+@@ -1049,6 +1121,8 @@ private:
+                 // and run_guest re-enters the target. A resumed body returns to run_guest anyway.
+                 out << "        const std::uint32_t rts_target = c.pr;\n";
+                 emit_slot();
++                if (g_local.on)
++                    out << "        " << SP() << "\n";
+                 if (opt_.trace)
+                     out << "        trace_return(c, m, " << hexu(pc) << ");\n";
+                 out << "        if (!resume_pc && rts_target != entry_pr) nonlocal_return(c, m, "
+@@ -1057,13 +1131,16 @@ private:
+                 break;
+             case Op::RTE:
+                 emit_slot();
++                if (g_local.on)
++                    out << "        " << SP() << "\n";
+                 // Closing a delivered exception: unwind to the delivery point. Otherwise the RTE
+                 // is a jump and control continues at SPC (docs/emitter-design.md).
+                 out << "        c.pc = " << hexu(pc)
+                     << "; if (rte(c, m)) return; nonlocal_return(c, m, c.pc);\n";
+                 break;
+             default:
+-                out << "        unimplemented(c, " << hexu(ins.raw) << ", " << hexu(pc) << ");\n";
++                out << "        " << SP() << "unimplemented(c, " << hexu(ins.raw) << ", " << hexu(pc)
++                    << ");\n";
+                 break;
+         }
+         out << "    }\n";
+@@ -1265,7 +1342,7 @@ private:
+                                 std::to_string(m) + "));"
+                           : "m.write32(" + rn + " + " + r0 + ", f2u(" + frm + "));";
+             default:
+-                return "unimplemented(c, " + hexu(ins.raw) + ", 0u);";
++                return SP() + "unimplemented(c, " + hexu(ins.raw) + ", 0u);";
+         }
+     }
+ 
+@@ -1525,7 +1602,7 @@ private:
+             case Op::NOP:
+                 return "/* nop */";
+             case Op::LDC_SR:
+-                return "write_sr(c, " + rm + ");";
++                return SP() + "write_sr(c, " + rm + ");" + LD();
+             case Op::LDC_GBR:
+                 return "c.gbr = " + rm + ";";
+             case Op::LDC_VBR:
+@@ -1539,7 +1616,7 @@ private:
+             case Op::LDC_BANK:
+                 return bank + " = " + rm + ";";
+             case Op::LDC_L_SR:
+-                return "write_sr(c, m.read32(" + rm + ")); " + rm + " += 4;";
++                return SP() + "write_sr(c, m.read32(" + rm + "));" + LD() + " " + rm + " += 4;";
+             case Op::LDC_L_GBR:
+                 return "c.gbr = m.read32(" + rm + "); " + rm + " += 4;";
+             case Op::LDC_L_VBR:
+@@ -1609,7 +1686,7 @@ private:
+             case Op::STS_L_PR:
+                 return rn + " -= 4; m.write32(" + rn + ", c.pr);";
+             case Op::TRAPA:
+-                return "c.pc = " + hexu(pc) + "; trapa(c, m, " + d + ");";
++                return "c.pc = " + hexu(pc) + "; " + SP() + "trapa(c, m, " + d + ");" + LD();
+             case Op::MOVCA_L:
+                 return "m.write32(" + rn + ", " + r0 + ");";
+             case Op::PREF:
+@@ -1672,7 +1749,7 @@ private:
+             default:
+                 ++result_.unlowered;
+                 note(pc, ins, "not lowered yet");
+-                return "unimplemented(c, " + hexu(ins.raw) + ", " + hexu(pc) + ");";
++                return SP() + "unimplemented(c, " + hexu(ins.raw) + ", " + hexu(pc) + ");";
+         }
+     }
+ 
+diff --git a/translator/src/main.cpp b/translator/src/main.cpp
+index 4ef6d21..8cedc09 100644
+--- a/translator/src/main.cpp
++++ b/translator/src/main.cpp
+@@ -3,7 +3,7 @@
+ //   dream-translate --version
+ //   dream-translate disasm --image FILE --base ADDR [--start ADDR] [--count N]
+ //   dream-translate emit   --image FILE --base ADDR --function ENTRY:END[:name]... --out FILE.cpp
+-//                          [--header FILE.h] [--no-fold] [--trace] [--no-irq]
++//                          [--header FILE.h] [--no-fold] [--trace] [--no-irq] [--no-local-regs]
+ #include <algorithm>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -34,12 +34,12 @@ int usage(int code) {
+                  "functions.json] [--no-pointers] [--no-sweep]\n"
+                  "  dream-translate emit --image FILE --base ADDR --function ENTRY:END[:name]... "
+                  "--out FILE.cpp\n"
+-                 "                       [--header FILE.h] [--no-fold] [--trace] [--no-irq] "
++                 "                       [--header FILE.h] [--no-fold] [--trace] [--no-irq] [--no-local-regs] "
+                  "[--symbols FILE.tsv]\n"
+                  "  dream-translate symbols --ghidra functions.json --out symbols.tsv "
+                  "[--keep-conflicts]\n"
+                  "  dream-translate game --config games/ID/ID.toml --out-dir DIR [--no-fold] "
+-                 "[--trace] [--no-irq]\n",
++                 "[--trace] [--no-irq] [--no-local-regs]\n",
+                  dream::translator::version().data());
+     return code;
+ }
+@@ -170,6 +170,8 @@ int cmd_emit(int argc, char** argv) {
+             opt.trace = true;
+         else if (!std::strcmp(argv[i], "--no-irq"))
+             opt.irq_checks = false;
++        else if (!std::strcmp(argv[i], "--no-local-regs"))
++            opt.local_regs = false;
+         else if (!std::strcmp(argv[i], "--functions") && i + 1 < argc) {
+             std::string err;
+             if (!dream::translator::load_functions_json(argv[++i], fns, err)) {
+@@ -463,6 +465,8 @@ int cmd_game(int argc, char** argv) {
+             opt.trace = true;
+         else if (!std::strcmp(argv[i], "--no-irq"))
+             opt.irq_checks = false;
++        else if (!std::strcmp(argv[i], "--no-local-regs"))
++            opt.local_regs = false;
+         else if (!std::strcmp(argv[i], "--parts") && i + 1 < argc)
+             opt.parts = static_cast<unsigned>(std::max(1, std::atoi(argv[++i])));
+         else

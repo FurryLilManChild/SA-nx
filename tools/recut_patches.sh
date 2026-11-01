@@ -19,7 +19,7 @@ for f in $changed; do
     [ -f "$D/$f" ] || continue
     if ! cmp -s "$D/$f" "$W/$f"; then mkdir -p "$W/$(dirname "$f")"; cp "$D/$f" "$W/$f"; fi
 done
-git -C "$W" add -A && git -C "$W" diff --cached > "$P/0022-switch-build-and-port-menu.patch"
+git -C "$W" add -A && git -C "$W" diff --cached --binary > "$P/0022-switch-build-and-port-menu.patch"
 git -C "$W" -c user.name=x -c user.email=x@x commit -qm 22
 for f in $MEM; do cp "$D/$f" "$W/$f"; done
 git -C "$W" add -A && git -C "$W" diff --cached > "$P/0023-inline-main-ram-access.patch"

@@ -2,6 +2,28 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test19: guest registers in host locals (the "register work")
+
+- Release 0.5.0 is on hold at Mark's request so the register work goes first.
+- Cause being targeted: the emitter wrote every guest register as `c.r[n]`. Guest stores go
+  through `Memory`, which the compiler must assume can alias the context, so after each store every
+  live register was read back from memory. test18 showed -O2 does not help, which fits: the
+  reloads are required by the code's shape, not by the optimisation level.
+- Change (dream-recomp, in patch 0022): `EmitOptions::local_regs`, on by default,
+  `--no-local-regs` to turn it off. A function's general registers are host locals `gpr0`..`gpr15`,
+  loaded after the entry poll, written back to the context before calls, delivering interrupt
+  polls, `write_sr`, `trapa`, `rte`, tail calls and returns, and read back after the ones that
+  return. Design in dream-recomp `docs/emitter-design.md`, "Register model".
+- Differential test: every existing emitter test now runs with it on (13 cases, 35,817 assertions:
+  the golden replay against Flycast's recorded states, the GCC-compiled C unit, longjmp,
+  RTE-as-jump, tail calls), plus a new program `p14_bank` that flips SR.RB twice inside one
+  function and checks r0 comes from the right bank each time.
+- Build fix: with a host dream-translate (`DREAM_HOST_TRANSLATE`), the game's translation now
+  depends on that file, so an emitter change regenerates the game.
+- `tools/recut_patches.sh` writes 0022 with `--binary` (the test program's .bin).
+- Not done yet: T, PR and the FP registers stay in the context; spin-loop marking beyond the one
+  idle skip. Expectation: a real but unmeasured gain on the game thread; the Switch run decides.
+
 ## 2026-11-01: switch-test18 result: where stock clocks stand
 
 - One launch: Emerald Coast at 1785/614/1600 (GPU 614 this time), then stock (1020/307/1331),
