@@ -2,6 +2,22 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test16 (resolution in play only, live)
+
+- Mark: test16 is only the resolution change; the movie work is test17.
+- PortOptions::scale is now percent (100, 150, 200; SCALE=1, 1.5, 2; test15's 3 reads as 2), row
+  "RESOLUTION IN GAME". The launcher keeps the 1x target (base_) and makes 1.5x (960x720) and 2x
+  (1280x960) targets the first time play needs them; pick_target, before each render with the
+  render thread idle, picks one: the port menu's size when the module at 0x8C900000 starts with
+  code (gameplay), 1x when it starts with a table of addresses into itself (ADVERTISE: title,
+  menus, character select; SUMMARY) or is empty. On a switch the old target is finished and the
+  new one rebinds the per-pixel set and pipelines (Offscreen::rebind_oit). The log prints each
+  module change ("module: gameplay ..." with the first word) and each resolution change. --scale
+  still fixes one size for the run (the PC). The options are no longer read before the window.
+- rcap RCAP_SWITCH: one renderer through 1x, 2x, 1x, 1.5x, 2x, 1x on captures 013 and 002: every
+  1x frame byte-identical to the plain 1x render, every 2x frame to the plain 2x render; the 1.5x
+  frames look right.
+
 ## 2026-10-31: switch-test15 result; movies measured
 
 - Mark: sound, controls and everything else as wanted; resolution: 2x good in game but menus and

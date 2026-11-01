@@ -32,6 +32,20 @@ int main(int argc,char**argv){
   off.readback = std::getenv("RCAP_NO_READBACK") == nullptr;  // pixels() then copies on demand
   off.lean_oit = std::getenv("RCAP_LEAN") != nullptr;  // the 8-layer resolve
   r.sort_triangles = std::getenv("RCAP_TRIANGLES") != nullptr;  // per-triangle sort (with DREAM_NO_OIT=1)
+  // RCAP_SWITCH=PREFIX: the launcher's resolution switching (switch-test16): one renderer, targets
+  // at 1x, 2x and 1.5x used in turn as pick_target does, each frame written to PREFIX-N-WxH.ppm.
+  if(const char* pre=std::getenv("RCAP_SWITCH")){
+    vk::Offscreen o2,o15; if(!o2.create(ctx,1280,960)||!o15.create(ctx,960,720)){std::puts("targets");return 1;}
+    vk::Offscreen* seq[]={&off,&o2,&off,&o15,&o2,&off};
+    for(int i=0;i<6;++i){
+      vk::Offscreen* t=seq[i]; t->readback=true; t->lean_oit=off.lean_oit;
+      if(i>0){seq[i-1]->finish(); t->rebind_oit();}
+      if(!t->render(r,dl.frame(),g)){std::printf("render %d: %s\n",i,t->error().c_str());return 1;}
+      const std::uint32_t* p=t->pixels(); char name[512]; std::snprintf(name,sizeof name,"%s-%d-%ux%u.ppm",pre,i,t->width(),t->height());
+      FILE*f=std::fopen(name,"wb"); std::fprintf(f,"P6 %u %u 255\n",t->width(),t->height());
+      for(std::uint32_t k=0;k<t->width()*t->height();k++){unsigned char c[3]={(unsigned char)p[k],(unsigned char)(p[k]>>8),(unsigned char)(p[k]>>16)};std::fwrite(c,1,3,f);}
+      std::fclose(f); std::printf("wrote %s\n",name);}
+    return 0;}
   if(!off.render(r,dl.frame(),g)){std::printf("render: %s\n",off.error().c_str());return 1;}
   const std::uint32_t* px0=off.pixels(); (void)px0;
   std::printf("layers per pixel (estimate): %.2f, translucent polygons %zu, fragments %u of %u, long lists %llu, unterminated %llu, longest %u\n", static_cast<double>(off.stats.depth_max), dl.frame().lists[2].size(), off.stats.fragments_max, off.stats.capacity, (unsigned long long)off.stats.long_lists, (unsigned long long)off.stats.unterminated, off.stats.longest_walk);
