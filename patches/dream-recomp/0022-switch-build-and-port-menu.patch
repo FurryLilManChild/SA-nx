@@ -3121,7 +3121,7 @@ index 0000000..a95478f
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..df6edeb 100644
+index 824d0b4..77143bf 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,29 @@
@@ -3162,7 +3162,7 @@ index 824d0b4..df6edeb 100644
  #include "dream/runtime/sh4/dmac.h"
  #include "dream/runtime/sh4/ops.h"
  #include "dream/runtime/system.h"
-@@ -46,14 +70,18 @@
+@@ -46,12 +70,16 @@
  #include "dream/audio/sink.h"
  #endif
  #ifdef DREAM_WITH_RENDERER
@@ -3177,11 +3177,8 @@ index 824d0b4..df6edeb 100644
  #include "dream/render/input_menu.h"
 +#include "dream/render/port_menu.h"
  #include "dream/render/overlay.h"
--#include "dream/render/vk/offscreen.h"
-+#include "dream/render/vk/off_->h"
+ #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
- #include "dream/render/vk/renderer.h"
- #include "dream/render/vk/window.h"
 @@ -123,6 +151,7 @@ void print_guest_backtrace() {
  // direction: its framebuffer emulation is off unless a title needs it.
  struct Live {
