@@ -2,6 +2,26 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test15 (smooth sound through dips, resolution, movie marking)
+
+- Sound: dream/audio/stretch.h, a WSOLA time-stretcher (hop 512, Hann windows of 1024, search
+  plus or minus 256 frames on a mono mix, coarse then fine). Both sinks (SDL2 on the Switch, SDL3
+  on the PC) now feed it: every 512 input frames the ratio follows the device queue (none at 4096
+  queued or more, up to 2.5x as it empties, eased 30% per step), so a slow stretch is heard as
+  the same sound played longer at the same pitch rather than gaps. audio/tests/test_stretch.cpp
+  (built by hand): ratio 1 passes the input through exactly after the first hop; 1.18, 1.5 and 2
+  give 1.17x, 1.48x, 1.97x the length at 440 Hz (440.0 to 440.5) with no gap over one frame; a
+  ratio changing every block gives no step larger than the tone's own (753 against 752).
+  Sink::stretch = false restores the old queue. Report line gains frames out and frames added.
+- Resolution: PortOptions::scale (SCALE=1..3), port menu row "RESOLUTION (ON RESTART)"; the
+  launcher reads it from the options file before the renderer's targets are made, unless
+  --scale is given. rcap gains RCAP_SCALE: captures 013 and 002 at 2x draw correctly (downsized,
+  1,903 and 7,420 pixels differ by more than 32 levels, all edges). test_port_menu covers the row.
+- Movies: the timing log gains a sound/movie line (ms of sound added by stretching, YUV converter
+  words and frames per window); the profiler gains pc_movie and stacks_movie (dream_port_movie:
+  YUV words fed in the last half second).
+- Controls: already in the port menu (binding screen); Mark to try it on the Switch.
+
 ## 2026-10-31: switch-test14 result: menus and character select fixed
 
 - Replayer on Mark's Switch with the fix: character select 3.0 ms GPU per render the game's way

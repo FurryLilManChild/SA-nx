@@ -20,7 +20,8 @@ int main(int argc,char**argv){
   if(ta.empty()||vram.empty()||regsb.size()<8192){std::puts("missing capture files");return 2;}
   std::vector<std::uint32_t> regs(regsb.size()/4); std::memcpy(regs.data(),regsb.data(),regsb.size());
   vk::Context ctx; if(!ctx.create({},std::getenv("RCAP_VALIDATE")!=nullptr)){std::printf("context: %s\n",ctx.error().c_str());return 1;}
-  vk::Offscreen off; if(!off.create(ctx,640,480)){std::printf("offscreen: %s\n",off.error().c_str());return 1;}
+  const unsigned sc=std::getenv("RCAP_SCALE")?unsigned(std::atoi(std::getenv("RCAP_SCALE"))):1u;  // SA-nx: --scale
+  vk::Offscreen off; if(!off.create(ctx,640*sc,480*sc)){std::printf("offscreen: %s\n",off.error().c_str());return 1;}
   vk::Renderer r; if(!r.create(ctx,off.render_pass())){std::printf("renderer: %s\n",r.error().c_str());return 1;}
   auto pf=static_cast<PaletteFormat>(regs[0x108/4]&3);
   r.set_memory(reinterpret_cast<const std::uint8_t*>(vram.data()),vram.size(),regs.data()+0x1000/4,pf);

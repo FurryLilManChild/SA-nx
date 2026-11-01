@@ -36,19 +36,19 @@ index dc300c8..9cdc0b2 100644
  if(NOT SDL3_FOUND)
    message(STATUS "dream::audio: no SDL3; playback is skipped")
 diff --git a/audio/include/dream/audio/sink.h b/audio/include/dream/audio/sink.h
-index aad4553..e9f8450 100644
+index aad4553..097e9eb 100644
 --- a/audio/include/dream/audio/sink.h
 +++ b/audio/include/dream/audio/sink.h
-@@ -16,8 +16,6 @@
+@@ -16,7 +16,7 @@
  #include <string>
  #include <vector>
  
 -struct SDL_AudioStream;
--
++#include "dream/audio/stretch.h"
+ 
  namespace dream::audio {
  
- class Sink {
-@@ -32,7 +30,7 @@ public:
+@@ -32,7 +32,7 @@ public:
      // stopping a run for.
      bool open(unsigned rate = 44100);
      void close();
@@ -57,7 +57,7 @@ index aad4553..e9f8450 100644
  
      // One stereo sample from the AICA. Buffered until a block is worth sending.
      void push(std::int16_t left, std::int16_t right);
-@@ -48,13 +46,19 @@ public:
+@@ -48,13 +48,34 @@ public:
      // picture.
      unsigned high_water = 8192;
  
@@ -65,10 +65,25 @@ index aad4553..e9f8450 100644
 +    float volume = 1.0f;
 +
      std::uint64_t pushed = 0, dropped = 0, blocks = 0;
++    // SA-nx: time-stretching (stretch.h). When the queue falls below `stretch_target` frames the
++    // sound is stretched so the device does not run dry while the guest is slow: up to
++    // `max_stretch` times as long, eased in and out. `stretch = false` queues the AICA's samples
++    // as they come, as before. out_frames counts what reached the device; stretched_frames the
++    // part of that added by stretching.
++    bool stretch = true;
++    unsigned stretch_target = 4096;
++    double max_stretch = 2.5;
++    std::uint64_t out_frames = 0, stretched_frames = 0;
      const std::string& error() const noexcept { return error_; }
  
  private:
      static constexpr std::size_t kBlockFrames = 512;  // stereo frames per send
++    // SA-nx: the stretcher, its input count since the last step, and the eased ratio.
++    void emit(const std::int16_t* stereo, std::size_t frames);
++    void queue_block();
++    Stretcher stretcher_;
++    std::size_t since_step_ = 0;
++    double ratio_ = 1.0;
  
 -    SDL_AudioStream* stream_ = nullptr;
 +    // The SDL3 stream (an SDL_AudioStream*), opaque here so this header names no SDL version:
@@ -78,12 +93,151 @@ index aad4553..e9f8450 100644
      std::vector<std::int16_t> block_;
      unsigned rate_ = 44100;
      std::string error_;
+diff --git a/audio/include/dream/audio/stretch.h b/audio/include/dream/audio/stretch.h
+new file mode 100644
+index 0000000..170a9ef
+--- /dev/null
++++ b/audio/include/dream/audio/stretch.h
+@@ -0,0 +1,133 @@
++// SA-nx: time-stretching for the sound output (WSOLA: waveform-similarity overlap-add).
++//
++// The AICA makes one sample per 44.1 kHz tick of the guest's clock. When the guest falls behind
++// real time, fewer samples arrive than the device plays, the device's queue runs dry and the gaps
++// between blocks are heard as crackles and pops. Stretching makes the audio that did arrive last
++// longer instead, at the same pitch: windows of the input are laid one after the other with half
++// overlaps, each taken from wherever around its nominal position it best continues the previous
++// one, and the input advances by less than the output does. Sound stays continuous; the music's
++// tempo follows the game's for the length of a dip.
++//
++// At a ratio of 1 every window is taken at its nominal position and the overlapping Hann windows
++// add back to the input exactly (after the first hop, which fades in), so full speed passes
++// through unchanged.
++// Header-only, with no SDL, so it is tested without a sound device.
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace dream::audio {
++
++class Stretcher {
++public:
++    static constexpr std::size_t kHop = 512;         // output frames per step (11.6 ms)
++    static constexpr std::size_t kWindow = 2 * kHop;  // window length
++    static constexpr std::size_t kSearch = 256;      // how far around nominal a window may move
++
++    Stretcher() {
++        for (std::size_t i = 0; i < kWindow; ++i)
++            window_[i] = 0.5f - 0.5f * std::cos(6.283185307179586f * static_cast<float>(i) /
++                                                static_cast<float>(kWindow));
++        tail_.assign(kHop * 2, 0.0f);
++    }
++
++    // One stereo frame of input.
++    void push(std::int16_t l, std::int16_t r) {
++        in_.push_back(static_cast<float>(l));
++        in_.push_back(static_cast<float>(r));
++    }
++
++    // Emits every output hop the buffered input allows, `ratio` output frames per input frame
++    // (1 = unchanged, 2 = twice as long). emit(const std::int16_t* stereo, std::size_t frames).
++    template <class Emit>
++    void process(double ratio, Emit&& emit) {
++        ratio = std::clamp(ratio, 1.0, 4.0);
++        for (;;) {
++            const std::size_t frames = in_.size() / 2;
++            const std::size_t nominal = static_cast<std::size_t>(pos_);
++            if (nominal + kSearch + kWindow > frames)
++                break;
++            std::size_t start = nominal;
++            if (have_prev_) {
++                const std::size_t target = prev_ + kHop;  // where the last window would continue
++                if (ratio > 1.0005 || target != nominal)
++                    start = best_match(nominal, target);
++            }
++            for (std::size_t i = 0; i < kHop; ++i)
++                for (std::size_t c = 0; c < 2; ++c) {
++                    const float v = tail_[i * 2 + c] + in_[(start + i) * 2 + c] * window_[i];
++                    out_[i * 2 + c] = static_cast<std::int16_t>(std::clamp(v, -32768.0f, 32767.0f));
++                    tail_[i * 2 + c] = in_[(start + kHop + i) * 2 + c] * window_[kHop + i];
++                }
++            emit(out_, kHop);
++            have_prev_ = true;
++            prev_ = start;
++            pos_ += static_cast<double>(kHop) / ratio;
++            // Drop input nothing can reach any more.
++            const std::size_t keep_from = std::min<std::size_t>(
++                prev_, static_cast<std::size_t>(pos_) > kSearch ? static_cast<std::size_t>(pos_) - kSearch : 0);
++            if (keep_from >= 4096) {
++                in_.erase(in_.begin(), in_.begin() + static_cast<std::ptrdiff_t>(keep_from * 2));
++                prev_ -= keep_from;
++                pos_ -= static_cast<double>(keep_from);
++            }
++        }
++    }
++
++    // Frames waiting that no output covers yet (for a caller that wants to flush at the end).
++    std::size_t buffered() const { return in_.size() / 2; }
++    std::uint64_t moved = 0;  // windows taken away from their nominal position (diagnostics)
++
++private:
++    // The start within kSearch of `nominal` whose first hop best matches the hop at `target` (the
++    // natural continuation of the last window). Coarse every other frame on a mono mix, then
++    // refined one frame either side.
++    std::size_t best_match(std::size_t nominal, std::size_t target) {
++        const std::size_t lo = nominal > kSearch ? nominal - kSearch : 0;
++        const std::size_t hi = nominal + kSearch;
++        auto score = [this, target](std::size_t s, std::size_t step) {
++            double sum = 0.0;
++            for (std::size_t i = 0; i < kHop; i += step) {
++                const float a = in_[(s + i) * 2] + in_[(s + i) * 2 + 1];
++                const float b = in_[(target + i) * 2] + in_[(target + i) * 2 + 1];
++                sum += static_cast<double>(a) * b;
++            }
++            return sum;
++        };
++        std::size_t best = nominal;
++        double best_score = -1e300;
++        for (std::size_t s = lo; s <= hi; s += 2) {
++            const double v = score(s, 2);
++            if (v > best_score) {
++                best_score = v;
++                best = s;
++            }
++        }
++        const std::size_t c = best;
++        best_score = -1e300;
++        for (std::size_t s = c > lo ? c - 1 : c; s <= std::min(c + 1, hi); ++s) {
++            const double v = score(s, 1);
++            if (v > best_score) {
++                best_score = v;
++                best = s;
++            }
++        }
++        if (best != nominal)
++            ++moved;
++        return best;
++    }
++
++    std::vector<float> in_;  // stereo, interleaved
++    std::vector<float> tail_;
++    float window_[kWindow];
++    std::int16_t out_[kHop * 2];
++    double pos_ = 0.0;
++    std::size_t prev_ = 0;
++    bool have_prev_ = false;
++};
++
++}  // namespace dream::audio
 diff --git a/audio/src/sdl2_sink.cpp b/audio/src/sdl2_sink.cpp
 new file mode 100644
-index 0000000..cc03bf7
+index 0000000..7524134
 --- /dev/null
 +++ b/audio/src/sdl2_sink.cpp
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,113 @@
 +// See sink.h. SA-nx: the Switch's playback, through devkitPro's switch-sdl2 (audren underneath),
 +// which converts the AICA's 44.1 kHz to the console's 48 kHz. The same queue policy as the SDL3
 +// sink: buffer a block, drop it when the device is too far behind, never block the guest.
@@ -140,11 +294,46 @@ index 0000000..cc03bf7
 +        left = static_cast<std::int16_t>(static_cast<float>(left) * volume);
 +        right = static_cast<std::int16_t>(static_cast<float>(right) * volume);
 +    }
-+    block_.push_back(left);
-+    block_.push_back(right);
 +    ++pushed;
-+    if (block_.size() < kBlockFrames * 2)
++    if (!stretch) {
++        const std::int16_t frame[2] = {left, right};
++        emit(frame, 1);
 +        return;
++    }
++    // SA-nx: every block of input, the stretch follows how full the device's queue is: none at
++    // or above the target, more the emptier it gets, eased so it changes gently.
++    stretcher_.push(left, right);
++    if (++since_step_ < kBlockFrames)
++        return;
++    since_step_ = 0;
++    const double q = static_cast<double>(queued_samples() + block_.size() / 2);
++    const double t = static_cast<double>(stretch_target);
++    const double want = q >= t ? 1.0 : 1.0 + (max_stretch - 1.0) * (t - q) / t;
++    ratio_ += (want - ratio_) * 0.3;
++    if (ratio_ < 1.002)
++        ratio_ = 1.0;
++    stretcher_.process(ratio_, [this](const std::int16_t* p, std::size_t n) {
++        emit(p, n);
++        stretched_frames += ratio_ > 1.0 ? static_cast<std::uint64_t>(
++                                               static_cast<double>(n) * (1.0 - 1.0 / ratio_))
++                                         : 0;
++    });
++}
++
++void Sink::emit(const std::int16_t* stereo, std::size_t frames) {
++    for (std::size_t i = 0; i < frames; ++i) {
++        block_.push_back(stereo[i * 2]);
++        block_.push_back(stereo[i * 2 + 1]);
++        ++out_frames;
++        if (block_.size() >= kBlockFrames * 2)
++            queue_block();
++    }
++}
++
++void Sink::queue_block() {
++    // The guest is ahead of the device: throw this block away rather than let the delay between
++    // what is on screen and what is heard grow without limit. Dropping is audible once, whereas a
++    // queue that only grows is audible for the rest of the run.
 +    if (queued_samples() > high_water) {
 +        dropped += kBlockFrames;
 +        block_.clear();
@@ -163,7 +352,7 @@ index 0000000..cc03bf7
 +
 +}  // namespace dream::audio
 diff --git a/audio/src/sdl_sink.cpp b/audio/src/sdl_sink.cpp
-index 84d0920..5135f05 100644
+index 84d0920..faa08c2 100644
 --- a/audio/src/sdl_sink.cpp
 +++ b/audio/src/sdl_sink.cpp
 @@ -5,6 +5,12 @@
@@ -206,18 +395,58 @@ index 84d0920..5135f05 100644
      if (bytes <= 0)
          return 0;
      return static_cast<unsigned>(bytes) / 4u;  // 16-bit stereo
-@@ -58,6 +64,10 @@ unsigned Sink::queued_samples() const {
+@@ -58,11 +64,47 @@ unsigned Sink::queued_samples() const {
  void Sink::push(std::int16_t left, std::int16_t right) {
      if (!stream_)
          return;
+-    block_.push_back(left);
+-    block_.push_back(right);
 +    if (volume < 0.999f) {
 +        left = static_cast<std::int16_t>(static_cast<float>(left) * volume);
 +        right = static_cast<std::int16_t>(static_cast<float>(right) * volume);
 +    }
-     block_.push_back(left);
-     block_.push_back(right);
      ++pushed;
-@@ -77,7 +87,7 @@ void Sink::push(std::int16_t left, std::int16_t right) {
+-    if (block_.size() < kBlockFrames * 2)
++    if (!stretch) {
++        const std::int16_t frame[2] = {left, right};
++        emit(frame, 1);
++        return;
++    }
++    // SA-nx: every block of input, the stretch follows how full the device's queue is: none at
++    // or above the target, more the emptier it gets, eased so it changes gently.
++    stretcher_.push(left, right);
++    if (++since_step_ < kBlockFrames)
+         return;
++    since_step_ = 0;
++    const double q = static_cast<double>(queued_samples() + block_.size() / 2);
++    const double t = static_cast<double>(stretch_target);
++    const double want = q >= t ? 1.0 : 1.0 + (max_stretch - 1.0) * (t - q) / t;
++    ratio_ += (want - ratio_) * 0.3;
++    if (ratio_ < 1.002)
++        ratio_ = 1.0;
++    stretcher_.process(ratio_, [this](const std::int16_t* p, std::size_t n) {
++        emit(p, n);
++        stretched_frames += ratio_ > 1.0 ? static_cast<std::uint64_t>(
++                                               static_cast<double>(n) * (1.0 - 1.0 / ratio_))
++                                         : 0;
++    });
++}
++
++void Sink::emit(const std::int16_t* stereo, std::size_t frames) {
++    for (std::size_t i = 0; i < frames; ++i) {
++        block_.push_back(stereo[i * 2]);
++        block_.push_back(stereo[i * 2 + 1]);
++        ++out_frames;
++        if (block_.size() >= kBlockFrames * 2)
++            queue_block();
++    }
++}
++
++void Sink::queue_block() {
+     // The guest is ahead of the device: throw this block away rather than let the delay between
+     // what is on screen and what is heard grow without limit. Dropping is audible once, whereas a
+     // queue that only grows is audible for the rest of the run.
+@@ -77,7 +119,7 @@ void Sink::push(std::int16_t left, std::int16_t right) {
  void Sink::flush() {
      if (!stream_ || block_.empty())
          return;
@@ -226,6 +455,111 @@ index 84d0920..5135f05 100644
                             static_cast<int>(block_.size() * sizeof(std::int16_t)));
      ++blocks;
      block_.clear();
+diff --git a/audio/tests/test_stretch.cpp b/audio/tests/test_stretch.cpp
+new file mode 100644
+index 0000000..e55e77a
+--- /dev/null
++++ b/audio/tests/test_stretch.cpp
+@@ -0,0 +1,99 @@
++// SA-nx: checks for the time-stretcher (stretch.h), no sound device needed.
++//   g++ -std=c++20 -O2 -Iaudio/include audio/tests/test_stretch.cpp -o test_stretch && ./test_stretch
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++#include "dream/audio/stretch.h"
++
++using dream::audio::Stretcher;
++
++namespace {
++int failures = 0;
++void check(bool ok, const char* what) {
++    std::printf("%s: %s\n", ok ? "ok  " : "FAIL", what);
++    if (!ok)
++        ++failures;
++}
++std::vector<std::int16_t> run(const std::vector<std::int16_t>& in, double ratio) {
++    Stretcher s;
++    std::vector<std::int16_t> out;
++    for (std::size_t i = 0; i < in.size(); i += 2) {
++        s.push(in[i], in[i + 1]);
++        if ((i / 2) % 512 == 511)
++            s.process(ratio, [&](const std::int16_t* p, std::size_t n) { out.insert(out.end(), p, p + n * 2); });
++    }
++    return out;
++}
++// Rising zero crossings per second of the left channel: the pitch of a sine.
++double pitch(const std::vector<std::int16_t>& s, std::size_t from) {
++    std::size_t n = 0;
++    for (std::size_t i = from + 2; i < s.size(); i += 2)
++        n += s[i - 2] < 0 && s[i] >= 0;
++    return static_cast<double>(n) * 44100.0 / static_cast<double>((s.size() - from) / 2);
++}
++// The longest run of near-silence (a gap) after the start.
++std::size_t longest_gap(const std::vector<std::int16_t>& s, std::size_t from) {
++    std::size_t run = 0, best = 0;
++    for (std::size_t i = from; i < s.size(); i += 2) {
++        run = std::abs(s[i]) < 50 ? run + 1 : 0;
++        best = std::max(best, run);
++    }
++    return best;
++}
++// The largest step between neighbouring samples of the left channel: a click shows as a jump far
++// beyond what the tone itself does (a 440 Hz sine at 15000 peaks at about 940 per sample).
++int largest_step(const std::vector<std::int16_t>& s, std::size_t from) {
++    int best = 0;
++    for (std::size_t i = from + 2; i < s.size(); i += 2)
++        best = std::max(best, std::abs(s[i] - s[i - 2]));
++    return best;
++}
++}  // namespace
++
++int main() {
++    // Two seconds of a 440 Hz tone with a slow beat, stereo.
++    std::vector<std::int16_t> tone;
++    for (int i = 0; i < 88200; ++i) {
++        const double t = i / 44100.0;
++        const double v = 12000.0 * std::sin(2 * M_PI * 440 * t) * (0.75 + 0.25 * std::sin(2 * M_PI * 3 * t));
++        tone.push_back(static_cast<std::int16_t>(v));
++        tone.push_back(static_cast<std::int16_t>(v * 0.8));
++    }
++    // Ratio 1: after the first hop (which fades in), the input comes back exactly.
++    {
++        const auto out = run(tone, 1.0);
++        bool same = out.size() > 40000;
++        for (std::size_t i = 1024; same && i < out.size(); ++i)
++            same = std::abs(out[i] - tone[i]) <= 1;
++        check(same, "ratio 1 passes the sound through unchanged");
++    }
++    for (double ratio : {1.18, 1.5, 2.0}) {
++        const auto out = run(tone, ratio);
++        const double len = static_cast<double>(out.size()) / static_cast<double>(tone.size());
++        const double p = pitch(out, 8192);
++        char what[160];
++        std::snprintf(what, sizeof what, "ratio %.2f: %.2fx as long, pitch %.1f Hz, longest gap %zu frames",
++                      ratio, len, p, longest_gap(out, 8192));
++        check(std::fabs(len - ratio) < 0.06 && std::fabs(p - 440.0) < 6.0 && longest_gap(out, 8192) < 8, what);
++    }
++    // The ratio changing every block, as it will while the game dips and recovers.
++    {
++        Stretcher st;
++        std::vector<std::int16_t> out;
++        for (std::size_t i = 0; i < tone.size(); i += 2) {
++            st.push(tone[i], tone[i + 1]);
++            if ((i / 2) % 512 == 511) {
++                const double r = 1.0 + 0.4 * (0.5 + 0.5 * std::sin(static_cast<double>(i) / 20000.0));
++                st.process(r, [&](const std::int16_t* p, std::size_t n) { out.insert(out.end(), p, p + n * 2); });
++            }
++        }
++        char what[160];
++        std::snprintf(what, sizeof what, "changing ratio: largest step %d (tone alone %d), longest gap %zu",
++                      largest_step(out, 2048), largest_step(tone, 0), longest_gap(out, 2048));
++        check(largest_step(out, 2048) < 1.3 * largest_step(tone, 0) && longest_gap(out, 2048) < 8, what);
++    }
++    std::printf("%s\n", failures ? "FAILED" : "all passed");
++    return failures ? 1 : 0;
++}
 diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
 index 08a8560..c3a145c 100644
 --- a/cmake/DreamAddGame.cmake
@@ -337,10 +671,10 @@ index 8dfec0a..de9b125 100644
  # a triangle. Not a test (it needs a display); run it by hand.
 diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
 new file mode 100644
-index 0000000..2587b34
+index 0000000..67de769
 --- /dev/null
 +++ b/render/include/dream/render/port_menu.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,102 @@
 +// The port menu (SA-nx): the launcher's own settings, over a paused game. Device-independent like
 +// the binding screen (input_menu.h): it draws into the RGBA frame on its way to the GPU and is
 +// driven by four calls, so the same menu works from a keyboard on the PC and from the buttons on
@@ -374,13 +708,16 @@ index 0000000..2587b34
 +    // exact. 1: sorted per strip, cheapest, and can draw overlapping translucency in the wrong
 +    // order (Sonic's eyes, before the per-pixel sort).
 +    int translucency = 0;
++    // How many times the console's 640x480 the 3D is drawn at, 1 to 3. Read when the game starts
++    // (the renderer's targets are sized once), so a change takes effect on the next start.
++    int scale = 1;
 +
 +    std::string to_text() const;
 +    static PortOptions from_text(std::string_view text);
 +    bool operator==(const PortOptions& o) const noexcept {
 +        return show_fps == o.show_fps && screen == o.screen && volume == o.volume &&
 +               cpu_mhz == o.cpu_mhz && gpu_mhz == o.gpu_mhz && mem_mhz == o.mem_mhz &&
-+               translucency == o.translucency;
++               translucency == o.translucency && scale == o.scale;
 +    }
 +};
 +
@@ -423,6 +760,7 @@ index 0000000..2587b34
 +        kScreen,
 +        kVolume,
 +        kTranslucency,
++        kScale,
 +        kCpu,
 +        kGpu,
 +        kMem,
@@ -940,10 +1278,10 @@ index a9f0841..41b3a97 100644
  void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
 diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
 new file mode 100644
-index 0000000..0a3194d
+index 0000000..e55e12d
 --- /dev/null
 +++ b/render/src/port_menu.cpp
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,260 @@
 +// See port_menu.h.
 +#include "dream/render/port_menu.h"
 +
@@ -1004,6 +1342,7 @@ index 0000000..0a3194d
 +    s += "CPU_MHZ=" + std::to_string(cpu_mhz) + "\n";
 +    s += "GPU_MHZ=" + std::to_string(gpu_mhz) + "\n";
 +    s += "MEM_MHZ=" + std::to_string(mem_mhz) + "\n";
++    s += "SCALE=" + std::to_string(scale) + "\n";
 +    s += "TRANSLUCENCY=" +
 +         std::string(translucency == 1   ? "fast"
 +                     : translucency == 2 ? "lean"
@@ -1038,6 +1377,8 @@ index 0000000..0a3194d
 +            o.gpu_mhz = kGpuSteps[step_index(kGpuSteps, v)];
 +        else if (key == "MEM_MHZ" && to_int(value, v))
 +            o.mem_mhz = kMemSteps[step_index(kMemSteps, v)];
++        else if (key == "SCALE" && to_int(value, v))
++            o.scale = std::clamp(v, 1, 3);
 +        else if (key == "TRANSLUCENCY")
 +            o.translucency = value == "fast"       ? 1
 +                             : value == "lean"     ? 2
@@ -1074,6 +1415,9 @@ index 0000000..0a3194d
 +            break;
 +        case kVolume:
 +            options_.volume = std::clamp(options_.volume + delta * 10, 0, 100);
++            break;
++        case kScale:
++            options_.scale = (options_.scale - 1 + (delta < 0 ? 2 : 1)) % 3 + 1;
 +            break;
 +        case kTranslucency: {
 +            // Shown in order of cost: accurate, lean, per triangle, per strip.
@@ -1182,6 +1526,8 @@ index 0000000..0a3194d
 +        : options_.translucency == 2 ? "< LEAN >"
 +        : options_.translucency == 3 ? "< TRIANGLE >"
 +                                     : "< ACCURATE >");
++    row(kScale, "RESOLUTION (ON RESTART)",
++        "< " + std::to_string(options_.scale) + "X >");
 +    row(kCpu, "CPU CLOCK",
 +        options_.cpu_mhz == 0 ? "< STOCK >" : "< " + std::to_string(options_.cpu_mhz) + " MHZ >");
 +    row(kGpu, "GPU CLOCK",
@@ -2654,10 +3000,10 @@ index 0000000..d6960fc
 +}  // namespace dream::render::vk
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
-index 0000000..eb38d9f
+index 0000000..6a789e7
 --- /dev/null
 +++ b/render/tests/test_port_menu.cpp
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,106 @@
 +// The port menu (SA-nx): options round-trip through their file, a damaged file falls back to
 +// defaults, and the menu moves, changes and closes as the footer says.
 +#include <cstdint>
@@ -2723,6 +3069,19 @@ index 0000000..eb38d9f
 +    CHECK(PortOptions::from_text("TRANSLUCENCY=lean\n").translucency == 2);
 +    CHECK(PortOptions::from_text("TRANSLUCENCY=triangle\n").translucency == 3);
 +    CHECK(PortOptions::from_text(o.to_text()).translucency == o.translucency);
++    m.move(1);  // RESOLUTION: 1x, 2x, 3x, then round again
++    CHECK(m.options().scale == 1);
++    CHECK(m.activate() == PortMenu::Action::None);  // A steps it, as on the other value rows
++    CHECK(m.options().scale == 2);
++    m.adjust(1);
++    CHECK(m.options().scale == 3);
++    m.adjust(1);
++    CHECK(m.options().scale == 1);
++    m.adjust(-1);
++    CHECK(m.options().scale == 3);
++    CHECK(PortOptions::from_text("SCALE=2\n").scale == 2);
++    CHECK(PortOptions::from_text("SCALE=9\n").scale == 3);
++    CHECK(PortOptions::from_text(m.options().to_text()).scale == 3);
 +    m.move(1);  // the clock rows are hidden, so this is QUIT
 +    CHECK(m.activate() == PortMenu::Action::Quit);
 +    CHECK_FALSE(m.is_open());
@@ -2752,10 +3111,10 @@ index 0000000..eb38d9f
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..b512527 100644
+index 824d0b4..16340a8 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -24,6 +24,27 @@
+@@ -24,6 +24,29 @@
  
  #include "profiler.h"  // SA-nx: --profile
  
@@ -2771,6 +3130,8 @@ index 824d0b4..b512527 100644
 +// SA-nx: 1 while the last half second of play ran below 0.95x, so a profiler can keep the slow
 +// stretches apart from the full-speed ones.
 +volatile int dream_port_slow = 0;
++// SA-nx: 1 while the last half second showed movie frames (the YUV converter was fed).
++volatile int dream_port_movie = 0;
 +// SA-nx: called first thing on each helper thread the launcher starts ("aica"), so a platform can
 +// place it (the Switch pins it to a core). Null everywhere else.
 +void (*dream_port_on_thread)(const char* name) = nullptr;
@@ -2783,7 +3144,7 @@ index 824d0b4..b512527 100644
  #include "dream/runtime/aica/aica.h"
  #include "dream/runtime/aica/rtc.h"
  #include "dream/runtime/gdrom/disc.h"
-@@ -34,6 +55,7 @@
+@@ -34,6 +57,7 @@
  #include "dream/runtime/mem/dc_memory.h"
  #include "dream/runtime/pvr/core.h"
  #include "dream/runtime/sh4/abi.h"
@@ -2791,7 +3152,7 @@ index 824d0b4..b512527 100644
  #include "dream/runtime/sh4/dmac.h"
  #include "dream/runtime/sh4/ops.h"
  #include "dream/runtime/system.h"
-@@ -46,12 +68,16 @@
+@@ -46,12 +70,16 @@
  #include "dream/audio/sink.h"
  #endif
  #ifdef DREAM_WITH_RENDERER
@@ -2808,7 +3169,7 @@ index 824d0b4..b512527 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -123,6 +149,7 @@ void print_guest_backtrace() {
+@@ -123,6 +151,7 @@ void print_guest_backtrace() {
  // direction: its framebuffer emulation is off unless a title needs it.
  struct Live {
      Live(dream::mem::DcMemory& memory, const dream::pvr::Core& pvr) : memory_(memory), pvr_(pvr) {}
@@ -2816,7 +3177,7 @@ index 824d0b4..b512527 100644
  
      // `scale` multiplies the resolution the geometry is drawn at. The frame is resampled back to
      // the guest's own framebuffer on the way into video memory, so a higher setting sharpens the
-@@ -159,6 +186,22 @@ struct Live {
+@@ -159,6 +188,22 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -2839,7 +3200,7 @@ index 824d0b4..b512527 100644
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -184,6 +227,9 @@ struct Live {
+@@ -184,6 +229,9 @@ struct Live {
          memory_.take_vram_writes([this](std::uint32_t begin, std::uint32_t end) {
              vram_invalidated += renderer.textures().invalidate_range(begin, end);
          });
@@ -2849,7 +3210,7 @@ index 824d0b4..b512527 100644
          if (!offscreen.render(renderer, frame, geometry)) {
              if (!reported_error) {
                  reported_error = true;
-@@ -195,6 +241,104 @@ struct Live {
+@@ -195,6 +243,104 @@ struct Live {
          ++rendered;
      }
  
@@ -2954,7 +3315,7 @@ index 824d0b4..b512527 100644
      // True for a buffer the renderer has drawn into at some point. A title alternates between two
      // and does not swap the displayed one on every render, so asking whether the displayed buffer
      // is *the* most recent target is too strict; asking whether it is one of ours is the question
-@@ -243,9 +387,167 @@ struct Live {
+@@ -243,9 +389,183 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -3066,6 +3427,20 @@ index 824d0b4..b512527 100644
 +            offscreen.stats.fragments_max = 0;
 +            offscreen.stats.longest_walk = 0;
 +        }
++        // SA-nx: sound stretched to cover a slow stretch (stretch.h), and movie frames (the YUV
++        // converter's words), so the log says which windows were a movie.
++        {
++            const std::uint64_t st = stretched_out ? *stretched_out : 0;
++            const std::uint64_t yuv = pvr_.yuv_words;
++            if (st != perf_stretched_at || yuv != perf_yuv_at)
++                std::printf("sound/movie: %.0f ms of sound added by stretching, %llu movie words "
++                            "(%.1f frames of 320x448)\n",
++                            static_cast<double>(st - perf_stretched_at) / 44.1,
++                            static_cast<unsigned long long>(yuv - perf_yuv_at),
++                            static_cast<double>(yuv - perf_yuv_at) / 53760.0);
++            perf_stretched_at = st;
++            perf_yuv_at = yuv;
++        }
 +        // SA-nx: the guest's wait loops that were skipped (--idle-skip).
 +        if (const auto& is = dream::sh4::idle_skip_stats(); is.calls != perf_idle_last.calls) {
 +            const double guest_s = static_cast<double>(guest_cycles - perf_cycles_at) / 200e6;
@@ -3114,8 +3489,10 @@ index 824d0b4..b512527 100644
 +                   s >= 0.5) {
 +            dream_port_slow =
 +                static_cast<double>(guest_cycles - slow_cycles) / 200e6 / s < 0.95 ? 1 : 0;
++            dream_port_movie = pvr_.yuv_words != slow_yuv ? 1 : 0;
 +            slow_from = present_from;
 +            slow_cycles = guest_cycles;
++            slow_yuv = pvr_.yuv_words;
 +        }
          guest_frame = frame;
 -        if (!window.poll())
@@ -3123,7 +3500,7 @@ index 824d0b4..b512527 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -277,12 +579,27 @@ struct Live {
+@@ -277,12 +597,27 @@ struct Live {
              window.recreate_swapchain();
              return true;
          }
@@ -3152,7 +3529,7 @@ index 824d0b4..b512527 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,9 +607,18 @@ struct Live {
+@@ -290,9 +625,18 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -3171,7 +3548,7 @@ index 824d0b4..b512527 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -318,8 +644,13 @@ struct Live {
+@@ -318,8 +662,13 @@ struct Live {
          if (!window.end_frame(image))
              window.recreate_swapchain();
          ++presented;
@@ -3185,7 +3562,7 @@ index 824d0b4..b512527 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -330,7 +661,29 @@ struct Live {
+@@ -330,7 +679,29 @@ struct Live {
              screenshot();
          if (capture_at && presented == capture_at)
              capture();
@@ -3216,7 +3593,7 @@ index 824d0b4..b512527 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +726,129 @@ struct Live {
+@@ -373,8 +744,129 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -3346,7 +3723,7 @@ index 824d0b4..b512527 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +858,9 @@ struct Live {
+@@ -384,10 +876,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -3360,7 +3737,7 @@ index 824d0b4..b512527 100644
              return;
          }
          if (!menu.is_open())
-@@ -652,6 +1125,19 @@ struct Live {
+@@ -652,6 +1143,19 @@ struct Live {
      std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
                    decoded_frames = 0, backgrounds = 0;
      std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
@@ -3380,7 +3757,7 @@ index 824d0b4..b512527 100644
      std::uint32_t target_address = 0;
      std::uint64_t guest_frame = 0;
      std::vector<std::uint32_t> last_stream;
-@@ -660,9 +1146,43 @@ struct Live {
+@@ -660,9 +1164,46 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -3400,7 +3777,10 @@ index 824d0b4..b512527 100644
 +    std::uint64_t perf_gpu_at = 0, perf_presented_at = 0, perf_rendered_at = 0, perf_cycles_at = 0;
 +    std::chrono::steady_clock::time_point slow_from{};  // SA-nx: dream_port_slow's window
 +    dream::sh4::IdleSkipStats perf_idle_last;
++    const std::uint64_t* stretched_out = nullptr;  // SA-nx: the sink's stretched frames
++    std::uint64_t perf_stretched_at = 0, perf_yuv_at = 0;
 +    std::uint64_t slow_cycles = 0;
++    std::uint64_t slow_yuv = 0;
 +    std::uint64_t perf_scratch_ns = 0;
 +    dream::render::vk::Offscreen::GpuTimes perf_gpu_last{};
 +    dream::render::vk::Offscreen::TranslucencyStats perf_stats_last{};
@@ -3424,7 +3804,7 @@ index 824d0b4..b512527 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1598,12 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1619,12 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -3437,7 +3817,7 @@ index 824d0b4..b512527 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1634,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1655,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -3445,7 +3825,7 @@ index 824d0b4..b512527 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1760,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1781,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -3453,7 +3833,7 @@ index 824d0b4..b512527 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,6 +1770,15 @@ int main(int argc, char** argv) {
+@@ -1242,10 +1791,20 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -3469,7 +3849,12 @@ index 824d0b4..b512527 100644
      // --suggest-config FILE: the TOML this run earned, ready to paste into the game's config.
      std::string suggest_config;
      std::uint64_t screenshot_at = 0, capture_at = 0;
-@@ -1334,6 +1871,8 @@ int main(int argc, char** argv) {
+     unsigned scale = 1;
++    bool scale_given = false;  // SA-nx: otherwise the port menu's resolution
+     // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
+     // be compared. Any non-zero value will do; the number itself only changes the date a title
+     // shows.
+@@ -1334,6 +1893,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -3478,7 +3863,7 @@ index 824d0b4..b512527 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1897,18 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1919,18 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -3497,15 +3882,28 @@ index 824d0b4..b512527 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1398,6 +1949,7 @@ int main(int argc, char** argv) {
+@@ -1387,8 +1960,10 @@ int main(int argc, char** argv) {
+             log_from = std::strtoull(spec, nullptr, 0);
+             if (const char* colon = std::strchr(spec, ':'))
+                 log_count = std::strtoull(colon + 1, nullptr, 0);
+-        } else if (!std::strcmp(argv[i], "--scale") && i + 1 < argc)
++        } else if (!std::strcmp(argv[i], "--scale") && i + 1 < argc) {
+             scale = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
++            scale_given = true;
++        }
+         else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
+             usage(argv[0], stdout);
+             return 0;
+@@ -1398,6 +1973,8 @@ int main(int argc, char** argv) {
              return 2;
          }
      }
 +    (void)render_thread;  // SA-nx: only read when there is a renderer
++    (void)scale_given;
      if (config.empty()) {
          std::fprintf(stderr, "--config is required\n");
          return 2;
-@@ -1682,6 +2234,8 @@ int main(int argc, char** argv) {
+@@ -1682,12 +2259,27 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -3514,7 +3912,26 @@ index 824d0b4..b512527 100644
          live->shot_presented = shot_presented;
          live->window.set_present_mode(present_mode);
          live->screenshot_at = screenshot_at;
-@@ -1698,7 +2252,38 @@ int main(int argc, char** argv) {
+         live->capture_at = capture_at;
+         // The window names the title being run. The config is the only place that name is written
+         // down for a human, and a config without one still gets a window with a name on it.
++        // SA-nx: the port menu's resolution, unless --scale was given. The options are otherwise
++        // loaded after the window (below); the scale has to be known before the targets exist.
++#ifdef __SWITCH__
++        if (options_file.empty())
++            options_file = "sdmc:/switch/sonicadv/sonicadv_options.txt";
++#endif
++        if (!scale_given && !options_file.empty()) {
++            std::ifstream in(options_file, std::ios::binary);
++            const std::string text((std::istreambuf_iterator<char>(in)),
++                                   std::istreambuf_iterator<char>());
++            scale = static_cast<unsigned>(dream::render::PortOptions::from_text(text).scale);
++            std::printf("resolution: %ux (%ux%u)\n", scale, 640u * scale, 480u * scale);
++        }
+         if (!live->start(
+                 scale, validation,
+                 cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
+@@ -1698,7 +2290,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -3554,7 +3971,7 @@ index 824d0b4..b512527 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +2306,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2344,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -3566,7 +3983,7 @@ index 824d0b4..b512527 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2317,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2355,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -3574,7 +3991,7 @@ index 824d0b4..b512527 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2330,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2368,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -3586,13 +4003,14 @@ index 824d0b4..b512527 100644
          };
      }
  #endif
-@@ -1770,6 +2358,15 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2396,16 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
 +#ifdef DREAM_WITH_RENDERER
 +    if (live) {
 +        live->volume_out = &sink.volume;  // SA-nx: the port menu's volume
++        live->stretched_out = &sink.stretched_frames;  // SA-nx: for the timing log
 +        if (live->perf_enabled) {
 +            aica.time_ticks = true;
 +            live->perf_audio_ns = &aica.tick_ns;
@@ -3602,7 +4020,7 @@ index 824d0b4..b512527 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2378,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2417,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -3614,7 +4032,7 @@ index 824d0b4..b512527 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2390,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2429,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -3638,7 +4056,7 @@ index 824d0b4..b512527 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -2036,6 +2653,30 @@ int main(int argc, char** argv) {
+@@ -2036,6 +2692,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -3669,7 +4087,7 @@ index 824d0b4..b512527 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +2687,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2726,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -3682,7 +4100,23 @@ index 824d0b4..b512527 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2145,7 +2792,7 @@ int main(int argc, char** argv) {
+@@ -2076,10 +2762,13 @@ int main(int argc, char** argv) {
+ #ifdef DREAM_WITH_AUDIO
+     if (sink.is_open()) {
+         sink.flush();
+-        std::printf("audio: %llu samples played in %llu blocks, %llu dropped, %u still queued\n",
++        std::printf("audio: %llu samples played in %llu blocks, %llu dropped, %u still queued; "
++                    "%llu frames out, %llu of them added by stretching\n",
+                     static_cast<unsigned long long>(sink.pushed),
+                     static_cast<unsigned long long>(sink.blocks),
+-                    static_cast<unsigned long long>(sink.dropped), sink.queued_samples());
++                    static_cast<unsigned long long>(sink.dropped), sink.queued_samples(),
++                    static_cast<unsigned long long>(sink.out_frames),
++                    static_cast<unsigned long long>(sink.stretched_frames));
+     }
+ #endif
+     if (hash_file) {
+@@ -2145,7 +2834,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());

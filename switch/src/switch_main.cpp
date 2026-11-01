@@ -35,6 +35,7 @@ extern void (*dream_port_set_cpu_mhz)(int mhz);
 extern void (*dream_port_set_gpu_mhz)(int mhz);
 extern void (*dream_port_set_mem_mhz)(int mhz);
 extern volatile int dream_port_slow;  // 1: the last half second ran below 0.95x
+extern volatile int dream_port_movie;  // 1: the last half second showed movie frames
 extern volatile int dream_port_phase;  // the launcher: 0 playing, 1 menu, 2 ended
 extern void (*dream_port_on_thread)(const char* name);
 extern "C" char __start__;  // libnx's crt0: the start of this module, for crash offsets
@@ -357,10 +358,11 @@ struct Profile {
     std::unordered_map<std::uint64_t, std::uint32_t> pcs;        // where the thread was
     std::unordered_map<std::string, std::uint32_t> stacks;      // pc, lr, then callers
     std::uint64_t samples = 0, failed = 0, in_menu = 0, after_run = 0;
-    // The same samples again, split by speed (dream_port_slow): [0] full speed, [1] below 0.95x.
-    std::unordered_map<std::uint64_t, std::uint32_t> pcs_by[2];
-    std::unordered_map<std::string, std::uint32_t> stacks_by[2];
-    std::uint64_t samples_by[2] = {0, 0};
+    // The same samples again, split: [0] full speed, [1] below 0.95x (dream_port_slow), [2] a
+    // movie playing (dream_port_movie, whatever the speed).
+    std::unordered_map<std::uint64_t, std::uint32_t> pcs_by[3];
+    std::unordered_map<std::string, std::uint32_t> stacks_by[3];
+    std::uint64_t samples_by[3] = {0, 0, 0};
 };
 
 std::uint64_t mod(std::uint64_t a) {
@@ -393,14 +395,17 @@ void prof_write(const Profile& p) {
         for (std::size_t i = 0; i < v.size() && i < 2500; ++i)
             std::fprintf(f, "%u %s\n", v[i].first, v[i].second->c_str());
     };
-    std::fprintf(f, "split: %llu samples at full speed, %llu below 0.95x\n",
-                 (unsigned long long)p.samples_by[0], (unsigned long long)p.samples_by[1]);
+    std::fprintf(f, "split: %llu samples at full speed, %llu below 0.95x, %llu in a movie\n",
+                 (unsigned long long)p.samples_by[0], (unsigned long long)p.samples_by[1],
+                 (unsigned long long)p.samples_by[2]);
     pcs("pc", p.pcs);
     stacks("stacks", p.stacks);
     pcs("pc_fast", p.pcs_by[0]);
     pcs("pc_slow", p.pcs_by[1]);
     stacks("stacks_fast", p.stacks_by[0]);
     stacks("stacks_slow", p.stacks_by[1]);
+    pcs("pc_movie", p.pcs_by[2]);
+    stacks("stacks_movie", p.stacks_by[2]);
     std::fprintf(f, "== end\n");
     std::fclose(f);
     // The SD card's FAT refuses a rename onto an existing file: delete, then rename.
@@ -453,7 +458,7 @@ void profiler(void*) {
             ++p.after_run;
             continue;
         }
-        const int slow = dream_port_slow ? 1 : 0;
+        const int slow = dream_port_movie ? 2 : dream_port_slow ? 1 : 0;
         ++p.samples;
         ++p.samples_by[slow];
         ++p.pcs[mod(ctx.pc.x)];
