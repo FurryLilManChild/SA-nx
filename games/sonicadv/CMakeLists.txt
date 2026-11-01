@@ -2,17 +2,25 @@
 # adding a directory. Add BOOT_TEST once the title boots far enough to be worth asserting on.
 dream_add_game(sonicadv TITLE "Sonic Adventure")
 
-# SA-nx (switch-test17): the movie player (MOVIE.BIN, Sega's Sofdec, translated as one unit at
-# 0x8CEB0000) with the compiler's full optimisation. The rest of the game stays at the -O1 that
-# keeps its build to hours rather than days; this unit is 1.2 MB, and in switch-test15's movie
-# profile its code was two thirds of a movie's time. -fno-strict-aliasing because translated code
+# SA-nx: units built with the compiler's full optimisation (the rest keep -O1, which keeps the
+# whole game's build to hours). switch-test17: the movie player's main unit (MOVIE.BIN, Sofdec at
+# 0x8CEB0000). switch-test18: all of the movie player, and the units holding most of play's
+# translated code in switch-test15 and 17's gameplay profiles (main parts 1, 2, 11, 27, 29, 30
+# and 31 and the Emerald Coast module, 84% of it). -fno-strict-aliasing because translated code
 # reads guest memory through casts that -O2 would otherwise be entitled to reorder.
+set(_sanx_full_opt)
+foreach(_u sonicadv_part1 sonicadv_part2 sonicadv_part11 sonicadv_part27 sonicadv_part29
+           sonicadv_part30 sonicadv_part31 sonicadv_reloc_8ceb0000 sonicadv_reloc_8c900000_34)
+  list(APPEND _sanx_full_opt ${CMAKE_CURRENT_BINARY_DIR}/gen/${_u}.cpp)
+endforeach()
+foreach(_k RANGE 1 7)
+  list(APPEND _sanx_full_opt ${CMAKE_CURRENT_BINARY_DIR}/gen/sonicadv_reloc_8ceb0000_part${_k}.cpp
+                             ${CMAKE_CURRENT_BINARY_DIR}/gen/sonicadv_reloc_8c900000_34_part${_k}.cpp)
+endforeach()
 if(MSVC)
-  set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/gen/sonicadv_reloc_8ceb0000.cpp
-    PROPERTIES COMPILE_OPTIONS "/O2;/bigobj")
+  set_source_files_properties(${_sanx_full_opt} PROPERTIES COMPILE_OPTIONS "/O2;/bigobj")
 else()
-  set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/gen/sonicadv_reloc_8ceb0000.cpp
-    PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
+  set_source_files_properties(${_sanx_full_opt} PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
 endif()
 
 # Every guest call, and every jump between translated functions, is a host call. Windows gives the

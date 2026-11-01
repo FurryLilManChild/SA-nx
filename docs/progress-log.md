@@ -2,6 +2,20 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test18 (towards stock clocks: hot units at -O2; play-module list)
+
+- Mark wants a real attempt at stock clocks before release (the build is release-ready at 1785).
+- Gameplay profile (switch-test15 prev and test17 runs, pc_fast + pc_slow, 35,077 samples):
+  translated code 33.5% of samples, flat (top function fn_0c90320c in module 34 5.3%,
+  fn_0c037990 3.0%, fn_0c051790 2.0%). By unit: module 34 (Emerald Coast's) 23%, part1 23%,
+  part29 17.8%, part2 10.1%, part11 5.7%, part30 3.9%, part27 3.1%, part31 2.6%: 84% in eight
+  units. The movie player is eight units (reloc_8ceb0000 and _part1 to _part7); switch-test17
+  optimised only the first, which may be why its gain was small.
+- -O2 -fno-strict-aliasing now for main parts 1, 2, 11, 27, 29, 30, 31 (about 70 MB of generated
+  C++), all of module 34 and all of the movie player; 24 compile steps.
+- --play-modules: pick_target counts as play only the first words of the 31 gameplay modules (13
+  distinct values, from extracted/modules), passed by switch_main.
+
 ## 2026-10-31: switch-test17 result
 
 - Movie (opening): 0.74x to 0.90x, about 0.84x on average (switch-test15: 0.68x to 0.84x, about

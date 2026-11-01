@@ -547,7 +547,12 @@ int main(int argc, char** argv) {
               // The game's wait loop: 0x8C641F98 and 0x8C641FD8 call the empty function at
               // 0x8C64162C until an interrupt changes a flag (switch-test12 profile: 10.8% of the
               // game thread at full speed). The clock jumps to the next event instead.
-              "--idle-skip", "0x0C64162C:0x0C641FA0,0x0C641FE0"};
+              "--idle-skip", "0x0C64162C:0x0C641FA0,0x0C641FE0",
+              // The first word of every gameplay module (stages, fields, bosses, Chao garden,
+              // minigames), so the in-game resolution applies only in play (switch-test18).
+              "--play-modules",
+              "0x2FD62FE6,0x432BD307,0x432BD357,0x4F222FE6,0x55484F22,0x6032D30F,0x60505548,"
+              "0x63505548,0x6432D317,0x6E432FE6,0x7FFC4F22,0xD35F7FE8,0xD507D308"};
     // Extra arguments, one per line, for testing without a new build.
     if (std::ifstream extra("sonicadv_args.txt"); extra) {
         std::string line;
