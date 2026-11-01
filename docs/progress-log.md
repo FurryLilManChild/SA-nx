@@ -2,6 +2,21 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-10-31: switch-test15 result; movies measured
+
+- Mark: sound, controls and everything else as wanted; resolution: 2x good in game but menus and
+  title slow; wants 1.5x and 2x, applied live, only in game (never title, menus, character
+  select).
+- 2x (prev log): menus 0.43x to 0.77x, GPU 4 to 21 ms per render (2,009 translucent polygons over
+  the whole screen at 1280x960).
+- Movies (1x, the opening movie): 0.68x to 0.84x, game thread 97%, GPU under 2 ms, 99 to 120 movie
+  frames per 5 s. Movie profile (32,418 samples): translated code 64% (fn_0ceb1504 in MOVIE.BIN
+  alone 32.5%, the Sofdec player's module at 0x8CEB0000, one 1.2 MB generated file), memory
+  layer 14%, YUV converter (yuv_word, yuv_macroblock) about 5%, DcMemory::store 3.6%.
+- Menu detection: the module at 0x8C900000 starts with a pointer table for ADVERTISE and SUMMARY
+  (e800908c..., 4000908c...) and with code for every gameplay module (stages, fields, bosses,
+  Chao garden, minigames).
+
 ## 2026-10-31: switch-test15 (smooth sound through dips, resolution, movie marking)
 
 - Sound: dream/audio/stretch.h, a WSOLA time-stretcher (hop 512, Hann windows of 1024, search
