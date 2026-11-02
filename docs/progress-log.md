@@ -25,6 +25,9 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   main RAM on the slow path and on the inline path (`BareMemory::use_fast_path`); emitter 13
   cases (71,481 assertions), runtime 82 cases pass.
 - Not in this build: T and the FP registers stay in the context.
+- Build: 345 steps (one restart after the cloud disk filled, one after the 2-hour command limit). NRO sha256
+  01540b18aadb1f981cc003c59dac691ccc55c78fa19e82639556b2b467238049 (165,318,687 bytes, 0.3% smaller than test21),
+  verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test22.elf.
 
 ## 2026-11-01: switch-test21 result: idle skips 25x fewer, small gain; 1785 dips are render-side
 
