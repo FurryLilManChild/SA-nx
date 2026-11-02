@@ -2,6 +2,24 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test25 result and switch-test26: character select is not what test25 thought
+
+- test25, stock: Emerald Coast 0.97x average over 13 windows (0.90 to 1.00x), game thread 89%
+  busy with 7% asleep; game-thread work per guest second 0.93 on average, 1.06 in the heaviest
+  window. No running past 1x reported. Mark: "so close".
+- The character-select detector was wrong: the title sequence draws about 1,300 translucent
+  polygons a render (it triggered per-pixel there: 6.4 ms of GPU per render, the game waiting
+  41%), character select about 170 (it never triggered), the main menus 20 to 100. My test24
+  reading of 1,483 was the title, not character select.
+- switch-test26: per pixel in play only (title, menus and character select per triangle), and a
+  temporary port-menu row SAVE RAM SNAPSHOT that writes main RAM to `ramdump-N.bin` next to the
+  options file, with a log line giving the module word at 0x8C900000. Mark saves snapshots on
+  the title, the main menu, character select (two characters highlighted) and in play; diffing
+  them should find the game's record of the current screen. The dumps are game data: they stay
+  on the SD card and Mark's PC, never in the repository.
+- Build: 5 steps. NRO sha256 4431641451988bcfdaebb5700cc7eecec82e7da429a9f4bc857495a413fc0d6a,
+  verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test26.elf.
+
 ## 2026-11-02: switch-test24 result and switch-test25: smooth pacing works; no more catching up
 
 - test24, stock, Emerald Coast with FRAME PACING smooth (12 windows): 0.87x to 1.20x, about 1.02x

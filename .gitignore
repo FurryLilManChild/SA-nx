@@ -38,3 +38,6 @@ out/
 *.nacp
 *.elf
 __pycache__/
+
+# RAM snapshots from the port menu (game data)
+ramdump-*.bin
