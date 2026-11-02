@@ -1,5 +1,5 @@
 diff --git a/runtime/include/dream/runtime/mem/dc_memory.h b/runtime/include/dream/runtime/mem/dc_memory.h
-index da93d0a..7e50eca 100644
+index da93d0a..15ae621 100644
 --- a/runtime/include/dream/runtime/mem/dc_memory.h
 +++ b/runtime/include/dream/runtime/mem/dc_memory.h
 @@ -150,14 +150,14 @@ public:
@@ -54,11 +54,19 @@ index da93d0a..7e50eca 100644
      void sq_write32(std::uint32_t a, std::uint32_t v) override;
      void sq_flush(std::uint32_t a) override;
  
+@@ -277,6 +278,7 @@ private:
+     bool vram_dirty_any_ = false;
+     std::vector<Range> phys_mmio_, p4_mmio_;
+     std::uint32_t sq_[2][8]{};
++    bool quiet_device_access_ = false;  // SA-nx: sq_flush into area 4 (see there)
+     std::uint32_t qacr_[2]{};
+     std::uint32_t ccn_[16]{};  // PTEH..QACR1 word registers at 0xFF000000 + 4n (CCR, TRA, EXPEVT,
+                                // INTEVT, QACR aliased)
 diff --git a/runtime/include/dream/runtime/memory.h b/runtime/include/dream/runtime/memory.h
-index 6680b09..9948963 100644
+index 6680b09..1eed387 100644
 --- a/runtime/include/dream/runtime/memory.h
 +++ b/runtime/include/dream/runtime/memory.h
-@@ -11,22 +11,113 @@
+@@ -11,22 +11,118 @@
  #include <stdexcept>
  #include <string>
  
@@ -109,14 +117,18 @@ index 6680b09..9948963 100644
 +    DREAM_ALWAYS_INLINE void write32(std::uint32_t a, std::uint32_t v) { fast_write(a, v, &Memory::do_write32); }
 +    DREAM_ALWAYS_INLINE void write64(std::uint32_t a, std::uint64_t v) { fast_write(a, v, &Memory::do_write64); }
 +    // SA-nx: the inline path's state, for emitted functions that keep it in locals (FastMem).
++    // sq: the two 32-byte store queues (0xE0000000..0xE3FFFFFF, address bit 5 picks one), or
++    // null when stores to them must take the full path.
 +    struct FastView {
 +        std::uint8_t* ram;
 +        std::uint32_t mask;
 +        bool store_ok;
++        std::uint8_t* sq;
 +    };
 +    DREAM_ALWAYS_INLINE FastView fast_view() const noexcept {
-+        return {fast_ram_, fast_ram_mask_,
-+                fast_ram_ != nullptr && !journaling && !hash_writes && !(watch_lo < watch_hi)};
++        const bool ok =
++            fast_ram_ != nullptr && !journaling && !hash_writes && !(watch_lo < watch_hi);
++        return {fast_ram_, fast_ram_mask_, ok, ok ? fast_sq_ : nullptr};
 +    }
      // Store queue: writes to 0xE0000000..0xE3FFFFFF buffer in the SQ; PREF flushes 32 bytes.
      virtual void sq_write32(std::uint32_t addr, std::uint32_t v) = 0;
@@ -145,6 +157,7 @@ index 6680b09..9948963 100644
 +    // null keeps every access on the virtual path.
 +    std::uint8_t* fast_ram_ = nullptr;
 +    std::uint32_t fast_ram_mask_ = 0;
++    std::uint8_t* fast_sq_ = nullptr;  // SA-nx: the store queues' 64 bytes (FastView::sq)
 +
 +private:
 +    // Area 3 seen through P0 to P3: physical = a & 0x1FFFFFFF, area = physical >> 26. P4
@@ -180,7 +193,7 @@ index 6680b09..9948963 100644
  };
  
  // 16 MB of main RAM at every alias of area 3 (0x0C000000 physical), nothing else. Accesses outside
-@@ -38,31 +129,36 @@ public:
+@@ -38,31 +134,36 @@ public:
      BareMemory() : ram_(new std::uint8_t[kRamSize]()) {}
  
      std::uint8_t* ram() noexcept { return ram_.get(); }
@@ -226,10 +239,10 @@ index 6680b09..9948963 100644
      }
      void sq_write32(std::uint32_t a, std::uint32_t v) override { sq_[(a >> 2) & 15] = v; }
 diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
-index bcc1279..75cedd3 100644
+index bcc1279..8486c7e 100644
 --- a/runtime/src/mem/dc_memory.cpp
 +++ b/runtime/src/mem/dc_memory.cpp
-@@ -64,7 +64,11 @@ DcMemory::DcMemory()
+@@ -64,7 +64,12 @@ DcMemory::DcMemory()
        aram_(new std::uint8_t[kAramSize]()),
        bios_(new std::uint8_t[kBiosSize]()),
        flash_(new std::uint8_t[kFlashSize]()),
@@ -237,12 +250,31 @@ index bcc1279..75cedd3 100644
 +      ocram_(new std::uint8_t[kOcramSize]()) {
 +    // Main RAM for Memory's inline path (SA-nx).
 +    fast_ram_ = ram_.get();
++    fast_sq_ = reinterpret_cast<std::uint8_t*>(&sq_[0][0]);
 +    fast_ram_mask_ = kRamSize - 1;
 +}
  
  void DcMemory::map_mmio(std::uint32_t lo, std::uint32_t hi, MmioHandler* h) {
      phys_mmio_.push_back({lo, hi, h});
-@@ -249,13 +253,13 @@ void DcMemory::redo_journal() {
+@@ -105,7 +110,7 @@ DcMemory::Target DcMemory::resolve(std::uint32_t a, unsigned size, bool write) {
+         }
+         if (MmioHandler* h = find(p4_mmio_, a)) {
+             t.kind = Target::kMmio;
+-            if (on_device_access)
++            if (on_device_access && !quiet_device_access_)
+                 on_device_access();
+             t.mmio = h;
+             t.mmio_addr = a;
+@@ -160,7 +165,7 @@ DcMemory::Target DcMemory::resolve(std::uint32_t a, unsigned size, bool write) {
+     }
+     if (MmioHandler* h = find(phys_mmio_, phys)) {
+         t.kind = Target::kMmio;
+-        if (on_device_access)
++        if (on_device_access && !quiet_device_access_)
+             on_device_access();
+         t.mmio = h;
+         t.mmio_addr = phys;
+@@ -249,13 +254,13 @@ void DcMemory::redo_journal() {
      }
  }
  
@@ -259,7 +291,7 @@ index bcc1279..75cedd3 100644
      if ((a & 0xFFFFFFC0u) == 0xFF000000u) {  // CCN: MMU and cache control, exception registers
          switch (a & 0x3Cu) {
              case 0x20:
-@@ -274,7 +278,7 @@ std::uint32_t DcMemory::read32(std::uint32_t a) {
+@@ -274,7 +279,7 @@ std::uint32_t DcMemory::read32(std::uint32_t a) {
      }
      return load<std::uint32_t>(a);
  }
@@ -268,7 +300,7 @@ index bcc1279..75cedd3 100644
      const Target t = resolve(a, 8, false);
      if (t.kind == Target::kBytes) {
          std::uint64_t v;
-@@ -286,13 +290,21 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
+@@ -286,13 +291,21 @@ std::uint64_t DcMemory::read64(std::uint32_t a) {
                 (static_cast<std::uint64_t>(t.mmio->read(t.mmio_addr + 4, 4)) << 32);
      return 0;
  }
@@ -293,7 +325,7 @@ index bcc1279..75cedd3 100644
      if ((a & 0xFFFFFFC0u) == 0xFF000000u) {
          switch (a & 0x3Cu) {
              case 0x20:
-@@ -317,7 +329,12 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
+@@ -317,7 +330,12 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
      }
      store<std::uint32_t>(a, v);
  }
@@ -307,6 +339,19 @@ index bcc1279..75cedd3 100644
      const Target t = resolve(a, 8, true);
      if (t.kind == Target::kBytes) {
          const std::uint32_t lo = static_cast<std::uint32_t>(v);
+@@ -353,7 +371,12 @@ void DcMemory::sq_flush(std::uint32_t a) {
+     const unsigned n = (a >> 5) & 1;
+     const std::uint32_t dest = (qacr_[n] << 24) | (a & 0x03FFFFE0u);
+     const std::uint32_t* words = sq_[n];
++    // SA-nx: a burst into area 4 (the TA's FIFO, its texture path, the YUV converter) does not
++    // depend on the clock, so it skips bringing the scheduler up to date (on_device_access), which
++    // ran for every 32 bytes of every display list.
++    quiet_device_access_ = ((dest >> 26) & 7u) == 4u;
+     const Target t = resolve(dest, 4, true);
++    quiet_device_access_ = false;
+     if (t.kind == Target::kBytes) {
+         if (journaling)
+             for (unsigned i = 0; i < 8; ++i) {
 diff --git a/runtime/tests/test_memory.cpp b/runtime/tests/test_memory.cpp
 index c12552c..604ee9e 100644
 --- a/runtime/tests/test_memory.cpp

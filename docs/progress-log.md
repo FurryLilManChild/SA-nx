@@ -2,6 +2,26 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test23: the graphics submission path
+
+- Store-queue writes from emitted code go straight into the 64 bytes of the queues
+  (`FastMem::sq`, `gst` in ops.h) when nothing watches stores; before, each word took
+  `gst_slow` -> `Memory::write32` -> the virtual `do_write32`.
+- `sq_flush` into area 4 (TA FIFO, TA texture path, YUV converter) no longer brings the scheduler
+  up to date first (`DcMemory::quiet_device_access_`); a display list's bursts do not depend on
+  the clock. List-end interrupts still pull the next poll in (`Intc::on_raise`).
+- `Scheduler::advance_to` returns at once while the target is before every armed deadline
+  (`floor_`, a lower bound kept by `request` and refreshed by each full scan).
+- The display list is decoded (`DisplayList::feed_stream`, `add_background`) on the render
+  thread; the game thread keeps the stream and a copy of the first 0x200 bytes of PVR registers.
+- Tests: `store queue: inline writes from emitted code, flushed to main RAM` (32- and 64-bit
+  writes, the journaling fallback) and `scheduler: the fast path never skips an event armed
+  after it`; runtime 84 cases, emitter 13 cases pass.
+- ops.h changed, so every game unit rebuilds.
+- Expectation: the path was 33.4% of the game thread's busy time at stock; some of it remains
+  (the stream copy, `Ta::feed`, the TA's own work). A projection, not a promise: stock towards the
+  mid 0.9s.
+
 ## 2026-11-02: switch-test22 result: no measurable gain; the TA path is a third of the game thread
 
 - Stock only (Mark, a few minutes), Emerald Coast, 14 windows: 0.84x average (test21 0.86x),

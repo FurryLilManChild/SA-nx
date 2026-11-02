@@ -3150,7 +3150,7 @@ index 0000000..a95478f
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..0a83943 100644
+index 824d0b4..10ab258 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,29 @@
@@ -3276,7 +3276,7 @@ index 824d0b4..0a83943 100644
              }
              return;
          }
-@@ -195,6 +244,104 @@ struct Live {
+@@ -195,6 +244,110 @@ struct Live {
          ++rendered;
      }
  
@@ -3287,13 +3287,13 @@ index 824d0b4..0a83943 100644
 +    // (render_wait). The picture is the same: the same list, the same registers, drawn in order.
 +    // Textures are still decoded from live video memory, which the guest could be writing at that
 +    // moment; the console's own graphics chip reads it while the CPU runs in the same way.
++    // SA-nx (switch-test23): the display list is decoded on the render thread too. The game
++    // thread keeps the stream (last_stream, which nothing writes until the next render_post,
++    // after render_wait) and a copy of the registers the background plane reads; decoding was
++    // about 6% of the game thread at stock clocks (switch-test22 profile).
 +    void render_post(const std::vector<std::uint32_t>& stream) {
 +        last_stream = stream;
-+        decoder.reset();
-+        decoder.feed_stream(stream.data(), stream.size());
-+        if (dream::render::add_background(decoder.frame(), pvr_.reg_block(), memory_.vram(),
-+                                          dream::mem::DcMemory::kVramSize))
-+            ++backgrounds;
++        job_regs_.assign(pvr_.reg_block(), pvr_.reg_block() + kJobRegWords);
 +        geometry.alpha_ref = static_cast<float>(pvr_.reg(0x11C) & 0xFFu) / 255.0f;
 +        job_palette_.assign(pvr_.reg_block() + 0x1000 / 4, pvr_.reg_block() + 0x1000 / 4 + 1024);
 +        job_palette_format_ = palette_format();
@@ -3321,6 +3321,11 @@ index 824d0b4..0a83943 100644
 +                    return;
 +            }
 +            const auto from = std::chrono::steady_clock::now();
++            decoder.reset();
++            decoder.feed_stream(last_stream.data(), last_stream.size());
++            if (dream::render::add_background(decoder.frame(), job_regs_.data(), memory_.vram(),
++                                              dream::mem::DcMemory::kVramSize))
++                ++job_backgrounds_;
 +            off_->finish();  // before a texture the last render read can be dropped
 +            if (renderer.textures().set_palette(job_palette_.data(), job_palette_format_))
 +                ++job_palette_changes_;
@@ -3348,7 +3353,8 @@ index 824d0b4..0a83943 100644
 +        render_wait_ns += ns_since(from);
 +        vram_invalidated += job_invalidated_;
 +        palette_changes += job_palette_changes_;
-+        job_invalidated_ = job_palette_changes_ = 0;
++        backgrounds += job_backgrounds_;
++        job_invalidated_ = job_palette_changes_ = job_backgrounds_ = 0;
 +        if (job_failed_ && !reported_error) {
 +            reported_error = true;
 +            std::fprintf(stderr, "render: %s\n", off_->error().c_str());
@@ -3381,7 +3387,7 @@ index 824d0b4..0a83943 100644
      // True for a buffer the renderer has drawn into at some point. A title alternates between two
      // and does not swap the displayed one on every render, so asking whether the displayed buffer
      // is *the* most recent target is too strict; asking whether it is one of ours is the question
-@@ -224,8 +371,8 @@ struct Live {
+@@ -224,8 +377,8 @@ struct Live {
              targets_.push_back(target.address);
          if (!writeback)
              return;
@@ -3392,7 +3398,7 @@ index 824d0b4..0a83943 100644
                                                 dream::mem::DcMemory::kVramSize))
              return;
          ++written_back;
-@@ -243,9 +390,183 @@ struct Live {
+@@ -243,9 +396,183 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -3577,7 +3583,7 @@ index 824d0b4..0a83943 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -258,8 +579,8 @@ struct Live {
+@@ -258,8 +585,8 @@ struct Live {
          from_renderer = described && fb.enabled && rendered_into(fb.address);
          if (from_renderer) {
              shown = fb;
@@ -3588,7 +3594,7 @@ index 824d0b4..0a83943 100644
              have_frame = true;
          } else if (described && fb.enabled &&
                     dream::render::decode_framebuffer(fb, memory_.vram(),
-@@ -277,12 +598,27 @@ struct Live {
+@@ -277,12 +604,27 @@ struct Live {
              window.recreate_swapchain();
              return true;
          }
@@ -3618,7 +3624,7 @@ index 824d0b4..0a83943 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,9 +626,18 @@ struct Live {
+@@ -290,9 +632,18 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -3637,7 +3643,7 @@ index 824d0b4..0a83943 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -318,8 +663,13 @@ struct Live {
+@@ -318,8 +669,13 @@ struct Live {
          if (!window.end_frame(image))
              window.recreate_swapchain();
          ++presented;
@@ -3651,7 +3657,7 @@ index 824d0b4..0a83943 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -330,7 +680,29 @@ struct Live {
+@@ -330,7 +686,29 @@ struct Live {
              screenshot();
          if (capture_at && presented == capture_at)
              capture();
@@ -3682,7 +3688,7 @@ index 824d0b4..0a83943 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +745,190 @@ struct Live {
+@@ -373,8 +751,190 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -3873,7 +3879,7 @@ index 824d0b4..0a83943 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +938,9 @@ struct Live {
+@@ -384,10 +944,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -3887,7 +3893,7 @@ index 824d0b4..0a83943 100644
              return;
          }
          if (!menu.is_open())
-@@ -560,7 +1113,7 @@ struct Live {
+@@ -560,7 +1119,7 @@ struct Live {
          if (!f)
              return;
          std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
@@ -3896,7 +3902,7 @@ index 824d0b4..0a83943 100644
          const std::size_t n = static_cast<std::size_t>(shown.width) * shown.height;
          for (std::size_t i = 0; i < n; ++i) {
              const std::uint32_t p = src[i];
-@@ -642,7 +1195,16 @@ struct Live {
+@@ -642,7 +1201,16 @@ struct Live {
  
      dream::render::vk::Window window;
      dream::render::vk::Renderer renderer;
@@ -3914,7 +3920,7 @@ index 824d0b4..0a83943 100644
      dream::render::vk::Presenter presenter;
      dream::render::DisplayList decoder;
      dream::render::vk::FrameGeometry geometry;
-@@ -652,6 +1214,19 @@ struct Live {
+@@ -652,6 +1220,21 @@ struct Live {
      std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
                    decoded_frames = 0, backgrounds = 0;
      std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
@@ -3928,13 +3934,15 @@ index 824d0b4..0a83943 100644
 +    dream::render::PaletteFormat job_palette_format_{};
 +    std::uint32_t job_stride_ = 0;
 +    std::vector<std::pair<std::uint32_t, std::uint32_t>> job_ranges_;
-+    std::uint64_t job_invalidated_ = 0, job_palette_changes_ = 0;
++    std::uint64_t job_invalidated_ = 0, job_palette_changes_ = 0, job_backgrounds_ = 0;
++    static constexpr std::size_t kJobRegWords = 0x200 / 4;  // the background plane's registers
++    std::vector<std::uint32_t> job_regs_;
 +    std::atomic<std::uint64_t> render_thread_ns{0};
 +    std::uint64_t render_wait_ns = 0, render_thread_at = 0;
      std::uint32_t target_address = 0;
      std::uint64_t guest_frame = 0;
      std::vector<std::uint32_t> last_stream;
-@@ -660,9 +1235,46 @@ struct Live {
+@@ -660,9 +1243,46 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -3981,7 +3989,7 @@ index 824d0b4..0a83943 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1690,12 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1698,12 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -3994,7 +4002,7 @@ index 824d0b4..0a83943 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1726,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1734,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -4002,7 +4010,7 @@ index 824d0b4..0a83943 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1852,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +1860,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -4010,7 +4018,7 @@ index 824d0b4..0a83943 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,10 +1862,21 @@ int main(int argc, char** argv) {
+@@ -1242,10 +1870,21 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -4032,7 +4040,7 @@ index 824d0b4..0a83943 100644
      // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
      // be compared. Any non-zero value will do; the number itself only changes the date a title
      // shows.
-@@ -1334,6 +1965,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +1973,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -4041,7 +4049,7 @@ index 824d0b4..0a83943 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +1991,20 @@ int main(int argc, char** argv) {
+@@ -1358,6 +1999,20 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -4062,7 +4070,7 @@ index 824d0b4..0a83943 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1387,8 +2034,10 @@ int main(int argc, char** argv) {
+@@ -1387,8 +2042,10 @@ int main(int argc, char** argv) {
              log_from = std::strtoull(spec, nullptr, 0);
              if (const char* colon = std::strchr(spec, ':'))
                  log_count = std::strtoull(colon + 1, nullptr, 0);
@@ -4074,7 +4082,7 @@ index 824d0b4..0a83943 100644
          else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
              usage(argv[0], stdout);
              return 0;
-@@ -1398,6 +2047,9 @@ int main(int argc, char** argv) {
+@@ -1398,6 +2055,9 @@ int main(int argc, char** argv) {
              return 2;
          }
      }
@@ -4084,7 +4092,7 @@ index 824d0b4..0a83943 100644
      if (config.empty()) {
          std::fprintf(stderr, "--config is required\n");
          return 2;
-@@ -1682,12 +2334,23 @@ int main(int argc, char** argv) {
+@@ -1682,12 +2342,23 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -4108,7 +4116,7 @@ index 824d0b4..0a83943 100644
          if (!live->start(
                  scale, validation,
                  cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
-@@ -1698,7 +2361,38 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2369,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -4148,7 +4156,7 @@ index 824d0b4..0a83943 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1721,9 +2415,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2423,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -4160,7 +4168,7 @@ index 824d0b4..0a83943 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2426,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2434,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -4168,7 +4176,7 @@ index 824d0b4..0a83943 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2439,10 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2447,10 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -4180,7 +4188,7 @@ index 824d0b4..0a83943 100644
          };
      }
  #endif
-@@ -1770,6 +2467,16 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2475,16 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -4197,7 +4205,7 @@ index 824d0b4..0a83943 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2488,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2496,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -4209,7 +4217,7 @@ index 824d0b4..0a83943 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2500,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2508,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -4233,7 +4241,7 @@ index 824d0b4..0a83943 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -1803,9 +2530,10 @@ int main(int argc, char** argv) {
+@@ -1803,9 +2538,10 @@ int main(int argc, char** argv) {
          sys.sched.request(rtc_tick, 200'000'000ull);
      });
      sys.sched.request(rtc_tick, 200'000'000ull);
@@ -4246,7 +4254,7 @@ index 824d0b4..0a83943 100644
      // The first access to an address that is not in the memory map is the moment a run started
      // going wrong: everything after it is the guest following garbage. The fault log counts them
      // but records neither when nor from where, so the watchdog catches the transition and reports
-@@ -2036,6 +2764,30 @@ int main(int argc, char** argv) {
+@@ -2036,6 +2772,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -4277,7 +4285,7 @@ index 824d0b4..0a83943 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +2798,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2806,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -4290,7 +4298,7 @@ index 824d0b4..0a83943 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2076,10 +2834,13 @@ int main(int argc, char** argv) {
+@@ -2076,10 +2842,13 @@ int main(int argc, char** argv) {
  #ifdef DREAM_WITH_AUDIO
      if (sink.is_open()) {
          sink.flush();
@@ -4306,7 +4314,7 @@ index 824d0b4..0a83943 100644
      }
  #endif
      if (hash_file) {
-@@ -2145,7 +2906,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +2914,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -4466,6 +4474,18 @@ index c7a1f38..95ffb88 100644
      bool vsync_ = false, fieldnum_ = false;
      std::uint64_t frames_ = 0;
  };
+diff --git a/runtime/include/dream/runtime/sched/scheduler.h b/runtime/include/dream/runtime/sched/scheduler.h
+index 9a7ec21..1a51622 100644
+--- a/runtime/include/dream/runtime/sched/scheduler.h
++++ b/runtime/include/dream/runtime/sched/scheduler.h
+@@ -47,6 +47,7 @@ private:
+     };
+     std::vector<Event> events_;
+     std::uint64_t now_ = 0;
++    std::uint64_t floor_ = 0;  // SA-nx: no armed deadline is earlier (advance_to's fast path)
+ };
+ 
+ }  // namespace dream::sched
 diff --git a/runtime/include/dream/runtime/sh4/idle_skip.h b/runtime/include/dream/runtime/sh4/idle_skip.h
 new file mode 100644
 index 0000000..768ccbd
@@ -4508,10 +4528,10 @@ index 0000000..768ccbd
 +
 +}  // namespace dream::sh4
 diff --git a/runtime/include/dream/runtime/sh4/ops.h b/runtime/include/dream/runtime/sh4/ops.h
-index 2c8ccb4..ab2b22d 100644
+index 2c8ccb4..dea9fe1 100644
 --- a/runtime/include/dream/runtime/sh4/ops.h
 +++ b/runtime/include/dream/runtime/sh4/ops.h
-@@ -290,6 +290,89 @@ inline void write_pair(::dream::Memory& m, std::uint32_t addr, std::uint64_t v)
+@@ -290,6 +290,98 @@ inline void write_pair(::dream::Memory& m, std::uint32_t addr, std::uint64_t v)
      m.write32(addr + 4, static_cast<std::uint32_t>(v));
  }
  
@@ -4573,6 +4593,15 @@ index 2c8ccb4..ab2b22d 100644
 +    if (f.store_ok && fast_area(a)) [[likely]] {
 +        std::memcpy(f.ram + (a & f.mask), &v, sizeof v);
 +        return;
++    }
++    // SA-nx: the store queues, where a game builds what it hands the graphics chip (a third of
++    // the game thread at stock clocks went down this path in switch-test22's profile).
++    if constexpr (sizeof(T) >= 4) {
++        if (f.sq && (a & 0xFC000000u) == 0xE0000000u) {
++            std::memcpy(f.sq + ((a >> 5) & 1u) * 32u + (a & (sizeof(T) == 8 ? 0x18u : 0x1Cu)), &v,
++                        sizeof v);
++            return;
++        }
 +    }
 +    c.cycles = cyc;
 +    gst_slow<T>(m, a, v);
@@ -5052,6 +5081,45 @@ index e9b838e..272faa8 100644
              break;
          case 0xE0:
              spg_width = v;
+diff --git a/runtime/src/sched/scheduler.cpp b/runtime/src/sched/scheduler.cpp
+index e9c8dcc..d8d8455 100644
+--- a/runtime/src/sched/scheduler.cpp
++++ b/runtime/src/sched/scheduler.cpp
+@@ -12,6 +12,8 @@ int Scheduler::add(std::string name, Callback cb) {
+ void Scheduler::request(int id, std::uint64_t cycles) {
+     auto& e = events_[static_cast<std::size_t>(id)];
+     e.deadline = cycles == kNever ? kNever : now_ + cycles;
++    if (e.deadline < floor_)
++        floor_ = e.deadline;
+ }
+ 
+ std::uint64_t Scheduler::next_deadline() const noexcept {
+@@ -23,6 +25,13 @@ std::uint64_t Scheduler::next_deadline() const noexcept {
+ }
+ 
+ void Scheduler::advance_to(std::uint64_t target) {
++    // SA-nx: nothing armed is due before floor_, so most calls (every MMIO access brings the
++    // scheduler up to date) end here without scanning the events.
++    if (target < floor_) {
++        if (target > now_)
++            now_ = target;
++        return;
++    }
+     for (;;) {
+         std::size_t idx = events_.size();
+         std::uint64_t best = kNever;
+@@ -32,8 +41,10 @@ void Scheduler::advance_to(std::uint64_t target) {
+                 idx = i;
+             }
+         }
+-        if (idx == events_.size() || best > target)
++        if (idx == events_.size() || best > target) {
++            floor_ = best;  // the earliest deadline still armed
+             break;
++        }
+         const std::uint64_t late = now_ > best ? now_ - best : 0;
+         if (now_ < best)
+             now_ = best;
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
 index b900b12..cd4d6ef 100644
 --- a/runtime/src/sh4/abi_bare.cpp
@@ -5522,7 +5590,7 @@ index d6e0738..3575775 100644
 +    CHECK(std::count(fast.first.begin(), fast.first.end(), 0) < 64);  // it wrote the texture
 +}
 diff --git a/runtime/tests/test_system.cpp b/runtime/tests/test_system.cpp
-index 947fb1b..b903b53 100644
+index 947fb1b..5dfc2e0 100644
 --- a/runtime/tests/test_system.cpp
 +++ b/runtime/tests/test_system.cpp
 @@ -148,6 +148,65 @@ TEST_CASE("spg: NTSC defaults give a 59.8 Hz frame with VBlank-in on the program
@@ -5600,6 +5668,65 @@ index 947fb1b..b903b53 100644
      // Run guest time past the VBlank-in line, then poll.
      c.cycles = sys.spg.line_cycles() * 261;
      sh4::deliver_irq(c, sys.memory);
+@@ -260,3 +319,58 @@ TEST_CASE("system: TRAPA enters the general exception vector with TRA and EXPEVT
+     CHECK(sys.untranslated.total() == 1);
+     sh4::set_hooks(nullptr);
+ }
++
++// SA-nx: emitted code writes the store queues inline (gst, FastMem::sq); the flush still lands the
++// 32 bytes where QACR points.
++TEST_CASE("store queue: inline writes from emitted code, flushed to main RAM") {
++    System sys;
++    auto& m = sys.memory;
++    auto& c = sys.ctx;
++    const sh4::FastMem f = sh4::fast_mem(m);
++    REQUIRE(f.sq != nullptr);
++    std::uint64_t cyc = 0, nev = ~std::uint64_t{0};
++    m.write32(0xFF000038u, 3u << 2);  // QACR0, QACR1: area 3 (main RAM)
++    m.write32(0xFF00003Cu, 3u << 2);
++    for (std::uint32_t i = 0; i < 8; ++i)
++        sh4::gst<std::uint32_t>(m, c, f, cyc, nev, 0xE0000020u + 4 * i, 0x1000u + i);  // SQ1
++    sh4::gst<std::uint64_t>(m, c, f, cyc, nev, 0xE0000008u, 0x0000BBBB0000AAAAull);   // SQ0
++    sh4::gsq_flush(m, c, cyc, nev, 0xE0100020u);
++    sh4::gsq_flush(m, c, cyc, nev, 0xE0100000u);
++    for (std::uint32_t i = 0; i < 8; ++i) CHECK(m.read32(0x8C100020u + 4 * i) == 0x1000u + i);
++    CHECK(m.read32(0x8C100008u) == 0x0000AAAAu);
++    CHECK(m.read32(0x8C10000Cu) == 0x0000BBBBu);
++    // While stores are journaled, the inline path is off and the full path still fills the queue.
++    m.journaling = true;
++    const sh4::FastMem g = sh4::fast_mem(m);
++    CHECK(g.sq == nullptr);
++    sh4::gst<std::uint32_t>(m, c, g, cyc, nev, 0xE0000020u, 0x5555u);
++    m.journaling = false;
++    sh4::gsq_flush(m, c, cyc, nev, 0xE0100020u);
++    CHECK(m.read32(0x8C100020u) == 0x5555u);
++}
++
++// SA-nx: advance_to returns early while nothing is due, and an event armed earlier than every
++// other still runs on time.
++TEST_CASE("scheduler: the fast path never skips an event armed after it") {
++    sched::Scheduler s;
++    int ran_a = 0, ran_b = 0;
++    const int a = s.add("a", [&](std::uint64_t, std::uint64_t) { ++ran_a; });
++    const int b = s.add("b", [&](std::uint64_t, std::uint64_t) { ++ran_b; });
++    s.request(a, 1000);
++    s.advance_to(400);
++    s.advance_to(500);
++    CHECK(s.now() == 500u);
++    s.request(b, 10);  // due at 510, before a
++    s.advance_to(600);
++    CHECK(ran_b == 1);
++    CHECK(ran_a == 0);
++    s.advance_to(999);
++    CHECK(ran_a == 0);
++    s.advance_to(1000);
++    CHECK(ran_a == 1);
++    s.request(b, 5);
++    s.cancel(b);
++    s.advance_to(2000);
++    CHECK(ran_b == 1);
++    CHECK(s.now() == 2000u);
++}
 diff --git a/tests/sh4/programs/p14_bank.bin b/tests/sh4/programs/p14_bank.bin
 new file mode 100644
 index 0000000000000000000000000000000000000000..4c58169e9f66fc39d1d698fcec1f3e5a42a66f90
