@@ -2,6 +2,19 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test22 result: no measurable gain; the TA path is a third of the game thread
+
+- Stock only (Mark, a few minutes), Emerald Coast, 14 windows: 0.84x average (test21 0.86x),
+  game-thread time per guest second 0.936 (test21 0.925): no gain, within the noise. No crash
+  or breakage. The reloads after each store were not where the stock time goes.
+- Slow-only profile, grouped by stack: 33.4% of the game thread's busy samples are in the path
+  that feeds the PowerVR: store-queue writes (`gst_slow<uint32>` 6.9% self, `do_write32` 3.2%:
+  the game builds vertices in the SH-4's store queues at 0xE0000000, which are not main RAM and
+  so take the slow path through a virtual call), `sq_flush` and the scheduler catch-up under it
+  (`resolve` -> `on_device_access` -> `advance_to`), `Ta::feed`, and `DisplayList::feed` /
+  `handle_vertex` (the display list is built on the game thread). Translated game code itself is
+  45.7%.
+
 ## 2026-11-01: switch-test22: relaxed memory access (the clock, GBR and the RAM base in locals)
 
 - Why: translated code reaches guest RAM through `Memory`'s inline path, a byte pointer. At -O1
