@@ -18,6 +18,10 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   writes, the journaling fallback) and `scheduler: the fast path never skips an event armed
   after it`; runtime 84 cases, emitter 13 cases pass.
 - ops.h changed, so every game unit rebuilds.
+- Build: 343 steps (one restart after the 2-hour command limit). NRO sha256
+  39b5e2e4c1b2359733b2ec704e289349b10c96fcab2bb346ba241a5d67d0434d (181,915,679 bytes, 10% larger: the
+  store-queue check is inline at every 32- and 64-bit store), verified in `out\\sd\\switch\\sonicadv\\`;
+  ELF kept as test23.elf.
 - Expectation: the path was 33.4% of the game thread's busy time at stock; some of it remains
   (the stream copy, `Ta::feed`, the TA's own work). A projection, not a promise: stock towards the
   mid 0.9s.
