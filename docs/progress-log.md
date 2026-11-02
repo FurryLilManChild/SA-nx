@@ -2,6 +2,22 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test27: character select from the game's own state
+
+- test26's seven RAM snapshots (Mark: title, VMU select, file select, character select with
+  Sonic and with Knuckles, Emerald Coast twice): words equal on both character-select dumps
+  and different on all five others. Most are display tables (fog, colour ramps) or heap. Two
+  read like state: 0x8C760CF0 (and its twin 0x8C760D34) read 1, 2, 3, 5, 5, 1, 1, a per-screen
+  number in a table of 0x44-byte entries; 0x8C4C7714, in 1ST_READ's data, read 16 on every
+  screen but character select (0, with 0x8C4C7718 going from -63 to 0).
+- switch-test27: outside play, character select is `0x8C760CF0 == 5 && 0x8C4C7714 == 0`, read on
+  the game thread; there the port menu's translucency applies, as in play. The log prints
+  `screen words:` whenever either changes, so the next run shows their values on every screen
+  (the mode-select, options and other menus were not snapshotted).
+- Build: 3 steps. NRO sha256 90d66775dbebc749d9113597fac50bdc00bf5242ddc39ea1a2743fd849a03a25,
+  verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test27.elf. The SAVE RAM SNAPSHOT row stays
+  for now in case the words do not hold.
+
 ## 2026-11-02: switch-test25 result and switch-test26: character select is not what test25 thought
 
 - test25, stock: Emerald Coast 0.97x average over 13 windows (0.90 to 1.00x), game thread 89%
