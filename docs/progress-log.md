@@ -17,6 +17,8 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   (16.7 ms) behind until the next; when the render thread keeps up nothing changes.
 - Tests: the port menu test covers the new row and its text form; host suites pass (dcdisc's
   pytest needs pycdlib, missing in this container, unrelated).
+- Build: 5 of 5 steps. NRO sha256
+  6ff1ced082546262d258977097741f53aed99bd4475c47dc8316209c6d9767a7, verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test24.elf.
 
 ## 2026-11-02: switch-test23 result: TA overhead gone, small gain; the game now waits at vblank
 
