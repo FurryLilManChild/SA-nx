@@ -2,6 +2,21 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test20 result: lock wait gone, small gain
+
+- Stock 1020/307/1331, Emerald Coast (17 windows): 0.85x average (test19 0.82x), game thread
+  80% busy (83%); game-thread time per guest second 0.94 against 1.01, about 7% less. A second
+  short stock stretch later averaged 0.71x (4 windows, heavier part of the stage).
+- 1785: 1.00x, game thread 62% busy (test19 66%).
+- Profile: `svcArbitrateLock` from the AICA event is gone (18.8% of busy samples to 0.4%). The
+  gain is far smaller than that share because most of those waits happened during idle skips
+  while the game was ahead of real time (the 1785 parts of the session), where they cost
+  nothing; the profile does not separate the clock settings. Mark noticed no difference by feel,
+  which fits 0.82x to 0.85x.
+- Remaining busy time worth naming: scheduler `advance_to` 8.5%, SD card reads during play
+  8.4% (GD-ROM sector reads and whole-file loads), idle-wait function 4.4%, `nonlocal_return`
+  exceptions 3.6%; the memory layer about 9%; the rest is translated game code.
+
 ## 2026-11-01: switch-test20: the SH-4 stops waiting on the sound thread's lock
 
 - Change (dream-recomp, patch 0022): `Aica::update_sh4_interrupts()` publishes the SH-4 line
