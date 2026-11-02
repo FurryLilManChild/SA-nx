@@ -2,6 +2,31 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test27 result and switch-test28: disc cache, unwinding cache
+
+- test27: character select recognised (`screen words` 5 and 0 on arrival, translucency switched
+  to the menu's choice there, back to per triangle when it left; screen number 4 is the mode
+  select, flag 16 there). Mark: at 1224 MHz the game runs at full speed; at stock with per
+  triangle it also seems to run at full speed (measured windows 0.93 to 1.00x).
+- Mark's release plan: after test28, if nothing went backwards, release. Stock with per triangle
+  or per strip, overclocking for accurate translucency.
+- switch-test28:
+  - `GdiDisc`: 256-sector blocks in a cache (at most 64, about 38 MB, least recently used out),
+    with a worker thread reading the next two blocks ahead; its own FILE per track. Reading on
+    the game thread was 4.3% of its busy time below full speed and 11.3% over the session
+    (test26 profile). Test: the GDI test now reads a 20,000-sector track (79 blocks) in
+    sequential, backwards, block-edge and 3,000 random reads, byte for byte; clean under
+    ThreadSanitizer.
+  - The boot binary is read in one call instead of through `istreambuf_iterator` (seconds of the
+    Switch's start).
+  - `__wrap__Unwind_Find_FDE` (switch_main.cpp, linked with `--wrap`): a per-thread cache of
+    libgcc's FDE lookups. The exceptions come from the game's longjmp (guest 0x0C110820, its
+    setjmp at 0x0C110894) through `nonlocal_return`; the lookup was 56% of the unwinding time,
+    which was 3.2% of the game thread below full speed (6.5% over the session).
+  - The SAVE RAM SNAPSHOT row is hidden again.
+- Build: 6 steps. NRO sha256 e2b4e9cd683463fc3259eb59cccf458487a22b634bb7f9654fadced5202a6926,
+  verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test28.elf.
+
 ## 2026-11-02: switch-test27: character select from the game's own state
 
 - test26's seven RAM snapshots (Mark: title, VMU select, file select, character select with

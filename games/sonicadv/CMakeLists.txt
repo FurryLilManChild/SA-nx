@@ -36,6 +36,9 @@ if(NINTENDO_SWITCH)
   target_sources(sonicadv_boot PRIVATE ${CMAKE_SOURCE_DIR}/switch/src/switch_main.cpp
     ${CMAKE_SOURCE_DIR}/switch/src/egl_stubs.c)
   target_link_libraries(sonicadv_boot PRIVATE nx)
+  # switch-test28: a cache in front of libgcc's FDE search for C++ exception unwinding
+  # (switch_main.cpp, __wrap__Unwind_Find_FDE).
+  target_link_options(sonicadv_boot PRIVATE -Wl,--wrap=_Unwind_Find_FDE)
   set(SANX_VERSION "0.1.0" CACHE STRING "Version shown in the homebrew menu")
   nx_generate_nacp(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sonicadv.nacp
     NAME "Sonic Adventure (SA-nx)"

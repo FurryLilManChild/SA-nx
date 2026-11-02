@@ -18,6 +18,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <new>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -315,6 +316,47 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
                            (unsigned long)ctx->cpu_gprs[i].x);
     crash_write(text);
     svcExitProcess();
+}
+
+// --- exception unwinding: a cache in front of libgcc's FDE search -----------------------------
+// The game's longjmp (guest 0x0C110820) reaches the translated setjmp through a C++ exception
+// (dream::sh4::nonlocal_return), several hundred times a second in play. For every frame it
+// unwinds, libgcc looks the return address up in this module's frame tables, a search over
+// hundreds of thousands of entries: 56% of the unwinding time, about 1.8% of the game thread
+// below full speed in switch-test26's profile. The same few call sites repeat, and the tables
+// never change in a static executable, so each answer is kept per thread. The struct is libgcc's
+// dwarf_eh_bases (unwind-dw2-fde.h).
+struct DwarfEhBases {
+    void* tbase;
+    void* dbase;
+    void* func;
+};
+extern "C" const void* __real__Unwind_Find_FDE(void* pc, DwarfEhBases* bases);
+extern "C" const void* __wrap__Unwind_Find_FDE(void* pc, DwarfEhBases* bases) {
+    struct Entry {
+        void* pc;
+        const void* fde;
+        DwarfEhBases bases;
+    };
+    constexpr std::size_t kEntries = 4096;  // a power of two
+    static thread_local Entry* table = nullptr;
+    if (!table)
+        table = new (std::nothrow) Entry[kEntries]();
+    if (!table)
+        return __real__Unwind_Find_FDE(pc, bases);
+    const std::uint64_t key = reinterpret_cast<std::uintptr_t>(pc);
+    Entry& e = table[((key >> 2) * 0x9E3779B97F4A7C15ull) >> 52];
+    if (e.pc == pc && e.fde) {
+        *bases = e.bases;
+        return e.fde;
+    }
+    const void* fde = __real__Unwind_Find_FDE(pc, bases);
+    if (fde) {
+        e.pc = pc;
+        e.fde = fde;
+        e.bases = *bases;
+    }
+    return fde;
 }
 
 // --- sampling profiler --------------------------------------------------------------------

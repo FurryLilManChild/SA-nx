@@ -3183,7 +3183,7 @@ index 0000000..270f30a
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..3bdf14c 100644
+index 824d0b4..744a807 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,29 @@
@@ -3908,7 +3908,7 @@ index 824d0b4..3bdf14c 100644
 +
 +    void open_port() {
 +        port.open(options, dream_port_set_cpu_mhz != nullptr);
-+        port.show_snapshot = true;  // switch-test26 only (save_ram_snapshot)
++        port.show_snapshot = false;  // switch-test26's RAM snapshots (save_ram_snapshot): done
 +#ifdef __SWITCH__
 +        port.help = "A CHOOSES, LEFT RIGHT CHANGES, B RESUMES";
 +#endif
@@ -4241,7 +4241,24 @@ index 824d0b4..3bdf14c 100644
      if (config.empty()) {
          std::fprintf(stderr, "--config is required\n");
          return 2;
-@@ -1682,12 +2437,23 @@ int main(int argc, char** argv) {
+@@ -1440,7 +2195,15 @@ int main(int argc, char** argv) {
+         std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
+         return 2;
+     }
+-    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++    // SA-nx (switch-test28): one read of the whole file. Character by character through
++    // istreambuf_iterator took seconds of the Switch's start (switch-test26 profile).
++    in.seekg(0, std::ios::end);
++    std::vector<char> bytes(static_cast<std::size_t>(std::max<std::streamoff>(in.tellg(), 0)));
++    in.seekg(0, std::ios::beg);
++    if (!in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
++        std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
++        return 2;
++    }
+ 
+     dream::System sys;
+     dream::hle::Bios bios(sys);
+@@ -1682,12 +2445,23 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -4265,7 +4282,7 @@ index 824d0b4..3bdf14c 100644
          if (!live->start(
                  scale, validation,
                  cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
-@@ -1698,7 +2464,38 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2472,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -4305,7 +4322,7 @@ index 824d0b4..3bdf14c 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1712,6 +2509,8 @@ int main(int argc, char** argv) {
+@@ -1712,6 +2517,8 @@ int main(int argc, char** argv) {
          // Wall-clock time the guest was stopped for, which the pacing below owes back. Without it
          // the run would sprint to catch up the moment the binding screen closed.
          auto paused_for = std::chrono::steady_clock::duration::zero();
@@ -4314,7 +4331,7 @@ index 824d0b4..3bdf14c 100644
          auto previous_vblank = std::move(sys.spg.on_vblank_out);
          sys.spg.on_vblank_out = [&, previous_vblank, started] {
              if (previous_vblank)
-@@ -1721,9 +2520,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2528,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -4326,7 +4343,7 @@ index 824d0b4..3bdf14c 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2531,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2539,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -4334,7 +4351,7 @@ index 824d0b4..3bdf14c 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2544,16 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2552,16 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -4352,7 +4369,7 @@ index 824d0b4..3bdf14c 100644
          };
      }
  #endif
-@@ -1770,6 +2578,16 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2586,16 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -4369,7 +4386,7 @@ index 824d0b4..3bdf14c 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2599,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2607,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -4381,7 +4398,7 @@ index 824d0b4..3bdf14c 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2611,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2619,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -4405,7 +4422,7 @@ index 824d0b4..3bdf14c 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -1803,9 +2641,10 @@ int main(int argc, char** argv) {
+@@ -1803,9 +2649,10 @@ int main(int argc, char** argv) {
          sys.sched.request(rtc_tick, 200'000'000ull);
      });
      sys.sched.request(rtc_tick, 200'000'000ull);
@@ -4418,7 +4435,7 @@ index 824d0b4..3bdf14c 100644
      // The first access to an address that is not in the memory map is the moment a run started
      // going wrong: everything after it is the guest following garbage. The fault log counts them
      // but records neither when nor from where, so the watchdog catches the transition and reports
-@@ -2036,6 +2875,30 @@ int main(int argc, char** argv) {
+@@ -2036,6 +2883,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -4449,7 +4466,7 @@ index 824d0b4..3bdf14c 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +2909,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2917,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -4462,7 +4479,7 @@ index 824d0b4..3bdf14c 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2076,10 +2945,13 @@ int main(int argc, char** argv) {
+@@ -2076,10 +2953,13 @@ int main(int argc, char** argv) {
  #ifdef DREAM_WITH_AUDIO
      if (sink.is_open()) {
          sink.flush();
@@ -4478,7 +4495,7 @@ index 824d0b4..3bdf14c 100644
      }
  #endif
      if (hash_file) {
-@@ -2145,7 +3017,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +3025,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -4962,10 +4979,21 @@ index c8d4401..9e54bc3 100644
      arm.run(Arm7::kCyclesPerSample);
      step_timers();
 diff --git a/runtime/src/gdrom/disc.cpp b/runtime/src/gdrom/disc.cpp
-index e6b08a9..dc83422 100644
+index e6b08a9..2e2c286 100644
 --- a/runtime/src/gdrom/disc.cpp
 +++ b/runtime/src/gdrom/disc.cpp
-@@ -5,6 +5,8 @@
+@@ -1,10 +1,19 @@
+ #include "dream/runtime/gdrom/disc.h"
+ 
+ #include <algorithm>
++#include <condition_variable>
+ #include <cstdio>
++#include <deque>
++#include <list>
++#include <memory>
++#include <mutex>
++#include <thread>
++#include <unordered_map>
  #include <cstring>
  #include <fstream>
  #include <map>
@@ -4974,7 +5002,7 @@ index e6b08a9..dc83422 100644
  #include <sstream>
  
  #include <libchdr/chd.h>
-@@ -142,7 +144,10 @@ public:
+@@ -142,7 +151,10 @@ public:
              t.sectors = static_cast<std::uint32_t>((fsize - offset) / ssize);
              t.data = type == 4;
              tracks_.push_back(t);
@@ -4986,42 +5014,182 @@ index e6b08a9..dc83422 100644
          }
          if (tracks_.empty()) {
              error = "GDI lists no tracks";
-@@ -164,9 +169,22 @@ public:
+@@ -152,36 +164,162 @@ public:
+         return true;
+     }
+ 
++    // SA-nx (switch-test28): sectors come from a cache of 256-sector blocks, and a thread of its
++    // own reads the two blocks after the one being read before the game asks for them. Reading on
++    // the game thread was 4% of its working time below full speed and 11% over a session
++    // (switch-test26 profile); test5's 64-sector window had already cut the number of requests.
++    // The disc is read-only, so a cached block never goes stale. At most kMaxBlocks are kept
++    // (about 38 MB), least recently used first out.
+     bool read_raw(std::uint32_t lba, std::uint8_t* out) override {
+         const Track* t = track_for(lba);
+         if (!t)
+             return false;
+-        auto& f = files_[t->number];
+-        if (!f.handle) {
+-            f.handle = std::fopen(f.path.c_str(), "rb");
+-            if (!f.handle)
+-                return false;
++        const std::uint32_t index = lba - t->lba;
++        const std::uint32_t block = index / kBlockSectors;
++        const Key key = (static_cast<Key>(t->number) << 32) | block;
++        std::shared_ptr<Block> b;
++        {
++            std::unique_lock<std::mutex> lock(mu_);
++            start_worker();
++            auto it = blocks_.find(key);
++            if (it == blocks_.end()) {
++                b = std::make_shared<Block>();
++                insert(key, b);
++                lock.unlock();
++                const bool ok = load(main_handles_, *t, block, *b);
++                lock.lock();
++                b->ready = true;
++                b->ok = ok;
++                cv_.notify_all();
++            } else {
++                b = it->second;
++                touch(key);
++                cv_.wait(lock, [&] { return b->ready; });
++            }
++            for (std::uint32_t k = 1; k <= kAhead; ++k) {
++                const std::uint32_t next = block + k;
++                if (static_cast<std::uint64_t>(next) * kBlockSectors >= t->sectors)
++                    break;
++                const Key nk = (static_cast<Key>(t->number) << 32) | next;
++                if (blocks_.find(nk) == blocks_.end()) {
++                    insert(nk, std::make_shared<Block>());
++                    queue_.push_back(nk);
++                    cv_.notify_all();
++                }
++            }
          }
-         const std::uint64_t pos =
-             f.offset + static_cast<std::uint64_t>(lba - t->lba) * t->sector_size;
+-        const std::uint64_t pos =
+-            f.offset + static_cast<std::uint64_t>(lba - t->lba) * t->sector_size;
 -        if (std::fseek(f.handle, static_cast<long>(pos), SEEK_SET) != 0)
--            return false;
++        const std::size_t at = static_cast<std::size_t>(index % kBlockSectors) * t->sector_size;
++        if (!b->ok || at + t->sector_size > b->data.size())
+             return false;
 -        return std::fread(out, 1, t->sector_size, f.handle) == t->sector_size;
-+        // SA-nx: sectors come out of a 64-sector window read in one go. One fseek and fread per
-+        // sector was one file-system request each on the Switch (2.6% of the game thread in
-+        // test5's profile, all on the game thread); the disc is read-only, so the window never
-+        // goes stale.
-+        if (pos < f.window_pos || pos + t->sector_size > f.window_pos + f.window_len) {
-+            constexpr std::size_t kWindowSectors = 64;
-+            f.window.resize(kWindowSectors * t->sector_size);
-+            if (std::fseek(f.handle, static_cast<long>(pos), SEEK_SET) != 0)
-+                return false;
-+            f.window_pos = pos;
-+            f.window_len = std::fread(f.window.data(), 1, f.window.size(), f.handle);
-+            if (f.window_len < t->sector_size)
-+                return false;
-+        }
-+        std::memcpy(out, f.window.data() + (pos - f.window_pos), t->sector_size);
++        std::memcpy(out, b->data.data() + at, t->sector_size);
 +        return true;
      }
  
      ~GdiDisc() override {
-@@ -180,6 +198,9 @@ private:
+-        for (auto& [n, f] : files_)
+-            if (f.handle)
+-                std::fclose(f.handle);
++        {
++            std::lock_guard<std::mutex> lock(mu_);
++            stop_ = true;
++        }
++        cv_.notify_all();
++        if (worker_.joinable())
++            worker_.join();
++        for (auto* handles : {&main_handles_, &worker_handles_})
++            for (auto& [n, h] : *handles)
++                if (h)
++                    std::fclose(h);
+     }
+ 
+ private:
++    static constexpr std::uint32_t kBlockSectors = 256, kAhead = 2;
++    static constexpr std::size_t kMaxBlocks = 64;
++    using Key = std::uint64_t;  // track number << 32 | block
++    struct Block {
++        std::vector<std::uint8_t> data;
++        bool ready = false, ok = false;
++    };
+     struct File {
          std::string path;
          std::uint64_t offset = 0;
-         FILE* handle = nullptr;
-+        std::vector<std::uint8_t> window;  // read-ahead (SA-nx)
-+        std::uint64_t window_pos = 0;
-+        std::size_t window_len = 0;
+-        FILE* handle = nullptr;
      };
++
++    // One FILE per track per thread: the worker never shares a handle with the game thread.
++    bool load(std::map<unsigned, FILE*>& handles, const Track& t, std::uint32_t block, Block& b) {
++        const File& f = files_.at(t.number);
++        FILE*& h = handles[t.number];
++        if (!h)
++            h = std::fopen(f.path.c_str(), "rb");
++        if (!h)
++            return false;
++        const std::uint64_t first = static_cast<std::uint64_t>(block) * kBlockSectors;
++        const std::uint64_t count = std::min<std::uint64_t>(kBlockSectors, t.sectors - first);
++        b.data.resize(static_cast<std::size_t>(count * t.sector_size));
++        if (std::fseek(h, static_cast<long>(f.offset + first * t.sector_size), SEEK_SET) != 0)
++            return false;
++        const std::size_t got = std::fread(b.data.data(), 1, b.data.size(), h);
++        b.data.resize(got);
++        return got >= t.sector_size;
++    }
++
++    // With mu_ held.
++    void insert(Key key, std::shared_ptr<Block> b) {
++        blocks_[key] = std::move(b);
++        lru_.push_front(key);
++        where_[key] = lru_.begin();
++        while (blocks_.size() > kMaxBlocks) {
++            const Key old = lru_.back();
++            auto bit = blocks_.find(old);
++            if (bit != blocks_.end() && !bit->second->ready)
++                break;  // still being read; it goes on a later insert
++            lru_.pop_back();
++            where_.erase(old);
++            blocks_.erase(old);  // a reader holding it keeps its copy alive
++        }
++    }
++    void touch(Key key) {
++        auto w = where_.find(key);
++        if (w == where_.end())
++            return;
++        lru_.splice(lru_.begin(), lru_, w->second);
++    }
++    void start_worker() {
++        if (worker_.joinable())
++            return;
++        worker_ = std::thread([this] {
++            std::unique_lock<std::mutex> lock(mu_);
++            for (;;) {
++                cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
++                if (stop_)
++                    return;
++                const Key key = queue_.front();
++                queue_.pop_front();
++                auto it = blocks_.find(key);
++                if (it == blocks_.end() || it->second->ready)
++                    continue;
++                std::shared_ptr<Block> b = it->second;
++                const Track* t = nullptr;
++                for (const auto& tr : tracks_)
++                    if (tr.number == static_cast<unsigned>(key >> 32))
++                        t = &tr;
++                lock.unlock();
++                const bool ok = t && load(worker_handles_, *t, static_cast<std::uint32_t>(key), *b);
++                lock.lock();
++                b->ok = ok;
++                b->ready = true;
++                cv_.notify_all();
++            }
++        });
++    }
++
      std::map<unsigned, File> files_;
++    std::map<unsigned, FILE*> main_handles_, worker_handles_;
++    std::mutex mu_;
++    std::condition_variable cv_;
++    std::unordered_map<Key, std::shared_ptr<Block>> blocks_;
++    std::list<Key> lru_;
++    std::unordered_map<Key, std::list<Key>::iterator> where_;
++    std::deque<Key> queue_;
++    std::thread worker_;
++    bool stop_ = false;
  };
+ 
+ // ---- CHD ---------------------------------------------------------------------------------------
 diff --git a/runtime/src/holly/intc.cpp b/runtime/src/holly/intc.cpp
 index 7ea3f33..8bf8268 100644
 --- a/runtime/src/holly/intc.cpp
@@ -5533,7 +5701,7 @@ index 0a8ad16..efcbbd0 100644
 +    r.aica.stop_thread();
 +}
 diff --git a/runtime/tests/test_gdrom.cpp b/runtime/tests/test_gdrom.cpp
-index 0ac9967..38239a5 100644
+index 0ac9967..a84ae8b 100644
 --- a/runtime/tests/test_gdrom.cpp
 +++ b/runtime/tests/test_gdrom.cpp
 @@ -1,3 +1,7 @@
@@ -5544,14 +5712,16 @@ index 0ac9967..38239a5 100644
  #include <cstring>
  #include <string>
  
-@@ -66,3 +70,54 @@ TEST_CASE("disc: unsupported and missing images report errors") {
+@@ -66,3 +70,65 @@ TEST_CASE("disc: unsupported and missing images report errors") {
      CHECK(open_disc("/nonexistent/x.chd", err) == nullptr);
      CHECK(!err.empty());
  }
 +
 +TEST_CASE("gdi: sectors read in any order match the track files byte for byte") {
-+    // SA-nx: GdiDisc reads 64-sector windows. Sectors asked for out of order, across window edges,
-+    // backwards and across tracks must still be exactly the bytes in the files.
++    // SA-nx: GdiDisc serves sectors from cached 256-sector blocks, read ahead on a thread of its
++    // own, at most 64 blocks kept (switch-test28). Sectors asked for out of order, across block
++    // edges, backwards, across tracks, and again after their block was evicted must still be
++    // exactly the bytes in the files.
 +    namespace fs = std::filesystem;
 +    const fs::path dir = fs::temp_directory_path() / "dream_gdi_window_test";
 +    fs::create_directories(dir);
@@ -5559,13 +5729,16 @@ index 0ac9967..38239a5 100644
 +        return static_cast<std::uint8_t>((i * 131u + track * 7u + (i >> 9)) & 0xFFu);
 +    };
 +    const unsigned sizes[3] = {2352, 2352, 2352};
-+    const unsigned counts[3] = {150, 10, 200};  // track 3 spans several windows
++    const unsigned counts[3] = {150, 10, 20000};  // track 3: 79 blocks, more than the cache keeps
 +    const unsigned lbas[3] = {0, 11000, 45000};
 +    for (unsigned t = 0; t < 3; ++t) {
 +        std::FILE* f = std::fopen((dir / ("track0" + std::to_string(t + 1) + ".bin")).string().c_str(), "wb");
 +        REQUIRE(f != nullptr);
-+        for (std::uint64_t i = 0; i < std::uint64_t(sizes[t]) * counts[t]; ++i)
-+            std::fputc(byte_at(t, i), f);
++        std::vector<std::uint8_t> buf(sizes[t]);
++        for (std::uint64_t sct = 0; sct < counts[t]; ++sct) {
++            for (unsigned i = 0; i < sizes[t]; ++i) buf[i] = byte_at(t, sct * sizes[t] + i);
++            std::fwrite(buf.data(), 1, buf.size(), f);
++        }
 +        std::fclose(f);
 +    }
 +    {
@@ -5580,13 +5753,19 @@ index 0ac9967..38239a5 100644
 +    REQUIRE_MESSAGE(disc != nullptr, err);
 +    std::vector<std::pair<unsigned, unsigned>> order;  // (track, sector)
 +    for (unsigned s = 0; s < counts[2]; s += 37) order.push_back({2, s});
-+    for (unsigned s = counts[2]; s-- > 0;) order.push_back({2, s});  // backwards
++    for (unsigned s = 400; s-- > 0;) order.push_back({2, s});  // backwards, across a block edge
++    for (unsigned s = 250; s < 1300; ++s) order.push_back({2, s});  // sequential, read ahead
++    std::uint32_t rng = 7;
++    for (int k = 0; k < 3000; ++k) {  // anywhere, evicting and re-reading blocks
++        rng = rng * 1664525u + 1013904223u;
++        order.push_back({2, (rng >> 8) % counts[2]});
++    }
 +    order.push_back({0, 149});
 +    order.push_back({1, 3});
-+    order.push_back({2, 63});
-+    order.push_back({2, 64});
++    order.push_back({2, 255});
++    order.push_back({2, 256});
 +    order.push_back({0, 0});
-+    order.push_back({2, 199});
++    order.push_back({2, 19999});
 +    std::vector<std::uint8_t> sector(2352);
 +    for (const auto& [t, s] : order) {
 +        REQUIRE(disc->read_raw(lbas[t] + s, sector.data()));
@@ -5595,7 +5774,7 @@ index 0ac9967..38239a5 100644
 +            same = sector[i] == byte_at(t, std::uint64_t(s) * 2352 + i);
 +        CHECK_MESSAGE(same, "track " << t + 1 << " sector " << s);
 +    }
-+    CHECK_FALSE(disc->read_raw(45000 + 200, sector.data()));  // past the end of track 3
++    CHECK_FALSE(disc->read_raw(45000 + 20000, sector.data()));  // past the end of track 3
 +    disc.reset();
 +    fs::remove_all(dir);
 +}
