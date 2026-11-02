@@ -19,6 +19,16 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   other refresh kept the last frame.
 - switch-test25: lateness beyond one 60 Hz refresh is written off (the pacing baseline moves
   forward), in both pacing modes; the on-screen FPS counts refreshes that kept the last frame.
+- Also in switch-test25 (Mark's request): per-pixel translucency only in play and on character
+  select; the title and the other menus draw per triangle. `Live::choose_translucency` sets the
+  mode on the target just before each render (on the render thread), replacing
+  `apply_options`'s writes, which could now race a render in flight. Character select runs in the
+  same module (ADVERTISE) as the other menus, so it is recognised by its translucent polygon
+  count: per pixel from 400 a render (about 1,500 measured there, the main menus under 150),
+  back to per triangle after 60 renders in a row under 200. The log prints `translucency here:`
+  at each change. A heuristic: Mark checks character select still looks right.
+- Build: 3 steps. NRO sha256 875c2a47db4785fa7e6fc5bead63d7a1b4b520e0006cbbac9d8367bf8889c81a,
+  verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test25.elf.
 
 ## 2026-11-02: switch-test24: frame pacing, "smooth" by default
 
