@@ -14,6 +14,7 @@
 // The clock and crash-report approach follows CoD-nx's src/switch_nx.c (MIT, burnout3-sw's base).
 #include <switch.h>
 
+#include <cctype>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdint>
@@ -24,6 +25,7 @@
 #include <exception>
 #include <fstream>
 #include <string>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -547,12 +549,28 @@ int main(int argc, char** argv) {
 
     chdir(kDir);
     mkdir("sdmc:/switch/sonicadv/save", 0777);
-    if (!exists("sdmc:/switch/sonicadv/sonicadv.toml") ||
-        !exists("sdmc:/switch/sonicadv/1ST_READ.BIN")) {
+    // The disc dump is what a player must supply: a GDI (with its tracks) or a CHD in disc/.
+    // 1ST_READ.BIN is taken from it on the first start (release 0.5.0; the first release build
+    // still demanded it here and stopped before the launcher could extract it).
+    bool have_disc = false;
+    if (DIR* d = opendir("sdmc:/switch/sonicadv/disc")) {
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (n.size() > 4 && (n.compare(n.size() - 4, 4, ".gdi") == 0 ||
+                                 n.compare(n.size() - 4, 4, ".chd") == 0))
+                have_disc = true;
+        }
+        closedir(d);
+    }
+    if (!exists("sdmc:/switch/sonicadv/sonicadv.toml") || !have_disc) {
+        std::printf("[switch] missing game files: sonicadv.toml %s, disc dump %s\n",
+                    exists("sdmc:/switch/sonicadv/sonicadv.toml") ? "found" : "missing",
+                    have_disc ? "found" : "missing");
         std::fflush(stdout);
-        message_screen("Missing game files.\n\nsdmc:/switch/sonicadv/ needs sonicadv.toml,\n"
-                       "1ST_READ.BIN and the disc/ folder (the GDI and its tracks).\n"
-                       "See the README.");
+        message_screen("Missing game files.\n\nPut your Sonic Adventure disc dump (the .gdi file and\n"
+                       "its three track files) in sdmc:/switch/sonicadv/disc/,\n"
+                       "next to sonicadv.toml. See the README.");
         return 0;
     }
 

@@ -25,6 +25,11 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   5fadfae75ace692e58a6feadb52e711112141652348f692e35b6f9b26ddb0ed9; NRO sha256
   ffc94a45ee09885cc7db1887a86c8e45fabf84bfb4b5150ee759edc8c50f74dd; release_notes.md. ELF kept as
   release-0.5.0.elf. The build-switch cache now has SANX_RELEASE=ON; set it OFF for test builds.
+- Clean-install test 1 (Mark): "Missing game files" before anything else. `switch_main.cpp`
+  still required 1ST_READ.BIN before starting the launcher, so the extraction never ran. Now it
+  requires sonicadv.toml and a .gdi or .chd in disc/. Repackaged: zip sha256
+  4e133cfe8cb67a74f26eaaa9f0f439c3b709f6acd050de1e666f2e4d206da9ef, NRO sha256
+  5b740790b9b552c798dddd72cf229714038fde5cde90bec4d77684fd58158d6e.
 
 ## 2026-11-02: switch-test27 result and switch-test28: disc cache, unwinding cache
 
