@@ -3150,7 +3150,7 @@ index 0000000..a95478f
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..2fb195a 100644
+index 824d0b4..0a83943 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -24,6 +24,29 @@
@@ -4233,7 +4233,20 @@ index 824d0b4..2fb195a 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -2036,6 +2763,30 @@ int main(int argc, char** argv) {
+@@ -1803,9 +2530,10 @@ int main(int argc, char** argv) {
+         sys.sched.request(rtc_tick, 200'000'000ull);
+     });
+     sys.sched.request(rtc_tick, 200'000'000ull);
+-    // Frame and time limits, checked once per scanline.
++    // Frame and time limits, checked once a frame (SA-nx: was once per scanline, which woke the
++    // SH-4 31,500 times a second; see Spg).
+     int tick = -1;
+-    const std::uint64_t period = sys.spg.line_cycles();
++    const std::uint64_t period = sys.spg.frame_cycles();
+     // The first access to an address that is not in the memory map is the moment a run started
+     // going wrong: everything after it is the guest following garbage. The fault log counts them
+     // but records neither when nor from where, so the watchdog catches the transition and reports
+@@ -2036,6 +2764,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -4264,7 +4277,7 @@ index 824d0b4..2fb195a 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +2797,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +2798,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -4277,7 +4290,7 @@ index 824d0b4..2fb195a 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2076,10 +2833,13 @@ int main(int argc, char** argv) {
+@@ -2076,10 +2834,13 @@ int main(int argc, char** argv) {
  #ifdef DREAM_WITH_AUDIO
      if (sink.is_open()) {
          sink.flush();
@@ -4293,7 +4306,7 @@ index 824d0b4..2fb195a 100644
      }
  #endif
      if (hash_file) {
-@@ -2145,7 +2905,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +2906,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -4376,6 +4389,83 @@ index 1ac2d5e..15bf7df 100644
      std::uint32_t reg_read(std::uint32_t offset, unsigned size);
      void reg_write(std::uint32_t offset, std::uint32_t value, unsigned size);
      void store(std::uint32_t offset, std::uint32_t value, unsigned size);
+diff --git a/runtime/include/dream/runtime/holly/intc.h b/runtime/include/dream/runtime/holly/intc.h
+index ec29bf6..5911673 100644
+--- a/runtime/include/dream/runtime/holly/intc.h
++++ b/runtime/include/dream/runtime/holly/intc.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <functional>
+ 
+ #include "dream/runtime/mem/dc_memory.h"
+ #include "dream/runtime/sh4/intc.h"
+@@ -63,6 +64,10 @@ public:
+     void reset();
+ 
+     void raise(Irq irq);
++    // SA-nx: called after every raise. System uses it to make the SH-4 poll at its next check,
++    // so an interrupt raised inside an MMIO access (TA end of list, channel-2 DMA) is taken as
++    // soon as before, now that the SPG no longer schedules an event on every scanline.
++    std::function<void()> on_raise;
+     void clear(Irq irq);  // for external sources, which the device lowers itself
+     bool raised(Irq irq) const noexcept;
+ 
+diff --git a/runtime/include/dream/runtime/pvr/spg.h b/runtime/include/dream/runtime/pvr/spg.h
+index c7a1f38..95ffb88 100644
+--- a/runtime/include/dream/runtime/pvr/spg.h
++++ b/runtime/include/dream/runtime/pvr/spg.h
+@@ -1,7 +1,10 @@
+ // Sync pulse generator (WP2.2): the video timing that drives VBlank-in/out and HBlank interrupts
+ // and the SPG_STATUS scanline the game reads. Timing follows Flycast's spg.cpp (GPL-2.0, ADR 1):
+-// one scheduler event per scanline, line length from SPG_LOAD and the pixel clock (13.5 MHz unless
+-// FB_R_CTRL.vclk_div selects 27 MHz). Registers at PVR base + 0xC8..0xE0 and SPG_STATUS at +0x10C.
++// line length from SPG_LOAD and the pixel clock (13.5 MHz unless FB_R_CTRL.vclk_div selects
++// 27 MHz). SA-nx: the scheduler event fires only on lines where something happens (VBlank in and
++// out, the vsync edges, line 0, the HBlank interrupt line, or every line when that interrupt is
++// set to repeat); SPG_STATUS works the scanline out from the clock. One event per line woke the
++// SH-4 31,500 times a second and cut every idle skip short (switch-test20 profile). Registers at PVR base + 0xC8..0xE0 and SPG_STATUS at +0x10C.
+ #pragma once
+ 
+ #include <cstdint>
+@@ -27,7 +30,11 @@ public:
+     std::uint32_t read(std::uint32_t addr, unsigned size) override;
+     void write(std::uint32_t addr, std::uint32_t value, unsigned size) override;
+ 
+-    std::uint32_t scanline() const noexcept { return scanline_; }
++    std::uint32_t scanline() const noexcept { return line_at(now()); }
++    // SA-nx: the SH-4's own cycle count, which runs ahead of the scheduler between polls (System
++    // points this at ctx.cycles). Null: the scheduler's clock alone.
++    const std::uint64_t* clock = nullptr;
++    std::uint64_t events = 0;  // line events taken (diagnostics)
+     std::uint32_t lines() const noexcept { return ((spg_load >> 16) & 0x3FFu) + 1; }
+     std::uint64_t line_cycles() const noexcept { return line_cycles_; }
+     std::uint64_t frame_cycles() const noexcept { return line_cycles_ * lines(); }
+@@ -43,14 +50,21 @@ public:
+ 
+ private:
+     void recalc();
+-    void on_line();
++    void on_line(std::uint64_t late);
++    void line_effects();
++    std::uint64_t now() const noexcept;
++    std::uint32_t line_at(std::uint64_t t) const noexcept;
++    void sync();           // fold the lines passed since the last event into scanline_/base_
++    void schedule_next();  // arm the event for the next line where something happens
++    bool eventful(std::uint32_t line) const noexcept;
+ 
+     sched::Scheduler& sched_;
+     holly::Intc& holly_;
+     int event_ = -1;
+     bool vclk_full_ = false;
+     std::uint64_t line_cycles_ = 0;
+-    std::uint32_t scanline_ = 0;
++    std::uint32_t scanline_ = 0;  // the line that started at base_
++    std::uint64_t base_ = 0;
+     bool vsync_ = false, fieldnum_ = false;
+     std::uint64_t frames_ = 0;
+ };
 diff --git a/runtime/include/dream/runtime/sh4/idle_skip.h b/runtime/include/dream/runtime/sh4/idle_skip.h
 new file mode 100644
 index 0000000..768ccbd
@@ -4645,6 +4735,19 @@ index e6b08a9..dc83422 100644
      };
      std::map<unsigned, File> files_;
  };
+diff --git a/runtime/src/holly/intc.cpp b/runtime/src/holly/intc.cpp
+index 7ea3f33..8bf8268 100644
+--- a/runtime/src/holly/intc.cpp
++++ b/runtime/src/holly/intc.cpp
+@@ -17,6 +17,8 @@ void Intc::raise(Irq irq) {
+     else
+         isterr |= 1u << (n - 64);
+     recompute();
++    if (on_raise)
++        on_raise();
+ }
+ 
+ void Intc::clear(Irq irq) {
 diff --git a/runtime/src/pvr/core.cpp b/runtime/src/pvr/core.cpp
 index 8300e77..3d5d39d 100644
 --- a/runtime/src/pvr/core.cpp
@@ -4697,6 +4800,164 @@ index 8300e77..3d5d39d 100644
              ++texture_words;
          }
      }
+diff --git a/runtime/src/pvr/spg.cpp b/runtime/src/pvr/spg.cpp
+index e9b838e..272faa8 100644
+--- a/runtime/src/pvr/spg.cpp
++++ b/runtime/src/pvr/spg.cpp
+@@ -3,7 +3,7 @@
+ namespace dream::pvr {
+ 
+ Spg::Spg(sched::Scheduler& sched, holly::Intc& holly) : sched_(sched), holly_(holly) {
+-    event_ = sched_.add("spg-line", [this](std::uint64_t, std::uint64_t) { on_line(); });
++    event_ = sched_.add("spg-line", [this](std::uint64_t, std::uint64_t late) { on_line(late); });
+     reset();
+ }
+ 
+@@ -16,6 +16,7 @@ void Spg::reset() {
+     spg_vblank = 0x00150104;
+     spg_width = 0x07F1933F;
+     scanline_ = 0;
++    base_ = sched_.now();
+     vsync_ = fieldnum_ = false;
+     frames_ = 0;
+     recalc();
+@@ -27,6 +28,7 @@ void Spg::set_vclk_div(bool full) {
+ }
+ 
+ void Spg::recalc() {
++    sync();
+     const std::uint64_t pixel_clock = vclk_full_ ? kPixelClock : kPixelClock / 2;
+     const std::uint64_t hcount = (spg_load & 0x3FFu) + 1;  // SPG_LOAD: hcount 9:0, vcount 25:16
+     line_cycles_ = sched::kSh4Clock * hcount / pixel_clock;
+@@ -34,11 +36,73 @@ void Spg::recalc() {
+         line_cycles_ /= 2;
+     if (line_cycles_ == 0)
+         line_cycles_ = 1;
+-    sched_.request(event_, line_cycles_);
++    // As before this change: a new line length starts a line now.
++    base_ = sched_.now();
++    schedule_next();
+ }
+ 
+-void Spg::on_line() {
+-    scanline_ = (scanline_ + 1) % lines();
++std::uint64_t Spg::now() const noexcept {
++    const std::uint64_t s = sched_.now();
++    return clock && *clock > s ? *clock : s;
++}
++
++std::uint32_t Spg::line_at(std::uint64_t t) const noexcept {
++    const std::uint64_t passed = t > base_ ? (t - base_) / line_cycles_ : 0;
++    return static_cast<std::uint32_t>((scanline_ + passed) % lines());
++}
++
++void Spg::sync() {
++    if (line_cycles_ == 0)
++        return;
++    const std::uint64_t t = sched_.now();
++    if (t <= base_)
++        return;
++    const std::uint64_t passed = (t - base_) / line_cycles_;
++    scanline_ = static_cast<std::uint32_t>((scanline_ + passed) % lines());
++    base_ += passed * line_cycles_;
++}
++
++bool Spg::eventful(std::uint32_t line) const noexcept {
++    if (line == 0 || line == (spg_vblank_int & 0x3FFu) || line == ((spg_vblank_int >> 16) & 0x3FFu) ||
++        line == (spg_vblank & 0x3FFu) || line == ((spg_vblank >> 16) & 0x3FFu))
++        return true;
++    switch ((spg_hblank_int >> 12) & 3u) {
++        case 0:
++            return line == ((spg_hblank_int >> 16) & 0x3FFu);
++        case 2:
++            return true;
++        default:
++            return false;
++    }
++}
++
++void Spg::schedule_next() {
++    const std::uint32_t n = lines();
++    std::uint32_t d = 1;
++    while (d < n && !eventful((scanline_ + d) % n))
++        ++d;
++    const std::uint64_t at = base_ + std::uint64_t{d} * line_cycles_;
++    const std::uint64_t t = sched_.now();
++    sched_.request(event_, at > t ? at - t : 1);
++}
++
++void Spg::on_line(std::uint64_t late) {
++    ++events;
++    // The line this event was armed for started `late` cycles ago.
++    const std::uint64_t t = sched_.now() - late;
++    const std::uint64_t passed = t > base_ ? (t - base_ + line_cycles_ / 2) / line_cycles_ : 1;
++    const std::uint32_t n = lines();
++    // Every line in between had nothing to do; run the ones that do (normally just this one).
++    for (std::uint64_t i = 1; i <= passed; ++i) {
++        scanline_ = (scanline_ + 1) % n;
++        if (i == passed || eventful(scanline_))
++            line_effects();
++    }
++    base_ += passed * line_cycles_;
++    schedule_next();
++}
++
++void Spg::line_effects() {
+     const std::uint32_t vblank_in = spg_vblank_int & 0x3FFu;
+     const std::uint32_t vblank_out = (spg_vblank_int >> 16) & 0x3FFu;
+     const std::uint32_t vstart = spg_vblank & 0x3FFu;
+@@ -69,16 +133,22 @@ void Spg::on_line() {
+         fieldnum_ = (spg_control & 0x10u) ? !fieldnum_ : false;
+         ++frames_;
+     }
+-    sched_.request(event_, line_cycles_);
+ }
+ 
+ std::uint32_t Spg::read(std::uint32_t addr, unsigned) {
+     if (addr == kStatus) {
+         // scanline 9:0, fieldnum 10, blank 11, hsync 12, vsync 13
++        // The line from the SH-4's clock; vsync from the line too, since the SH-4 may be past an
++        // edge whose event has not run yet (it runs at the next poll).
++        const std::uint32_t line = line_at(now());
+         const std::uint32_t vstart = spg_vblank & 0x3FFu;
+-        const bool blank = vsync_ || scanline_ >= vstart;
+-        return scanline_ | (fieldnum_ ? 1u << 10 : 0) | (blank ? 1u << 11 : 0) |
+-               (vsync_ ? 1u << 13 : 0);
++        const std::uint32_t vbend = (spg_vblank >> 16) & 0x3FFu;
++        const bool vsync = vstart < vbend   ? line >= vstart && line < vbend
++                           : vstart > vbend ? line >= vstart || line < vbend
++                                            : false;
++        const bool blank = vsync || line >= vstart;
++        return line | (fieldnum_ ? 1u << 10 : 0) | (blank ? 1u << 11 : 0) |
++               (vsync ? 1u << 13 : 0);
+     }
+     switch (addr - kPvrBase) {
+         case 0xC8:
+@@ -103,10 +173,14 @@ std::uint32_t Spg::read(std::uint32_t addr, unsigned) {
+ void Spg::write(std::uint32_t addr, std::uint32_t v, unsigned) {
+     switch (addr - kPvrBase) {
+         case 0xC8:
++            sync();
+             spg_hblank_int = v;
++            schedule_next();
+             break;
+         case 0xCC:
++            sync();
+             spg_vblank_int = v;
++            schedule_next();
+             break;
+         case 0xD0:
+             spg_control = v;
+@@ -120,7 +194,9 @@ void Spg::write(std::uint32_t addr, std::uint32_t v, unsigned) {
+             recalc();
+             break;
+         case 0xDC:
++            sync();
+             spg_vblank = v;
++            schedule_next();
+             break;
+         case 0xE0:
+             spg_width = v;
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
 index b900b12..cd4d6ef 100644
 --- a/runtime/src/sh4/abi_bare.cpp
@@ -4877,6 +5138,19 @@ index b900b12..cd4d6ef 100644
      if (GuestFn fn = find_function(target, &m)) {
          fn(c, m);
          return;
+diff --git a/runtime/src/system.cpp b/runtime/src/system.cpp
+index b9813e7..ce729df 100644
+--- a/runtime/src/system.cpp
++++ b/runtime/src/system.cpp
+@@ -13,6 +13,8 @@
+ namespace dream {
+ 
+ System::System() : tmu(sched, intc), holly(intc), spg(sched, holly) {
++    spg.clock = &ctx.cycles;  // SA-nx: SPG_STATUS reads see the SH-4's own time
++    holly.on_raise = [this] { ctx.next_event = ctx.cycles; };  // poll at the next check (Intc)
+     memory.map_p4(sh4::Intc::kBase, sh4::Intc::kBase + 0x10, &intc);
+     memory.map_p4(sh4::Tmu::kBase, sh4::Tmu::kEnd, &tmu);
+     memory.map_mmio(holly::Intc::kBase, holly::Intc::kEnd, &holly);
 diff --git a/runtime/tests/test_arm7.cpp b/runtime/tests/test_arm7.cpp
 index 0a8ad16..efcbbd0 100644
 --- a/runtime/tests/test_arm7.cpp
@@ -5153,6 +5427,85 @@ index d6e0738..3575775 100644
 +    CHECK(fast.second == slow.second);
 +    CHECK(std::count(fast.first.begin(), fast.first.end(), 0) < 64);  // it wrote the texture
 +}
+diff --git a/runtime/tests/test_system.cpp b/runtime/tests/test_system.cpp
+index 947fb1b..b903b53 100644
+--- a/runtime/tests/test_system.cpp
++++ b/runtime/tests/test_system.cpp
+@@ -148,6 +148,65 @@ TEST_CASE("spg: NTSC defaults give a 59.8 Hz frame with VBlank-in on the program
+     CHECK((sys.memory.read32(0xA05F810Cu) & (1u << 13)) == 0);
+ }
+ 
++// SA-nx: the line event fires only on eventful lines; the status register still counts every line.
++TEST_CASE("spg: the scanline in SPG_STATUS follows the clock between line events") {
++    System sys;
++    const std::uint64_t line = sys.spg.line_cycles();
++    const std::uint32_t lines = sys.spg.lines();
++    std::uint64_t t = 0;
++    std::uint32_t rng = 1;
++    for (int i = 0; i < 2000; ++i) {
++        rng = rng * 1664525u + 1013904223u;
++        const std::uint64_t step = 1 + (rng >> 8) % (3 * line);
++        sys.sched.advance(step);
++        t += step;
++        const std::uint32_t want = static_cast<std::uint32_t>((t / line) % lines);
++        REQUIRE((sys.memory.read32(0xA05F810Cu) & 0x3FFu) == want);
++        const bool vsync = want >= 260u || want < 21u;  // vstart 260, vbend 21
++        REQUIRE(((sys.memory.read32(0xA05F810Cu) >> 13) & 1u) == (vsync ? 1u : 0u));
++    }
++    CHECK(sys.spg.frames() == t / (line * lines));
++    // The SH-4's own clock ahead of the scheduler (between polls) moves the line too.
++    sys.ctx.cycles = sys.sched.now() + 5 * line;
++    const std::uint32_t ahead = static_cast<std::uint32_t>(((t + 5 * line) / line) % lines);
++    CHECK((sys.memory.read32(0xA05F810Cu) & 0x3FFu) == ahead);
++}
++
++TEST_CASE("spg: HBlank interrupt on one line and on every line") {
++    System sys;
++    const std::uint64_t line = sys.spg.line_cycles();
++    // Mode 0, line 100: once per frame, on that line.
++    sys.memory.write32(0xA05F80C8u, (100u << 16) | (0u << 12));
++    int raised = 0;
++    std::uint32_t at = 0;
++    for (std::uint32_t l = 0; l < 2 * 263u; ++l) {
++        sys.sched.advance(line);
++        if (sys.holly.raised(holly::Irq::HBlank)) {
++            ++raised;
++            at = static_cast<std::uint32_t>((sys.sched.now() / line) % 263u);
++            sys.holly.clear(holly::Irq::HBlank);
++        }
++    }
++    CHECK(raised == 2);
++    CHECK(at == 100u);
++    // Mode 2: every line.
++    sys.memory.write32(0xA05F80C8u, 2u << 12);
++    raised = 0;
++    for (int l = 0; l < 50; ++l) {
++        sys.sched.advance(line);
++        if (sys.holly.raised(holly::Irq::HBlank)) {
++            ++raised;
++            sys.holly.clear(holly::Irq::HBlank);
++        }
++    }
++    CHECK(raised == 50);
++    // Back to a single line: the per-line events stop.
++    sys.memory.write32(0xA05F80C8u, (100u << 16) | (0u << 12));
++    const std::uint64_t before = sys.spg.events;
++    sys.sched.advance(263u * line);
++    CHECK(sys.spg.events - before <= 6u);
++}
++
+ namespace {
+ // Guest-side handler stand-ins registered in the function table at VBR+0x600 / VBR+0x100.
+ std::vector<std::uint32_t> g_intevt_seen;
+@@ -196,7 +255,7 @@ TEST_CASE("system: interrupt delivery runs the VBR+0x600 handler as a nested cal
+     c.cycles = 100;
+     sh4::deliver_irq(c, sys.memory);
+     CHECK(g_intevt_seen.empty());
+-    CHECK(c.next_event == sys.spg.line_cycles());
++    CHECK(c.next_event == sys.spg.line_cycles() * 21);  // VBlank-out, the next eventful line
+     // Run guest time past the VBlank-in line, then poll.
+     c.cycles = sys.spg.line_cycles() * 261;
+     sh4::deliver_irq(c, sys.memory);
 diff --git a/tests/sh4/programs/p14_bank.bin b/tests/sh4/programs/p14_bank.bin
 new file mode 100644
 index 0000000000000000000000000000000000000000..4c58169e9f66fc39d1d698fcec1f3e5a42a66f90

@@ -2,6 +2,27 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test21: line events only where something happens
+
+- Correction: the Switch profiler already splits samples by speed (`stacks_slow`, below 0.95x);
+  test20's slow-only samples put scheduler `advance_to` at 8.1% and the idle-wait function at
+  4.3% of the game thread's busy time, so the scanline overhead is real at stock.
+- Change (dream-recomp, patch 0022):
+  - `Spg` arms its event only for eventful lines (0, VBlank in and out, vsync start and end, the
+    HBlank interrupt line, every line in HBlank mode 2) instead of every line. SPG_STATUS works the
+    line out from the SH-4's own cycle count (`Spg::clock`, pointed at `ctx.cycles`) and the
+    vsync bit from the line. Register writes fold the passed lines in and re-arm.
+  - `holly::Intc::on_raise`: System sets `ctx.next_event = ctx.cycles`, so an interrupt raised
+    inside an MMIO access (TA end of list, channel-2 DMA) is still polled at the next check;
+    before, the per-line event bounded that wait to one line.
+  - The launcher's watchdog (frame and time limits) runs once a frame instead of once a line.
+- Tests: `spg: the scanline in SPG_STATUS follows the clock between line events` (2,000 random
+  steps against floor(t / line) and the vsync range), `spg: HBlank interrupt on one line and on
+  every line`; the interrupt-delivery test now expects the next poll at VBlank-out (line 21).
+  Runtime 82 cases, emitter 13 cases pass.
+- Expectation: most of that 12% at stock, maybe 0.85x to about 0.9x. Risk: code that reads
+  the scanline (flicker, tearing, stutter), and interrupt timing.
+
 ## 2026-11-01: switch-test20 result: lock wait gone, small gain
 
 - Stock 1020/307/1331, Emerald Coast (17 windows): 0.85x average (test19 0.82x), game thread
