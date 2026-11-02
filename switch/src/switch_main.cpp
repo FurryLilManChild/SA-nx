@@ -617,8 +617,11 @@ int main(int argc, char** argv) {
               "0x63505548,0x6432D317,0x6E432FE6,0x7FFC4F22,0xD35F7FE8,0xD507D308"};
 #ifndef SANX_RELEASE
     // Development builds write the end-of-run report (untranslated call targets, device
-    // counters). A release leaves it out: writing it took about a minute after quitting.
+    // counters). A release leaves it out: building it took about a minute after quitting, even
+    // when it was not written to a file, so a release also skips building it (--quick-exit).
     g_args.insert(g_args.begin() + 7, {"--report", "sonicadv_report.txt"});
+#else
+    g_args.push_back("--quick-exit");
 #endif
     // Extra arguments, one per line, for testing without a new build.
     if (std::ifstream extra("sonicadv_args.txt"); extra) {

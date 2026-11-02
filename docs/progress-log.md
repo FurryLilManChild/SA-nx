@@ -30,6 +30,12 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   requires sonicadv.toml and a .gdi or .chd in disc/. Repackaged: zip sha256
   4e133cfe8cb67a74f26eaaa9f0f439c3b709f6acd050de1e666f2e4d206da9ef, NRO sha256
   5b740790b9b552c798dddd72cf229714038fde5cde90bec4d77684fd58158d6e.
+- Clean-install test 2 (Mark): boots, extracts 1ST_READ.BIN, fast to launch; quitting still
+  slow. Leaving out `--report` only stopped the file being written: `report_text`,
+  `suggest_relocations` and `suggest_entries` still ran on every exit. New `--quick-exit` skips
+  them; the release passes it. Repackaged: zip sha256
+  525ad6161b30dc3ff989813d601b155a975fbd70858e938f7392523aea4f9823, NRO sha256
+  332e7c8c7a22fba657b9375ba3399f473ecb03865cc915637394ef235aafe8b4.
 
 ## 2026-11-02: switch-test27 result and switch-test28: disc cache, unwinding cache
 
