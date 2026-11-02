@@ -2,6 +2,24 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test21 result: idle skips 25x fewer, small gain; 1785 dips are render-side
+
+- Idle skips per 5-second window fell from about 100,000 to about 4,000 (the line events are
+  gone), with no visible breakage reported.
+- Stock, Emerald Coast (17 windows): 0.86x average (test20 0.85x), game thread 79.5% busy,
+  game-thread time per guest second 0.925 (test20 0.94): about 2%, inside the window-to-window
+  noise.
+- 1785: two windows mid-stage at 0.92x and 0.94x that Mark noticed as new slowdowns. In both the
+  game thread was only 57 to 62% busy; what rose is the game thread waiting on the render thread
+  (26%, 20% against about 9%) and the render thread's busy time (30%, 25% against 10 to 16%),
+  while GPU time per render stayed normal (4.7 ms). test20's 1785 run had the same pattern in
+  two windows at the start of the stage. Cause not identified from these logs: the perf line
+  does not break the render thread's time down.
+- Slow-only profile: scheduler `advance_to` still 5.4% self. 90% of it now comes from
+  `DcMemory::resolve` -> `System::install` lambda (`on_device_access`): every MMIO access,
+  including each store-queue flush to the TA FIFO (tens of thousands a second), syncs the
+  scheduler, and `advance_to` scans every event even when nothing is due.
+
 ## 2026-11-01: switch-test21: line events only where something happens
 
 - Correction: the Switch profiler already splits samples by speed (`stacks_slow`, below 0.95x);
