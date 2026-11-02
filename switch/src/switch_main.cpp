@@ -573,8 +573,10 @@ int main(int argc, char** argv) {
         const Result rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
         std::printf("[switch] thread %s on core %d%s\n", name, core, R_FAILED(rc) ? " (refused)" : "");
     };
-    // The first run starts with the CPU at 1785 MHz: the stock 1020 MHz is far too slow for the
-    // recompiled game (test1 ran there). Once the file exists, the port menu's choice stands.
+#ifndef SANX_RELEASE
+    // Development builds: the first run starts with the CPU at 1785 MHz. A release starts with
+    // everything at the system's own clocks and the per-triangle translucency (PortOptions'
+    // defaults), which hold full speed in play (switch-test27/28).
     if (!exists("sdmc:/switch/sonicadv/sonicadv_options.txt")) {
         if (FILE* f = std::fopen("sdmc:/switch/sonicadv/sonicadv_options.txt", "wb")) {
             std::fputs("CPU_MHZ=1785\n", f);
@@ -582,10 +584,10 @@ int main(int argc, char** argv) {
             std::printf("[switch] first run: options start with the CPU at 1785 MHz\n");
         }
     }
+#endif
 
     g_args = {"sonicadv", "--config", "sonicadv.toml", "--window", "--boot-sr", "0x600000F1",
-              "--vmu", "save/vmu_A1.bin", "--report", "sonicadv_report.txt", "--options",
-              "sonicadv_options.txt",
+              "--vmu", "save/vmu_A1.bin", "--options", "sonicadv_options.txt",
               // The game's wait loop: 0x8C641F98 and 0x8C641FD8 call the empty function at
               // 0x8C64162C until an interrupt changes a flag (switch-test12 profile: 10.8% of the
               // game thread at full speed). The clock jumps to the next event instead.
@@ -595,6 +597,11 @@ int main(int argc, char** argv) {
               "--play-modules",
               "0x2FD62FE6,0x432BD307,0x432BD357,0x4F222FE6,0x55484F22,0x6032D30F,0x60505548,"
               "0x63505548,0x6432D317,0x6E432FE6,0x7FFC4F22,0xD35F7FE8,0xD507D308"};
+#ifndef SANX_RELEASE
+    // Development builds write the end-of-run report (untranslated call targets, device
+    // counters). A release leaves it out: writing it took about a minute after quitting.
+    g_args.insert(g_args.begin() + 7, {"--report", "sonicadv_report.txt"});
+#endif
     // Extra arguments, one per line, for testing without a new build.
     if (std::ifstream extra("sonicadv_args.txt"); extra) {
         std::string line;
@@ -629,8 +636,12 @@ int main(int argc, char** argv) {
     // accessible once mapped.
     g_stack_lo = reinterpret_cast<std::uint64_t>(game.stack_mirror);
     g_stack_hi = g_stack_lo + game.stack_sz;
+#ifdef SANX_RELEASE
+    const bool profiling = false;  // a release does not sample the game thread
+#else
     const bool profiling =
         R_SUCCEEDED(threadCreate(&g_prof, profiler, nullptr, nullptr, 0x10000, 0x2B, 0));
+#endif
     if (profiling) {
         threadStart(&g_prof);
         std::printf("[profile] sampling the game thread, written to sonicadv_profile.txt\n");

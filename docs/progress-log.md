@@ -2,6 +2,30 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: release 0.5.0 built
+
+- test28 result: nothing went backwards. Unwinding 3.2% to 2.0% of the game thread below full
+  speed (6.5% to 2.6% over the session; the FDE search itself almost gone); SD reads 4.3% to
+  3.2% below full speed (11.3% to 4.3% over the session; what is left is first reads of blocks
+  during loads, which jump around the disc); boot program load 668 samples to 59. Stock, per
+  triangle: Emerald Coast 0.87 to 1.00x, a second stage at 1.00x with time to spare.
+- Release changes:
+  - `SANX_RELEASE` (CMake option, switch_main.cpp): no `--report` (the minute-long write after
+    quitting), no profiler thread, and no CPU_MHZ=1785 written on the first run.
+  - `SANX_VERSION` 0.5.0 (the homebrew menu showed 0.1.0).
+  - Port menu defaults: translucency per triangle (Mark: defaults per triangle, everything
+    stock). The lean (8 layers) choice is gone; an options file naming it gets accurate.
+  - The launcher takes 1ST_READ.BIN from the disc's ISO 9660 root when it is missing (checked
+    against Mark's dump in Python first: SHA-1 7ca46c7d...), and opens the only GDI or CHD in the
+    configured folder when the configured name is not there, so players copy their dump as is.
+  - README rewritten for players (status, defaults and how to get the accurate picture, known
+    issues, track hashes, install, reporting, credits).
+- Package in `out\\release\\`: SA-nx-0.5.0-switch.zip (switch/sonicadv/: sonicadv.nro,
+  sonicadv.toml with SD paths, README.txt, COPYING.txt, disc/PUT_YOUR_DISC_HERE.txt), sha256
+  5fadfae75ace692e58a6feadb52e711112141652348f692e35b6f9b26ddb0ed9; NRO sha256
+  ffc94a45ee09885cc7db1887a86c8e45fabf84bfb4b5150ee759edc8c50f74dd; release_notes.md. ELF kept as
+  release-0.5.0.elf. The build-switch cache now has SANX_RELEASE=ON; set it OFF for test builds.
+
 ## 2026-11-02: switch-test27 result and switch-test28: disc cache, unwinding cache
 
 - test27: character select recognised (`screen words` 5 and 0 on arrival, translucency switched

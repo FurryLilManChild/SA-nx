@@ -700,10 +700,10 @@ index 8dfec0a..de9b125 100644
  # a triangle. Not a test (it needs a display); run it by hand.
 diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
 new file mode 100644
-index 0000000..22b1659
+index 0000000..67fb248
 --- /dev/null
 +++ b/render/include/dream/render/port_menu.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,119 @@
 +// The port menu (SA-nx): the launcher's own settings, over a paused game. Device-independent like
 +// the binding screen (input_menu.h): it draws into the RGBA frame on its way to the GPU and is
 +// driven by four calls, so the same menu works from a keyboard on the PC and from the buttons on
@@ -732,11 +732,12 @@ index 0000000..22b1659
 +    // Memory clock in MHz, 0 for the system's own; offered alongside the CPU row.
 +    int mem_mhz = 0;
 +    // 0: translucent surfaces sorted per pixel, as the hardware does (accurate, up to 32 layers
-+    // per pixel). 2: the same with the nearest 8 layers kept (accurate, lean), much cheaper where
-+    // many layers stack up. 3: sorted per triangle (Flycast's default), cheap, close but not
-+    // exact. 1: sorted per strip, cheapest, and can draw overlapping translucency in the wrong
-+    // order (Sonic's eyes, before the per-pixel sort).
-+    int translucency = 0;
++    // per pixel). 3: sorted per triangle (Flycast's default), cheap, close but not exact; the
++    // default from release 0.5.0, since it holds full speed at the Switch's stock clocks. 1:
++    // sorted per strip, cheapest, and can draw overlapping translucency in the wrong order
++    // (Sonic's eyes, before the per-pixel sort). 2 (the nearest 8 layers kept) is no longer
++    // offered; an options file that names it gets accurate.
++    int translucency = 3;
 +    // The resolution the game's 3D is drawn at in play, in percent of the console's 640x480: 100,
 +    // 150 or 200. The title, the menus and character select always draw at 100 (the launcher
 +    // tells them apart). Takes effect at once.
@@ -1327,10 +1328,10 @@ index a9f0841..41b3a97 100644
  void draw_text(u32* rgba, unsigned pitch, unsigned width, unsigned height, int x, int y,
 diff --git a/render/src/port_menu.cpp b/render/src/port_menu.cpp
 new file mode 100644
-index 0000000..0457763
+index 0000000..f1913fd
 --- /dev/null
 +++ b/render/src/port_menu.cpp
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,271 @@
 +// See port_menu.h.
 +#include "dream/render/port_menu.h"
 +
@@ -1395,7 +1396,6 @@ index 0000000..0457763
 +    s += "PACING=" + std::string(pacing == 1 ? "latency" : "smooth") + "\n";
 +    s += "TRANSLUCENCY=" +
 +         std::string(translucency == 1   ? "fast"
-+                     : translucency == 2 ? "lean"
 +                     : translucency == 3 ? "triangle"
 +                                         : "accurate") +
 +         "\n";
@@ -1433,9 +1433,8 @@ index 0000000..0457763
 +            o.scale = value == "1.5" ? 150 : (value == "2" || value == "3") ? 200 : 100;
 +        else if (key == "TRANSLUCENCY")
 +            o.translucency = value == "fast"       ? 1
-+                             : value == "lean"     ? 2
 +                             : value == "triangle" ? 3
-+                                                   : 0;
++                                                   : 0;  // accurate, and lean (no longer offered)
 +    }
 +    return o;
 +}
@@ -1479,12 +1478,12 @@ index 0000000..0457763
 +            break;
 +        }
 +        case kTranslucency: {
-+            // Shown in order of cost: accurate, lean, per triangle, per strip.
-+            static constexpr int kOrder[] = {0, 2, 3, 1};
++            // Shown in order of cost: accurate, per triangle, per strip.
++            static constexpr int kOrder[] = {0, 3, 1};
 +            int i = 0;
-+            while (i < 4 && kOrder[i] != options_.translucency)
++            while (i < 3 && kOrder[i] != options_.translucency)
 +                ++i;
-+            i = ((i % 4) + (delta < 0 ? 3 : 1)) % 4;
++            i = ((i % 3) + (delta < 0 ? 2 : 1)) % 3;
 +            options_.translucency = kOrder[i];
 +            break;
 +        }
@@ -1584,7 +1583,6 @@ index 0000000..0457763
 +    row(kVolume, "VOLUME", "< " + std::to_string(options_.volume) + "% >");
 +    row(kTranslucency, "TRANSLUCENCY",
 +        options_.translucency == 1   ? "< STRIP >"
-+        : options_.translucency == 2 ? "< LEAN >"
 +        : options_.translucency == 3 ? "< TRIANGLE >"
 +                                     : "< ACCURATE >");
 +    row(kScale, "RESOLUTION IN GAME",
@@ -3063,7 +3061,7 @@ index 0000000..d6960fc
 +}  // namespace dream::render::vk
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
-index 0000000..270f30a
+index 0000000..86c3828
 --- /dev/null
 +++ b/render/tests/test_port_menu.cpp
 @@ -0,0 +1,115 @@
@@ -3100,7 +3098,7 @@ index 0000000..270f30a
 +    CHECK(o.cpu_mhz == 0);    // not an offered rate: stock
 +    CHECK_FALSE(o.show_fps);  // absent: default
 +    CHECK(o.gpu_mhz == 0);    // not an offered rate: stock
-+    CHECK(o.translucency == 0);
++    CHECK(o.translucency == 3);  // absent: the default, per triangle (release 0.5.0)
 +}
 +
 +TEST_CASE("port menu: moving, changing and closing") {
@@ -3118,19 +3116,19 @@ index 0000000..270f30a
 +    m.move(1);  // VOLUME
 +    m.adjust(-1);
 +    CHECK(m.options().volume == 90);
-+    m.move(1);  // TRANSLUCENCY: accurate, lean, triangle, strip, then round again
-+    CHECK(m.activate() == PortMenu::Action::None);
-+    CHECK(m.options().translucency == 2);
-+    m.adjust(1);
++    m.move(1);  // TRANSLUCENCY: accurate, triangle, strip, then round again (default triangle)
 +    CHECK(m.options().translucency == 3);
-+    m.adjust(1);
++    CHECK(m.activate() == PortMenu::Action::None);
 +    CHECK(m.options().translucency == 1);
 +    m.adjust(1);
 +    CHECK(m.options().translucency == 0);
++    m.adjust(1);
++    CHECK(m.options().translucency == 3);
 +    m.adjust(-1);
-+    CHECK(m.options().translucency == 1);
-+    CHECK(PortOptions::from_text("TRANSLUCENCY=lean\n").translucency == 2);
++    CHECK(m.options().translucency == 0);
++    CHECK(PortOptions::from_text("TRANSLUCENCY=lean\n").translucency == 0);  // no longer offered
 +    CHECK(PortOptions::from_text("TRANSLUCENCY=triangle\n").translucency == 3);
++    CHECK(PortOptions::from_text("TRANSLUCENCY=fast\n").translucency == 1);
 +    CHECK(PortOptions::from_text(o.to_text()).translucency == o.translucency);
 +    m.move(1);  // RESOLUTION IN GAME: 1x, 1.5x, 2x, then round again
 +    CHECK(m.options().scale == 100);
@@ -3183,10 +3181,18 @@ index 0000000..270f30a
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..744a807 100644
+index 824d0b4..cfc30a6 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -24,6 +24,29 @@
+@@ -8,6 +8,7 @@
+ // Exit code 0 when the run reached the requested stop (the first TA FIFO write with --stop-on-ta,
+ // otherwise the frame or time limit), 1 on a fault, 2 on a setup error.
+ #include <algorithm>
++#include <cctype>
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -24,6 +25,29 @@
  
  #include "profiler.h"  // SA-nx: --profile
  
@@ -3216,7 +3222,7 @@ index 824d0b4..744a807 100644
  #include "dream/runtime/aica/aica.h"
  #include "dream/runtime/aica/rtc.h"
  #include "dream/runtime/gdrom/disc.h"
-@@ -34,6 +57,7 @@
+@@ -34,6 +58,7 @@
  #include "dream/runtime/mem/dc_memory.h"
  #include "dream/runtime/pvr/core.h"
  #include "dream/runtime/sh4/abi.h"
@@ -3224,7 +3230,7 @@ index 824d0b4..744a807 100644
  #include "dream/runtime/sh4/dmac.h"
  #include "dream/runtime/sh4/ops.h"
  #include "dream/runtime/system.h"
-@@ -46,12 +70,16 @@
+@@ -46,12 +71,16 @@
  #include "dream/audio/sink.h"
  #endif
  #ifdef DREAM_WITH_RENDERER
@@ -3241,7 +3247,7 @@ index 824d0b4..744a807 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -123,6 +151,7 @@ void print_guest_backtrace() {
+@@ -123,6 +152,7 @@ void print_guest_backtrace() {
  // direction: its framebuffer emulation is off unless a title needs it.
  struct Live {
      Live(dream::mem::DcMemory& memory, const dream::pvr::Core& pvr) : memory_(memory), pvr_(pvr) {}
@@ -3249,7 +3255,7 @@ index 824d0b4..744a807 100644
  
      // `scale` multiplies the resolution the geometry is drawn at. The frame is resampled back to
      // the guest's own framebuffer on the way into video memory, so a higher setting sharpens the
-@@ -133,15 +162,15 @@ struct Live {
+@@ -133,15 +163,15 @@ struct Live {
              error = window.error();
              return false;
          }
@@ -3269,7 +3275,7 @@ index 824d0b4..744a807 100644
              error = renderer.error();
              return false;
          }
-@@ -159,6 +188,23 @@ struct Live {
+@@ -159,6 +189,23 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -3293,7 +3299,7 @@ index 824d0b4..744a807 100644
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -184,10 +230,17 @@ struct Live {
+@@ -184,10 +231,17 @@ struct Live {
          memory_.take_vram_writes([this](std::uint32_t begin, std::uint32_t end) {
              vram_invalidated += renderer.textures().invalidate_range(begin, end);
          });
@@ -3313,7 +3319,7 @@ index 824d0b4..744a807 100644
              }
              return;
          }
-@@ -195,6 +248,118 @@ struct Live {
+@@ -195,6 +249,118 @@ struct Live {
          ++rendered;
      }
  
@@ -3432,7 +3438,7 @@ index 824d0b4..744a807 100644
      // True for a buffer the renderer has drawn into at some point. A title alternates between two
      // and does not swap the displayed one on every render, so asking whether the displayed buffer
      // is *the* most recent target is too strict; asking whether it is one of ours is the question
-@@ -224,8 +389,8 @@ struct Live {
+@@ -224,8 +390,8 @@ struct Live {
              targets_.push_back(target.address);
          if (!writeback)
              return;
@@ -3443,7 +3449,7 @@ index 824d0b4..744a807 100644
                                                 dream::mem::DcMemory::kVramSize))
              return;
          ++written_back;
-@@ -243,9 +408,201 @@ struct Live {
+@@ -243,9 +409,201 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -3646,7 +3652,7 @@ index 824d0b4..744a807 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -258,8 +615,8 @@ struct Live {
+@@ -258,8 +616,8 @@ struct Live {
          from_renderer = described && fb.enabled && rendered_into(fb.address);
          if (from_renderer) {
              shown = fb;
@@ -3657,7 +3663,7 @@ index 824d0b4..744a807 100644
              have_frame = true;
          } else if (described && fb.enabled &&
                     dream::render::decode_framebuffer(fb, memory_.vram(),
-@@ -277,12 +634,27 @@ struct Live {
+@@ -277,12 +635,27 @@ struct Live {
              window.recreate_swapchain();
              return true;
          }
@@ -3687,7 +3693,7 @@ index 824d0b4..744a807 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,9 +662,18 @@ struct Live {
+@@ -290,9 +663,18 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -3706,7 +3712,7 @@ index 824d0b4..744a807 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -318,8 +699,13 @@ struct Live {
+@@ -318,8 +700,13 @@ struct Live {
          if (!window.end_frame(image))
              window.recreate_swapchain();
          ++presented;
@@ -3720,7 +3726,7 @@ index 824d0b4..744a807 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -330,7 +716,29 @@ struct Live {
+@@ -330,7 +717,29 @@ struct Live {
              screenshot();
          if (capture_at && presented == capture_at)
              capture();
@@ -3751,7 +3757,7 @@ index 824d0b4..744a807 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +781,249 @@ struct Live {
+@@ -373,8 +782,249 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -4001,7 +4007,7 @@ index 824d0b4..744a807 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +1033,9 @@ struct Live {
+@@ -384,10 +1034,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -4015,7 +4021,7 @@ index 824d0b4..744a807 100644
              return;
          }
          if (!menu.is_open())
-@@ -501,17 +1149,18 @@ struct Live {
+@@ -501,17 +1150,18 @@ struct Live {
          const double guest_s = static_cast<double>(guest_cycles) / 200e6;
          if (fps_mark == std::chrono::steady_clock::time_point{}) {
              fps_mark = now;
@@ -4037,7 +4043,7 @@ index 824d0b4..744a807 100644
          fps_guest_at_mark = guest_s;
      }
  
-@@ -560,7 +1209,7 @@ struct Live {
+@@ -560,7 +1210,7 @@ struct Live {
          if (!f)
              return;
          std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
@@ -4046,7 +4052,7 @@ index 824d0b4..744a807 100644
          const std::size_t n = static_cast<std::size_t>(shown.width) * shown.height;
          for (std::size_t i = 0; i < n; ++i) {
              const std::uint32_t p = src[i];
-@@ -642,7 +1291,16 @@ struct Live {
+@@ -642,7 +1292,16 @@ struct Live {
  
      dream::render::vk::Window window;
      dream::render::vk::Renderer renderer;
@@ -4064,7 +4070,7 @@ index 824d0b4..744a807 100644
      dream::render::vk::Presenter presenter;
      dream::render::DisplayList decoder;
      dream::render::vk::FrameGeometry geometry;
-@@ -652,6 +1310,26 @@ struct Live {
+@@ -652,6 +1311,26 @@ struct Live {
      std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
                    decoded_frames = 0, backgrounds = 0;
      std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
@@ -4091,7 +4097,7 @@ index 824d0b4..744a807 100644
      std::uint32_t target_address = 0;
      std::uint64_t guest_frame = 0;
      std::vector<std::uint32_t> last_stream;
-@@ -660,9 +1338,46 @@ struct Live {
+@@ -660,9 +1339,46 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -4138,7 +4144,7 @@ index 824d0b4..744a807 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1793,12 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1794,12 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -4151,7 +4157,7 @@ index 824d0b4..744a807 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1829,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1830,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -4159,7 +4165,70 @@ index 824d0b4..744a807 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1233,6 +1955,7 @@ int main(int argc, char** argv) {
+@@ -1181,6 +1904,62 @@ private:
+ };
+ }  // namespace
+ 
++// SA-nx: a file from the game area's ISO 9660 root directory, written to `out`.
++static bool extract_boot_file(dream::gdrom::Disc& disc, const std::string& name,
++                              const std::filesystem::path& out, std::string& why) {
++    const dream::gdrom::Track* t = disc.hd_track();
++    if (!t) {
++        why = "no data track";
++        return false;
++    }
++    std::vector<std::uint8_t> sector(2048);
++    if (!disc.read_user(t->lba + 16, sector.data()) || std::memcmp(sector.data() + 1, "CD001", 5)) {
++        why = "no ISO 9660 volume descriptor";
++        return false;
++    }
++    const auto le32 = [](const std::uint8_t* p) {
++        return std::uint32_t(p[0]) | std::uint32_t(p[1]) << 8 | std::uint32_t(p[2]) << 16 |
++               std::uint32_t(p[3]) << 24;
++    };
++    const std::uint32_t root_lba = le32(sector.data() + 156 + 2),
++                        root_len = le32(sector.data() + 156 + 10);
++    const std::uint32_t base = root_lba >= t->lba ? 0 : t->lba;
++    const std::string want = name + ";1";
++    for (std::uint32_t s = 0; s < (root_len + 2047) / 2048; ++s) {
++        if (!disc.read_user(root_lba + base + s, sector.data())) {
++            why = "cannot read the root directory";
++            return false;
++        }
++        for (std::size_t at = 0; at < 2048;) {
++            const std::uint8_t len = sector[at];
++            if (len == 0 || at + len > 2048)
++                break;
++            const std::uint8_t nlen = sector[at + 32];
++            if (33u + nlen <= len &&
++                std::string(reinterpret_cast<const char*>(sector.data() + at + 33), nlen) == want) {
++                const std::uint32_t extent = le32(sector.data() + at + 2),
++                                    size = le32(sector.data() + at + 10);
++                std::vector<std::uint8_t> data((std::size_t(size) + 2047) / 2048 * 2048);
++                for (std::uint32_t k = 0; k < data.size() / 2048; ++k)
++                    if (!disc.read_user(extent + base + k, data.data() + std::size_t(k) * 2048)) {
++                        why = "cannot read the file's sectors";
++                        return false;
++                    }
++                std::ofstream o(out, std::ios::binary | std::ios::trunc);
++                o.write(reinterpret_cast<const char*>(data.data()), size);
++                if (!o) {
++                    why = "cannot write " + out.string();
++                    return false;
++                }
++                return true;
++            }
++            at += len;
++        }
++    }
++    why = name + " is not in the root directory";
++    return false;
++}
++
+ int main(int argc, char** argv) {
+     // SA-nx: trace runs write hundreds of thousands of lines to stderr, which is unbuffered and very
+     // slow line by line on Windows. Buffer it; the stdio buffers are flushed when main returns.
+@@ -1233,6 +2012,7 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -4167,7 +4236,7 @@ index 824d0b4..744a807 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,10 +1965,21 @@ int main(int argc, char** argv) {
+@@ -1242,10 +2022,21 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -4189,7 +4258,7 @@ index 824d0b4..744a807 100644
      // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
      // be compared. Any non-zero value will do; the number itself only changes the date a title
      // shows.
-@@ -1334,6 +2068,8 @@ int main(int argc, char** argv) {
+@@ -1334,6 +2125,8 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -4198,7 +4267,7 @@ index 824d0b4..744a807 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +2094,20 @@ int main(int argc, char** argv) {
+@@ -1358,6 +2151,20 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -4219,7 +4288,7 @@ index 824d0b4..744a807 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1387,8 +2137,10 @@ int main(int argc, char** argv) {
+@@ -1387,8 +2194,10 @@ int main(int argc, char** argv) {
              log_from = std::strtoull(spec, nullptr, 0);
              if (const char* colon = std::strchr(spec, ':'))
                  log_count = std::strtoull(colon + 1, nullptr, 0);
@@ -4231,7 +4300,7 @@ index 824d0b4..744a807 100644
          else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
              usage(argv[0], stdout);
              return 0;
-@@ -1398,6 +2150,9 @@ int main(int argc, char** argv) {
+@@ -1398,6 +2207,9 @@ int main(int argc, char** argv) {
              return 2;
          }
      }
@@ -4241,7 +4310,48 @@ index 824d0b4..744a807 100644
      if (config.empty()) {
          std::fprintf(stderr, "--config is required\n");
          return 2;
-@@ -1440,7 +2195,15 @@ int main(int argc, char** argv) {
+@@ -1425,6 +2237,24 @@ int main(int argc, char** argv) {
+     }
+     std::unique_ptr<dream::gdrom::Disc> disc;
+     if (cfg.disc_image) {
++        // SA-nx (release 0.5.0): a dump named differently from the configuration is still found
++        // when it is the only GDI or CHD in that folder, so players need not rename theirs.
++        if (!std::filesystem::exists(*cfg.disc_image)) {
++            std::error_code ec;
++            std::vector<std::filesystem::path> found;
++            for (const auto& e :
++                 std::filesystem::directory_iterator(cfg.disc_image->parent_path(), ec)) {
++                std::string ext = e.path().extension().string();
++                for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
++                if (ext == ".gdi" || ext == ".chd")
++                    found.push_back(e.path());
++            }
++            if (found.size() == 1) {
++                std::printf("disc: %s not found, using %s\n", cfg.disc_image->string().c_str(),
++                            found[0].string().c_str());
++                cfg.disc_image = found[0];
++            }
++        }
+         disc = dream::gdrom::open_disc(*cfg.disc_image, err);
+         if (!disc) {
+             std::fprintf(stderr, "disc: %s\n", err.c_str());
+@@ -1435,12 +2265,31 @@ int main(int argc, char** argv) {
+             std::printf("disc: hiding %zu file(s) from the game\n", hide_files.size());
+         }
+     }
++    // SA-nx (release 0.5.0): the boot program comes off the disc the first time, so a player only
++    // copies the disc image. Found through the disc's ISO 9660 file system, whose extents on a
++    // GD-ROM are disc LBAs (dcdisc iso9660.py), and written next to the configuration.
++    if (disc && !std::filesystem::exists(cfg.binary_path)) {
++        std::string why;
++        if (extract_boot_file(*disc, cfg.binary_path.filename().string(), cfg.binary_path, why))
++            std::printf("boot program: %s written from the disc\n", cfg.binary_path.string().c_str());
++        else
++            std::fprintf(stderr, "boot program: cannot take %s from the disc: %s\n",
++                         cfg.binary_path.string().c_str(), why.c_str());
++    }
+     std::ifstream in(cfg.binary_path, std::ios::binary);
+     if (!in) {
          std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
          return 2;
      }
@@ -4258,7 +4368,7 @@ index 824d0b4..744a807 100644
  
      dream::System sys;
      dream::hle::Bios bios(sys);
-@@ -1682,12 +2445,23 @@ int main(int argc, char** argv) {
+@@ -1682,12 +2531,23 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -4282,7 +4392,7 @@ index 824d0b4..744a807 100644
          if (!live->start(
                  scale, validation,
                  cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
-@@ -1698,7 +2472,38 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2558,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -4322,7 +4432,7 @@ index 824d0b4..744a807 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1712,6 +2517,8 @@ int main(int argc, char** argv) {
+@@ -1712,6 +2603,8 @@ int main(int argc, char** argv) {
          // Wall-clock time the guest was stopped for, which the pacing below owes back. Without it
          // the run would sprint to catch up the moment the binding screen closed.
          auto paused_for = std::chrono::steady_clock::duration::zero();
@@ -4331,7 +4441,7 @@ index 824d0b4..744a807 100644
          auto previous_vblank = std::move(sys.spg.on_vblank_out);
          sys.spg.on_vblank_out = [&, previous_vblank, started] {
              if (previous_vblank)
-@@ -1721,9 +2528,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2614,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -4343,7 +4453,7 @@ index 824d0b4..744a807 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2539,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2625,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -4351,7 +4461,7 @@ index 824d0b4..744a807 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2552,16 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2638,16 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -4369,7 +4479,7 @@ index 824d0b4..744a807 100644
          };
      }
  #endif
-@@ -1770,6 +2586,16 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2672,16 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -4386,7 +4496,7 @@ index 824d0b4..744a807 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2607,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2693,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -4398,7 +4508,7 @@ index 824d0b4..744a807 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2619,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2705,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -4422,7 +4532,7 @@ index 824d0b4..744a807 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -1803,9 +2649,10 @@ int main(int argc, char** argv) {
+@@ -1803,9 +2735,10 @@ int main(int argc, char** argv) {
          sys.sched.request(rtc_tick, 200'000'000ull);
      });
      sys.sched.request(rtc_tick, 200'000'000ull);
@@ -4435,7 +4545,7 @@ index 824d0b4..744a807 100644
      // The first access to an address that is not in the memory map is the moment a run started
      // going wrong: everything after it is the guest following garbage. The fault log counts them
      // but records neither when nor from where, so the watchdog catches the transition and reports
-@@ -2036,6 +2883,30 @@ int main(int argc, char** argv) {
+@@ -2036,6 +2969,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -4466,7 +4576,7 @@ index 824d0b4..744a807 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +2917,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +3003,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -4479,7 +4589,7 @@ index 824d0b4..744a807 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2076,10 +2953,13 @@ int main(int argc, char** argv) {
+@@ -2076,10 +3039,13 @@ int main(int argc, char** argv) {
  #ifdef DREAM_WITH_AUDIO
      if (sink.is_open()) {
          sink.flush();
@@ -4495,7 +4605,7 @@ index 824d0b4..744a807 100644
      }
  #endif
      if (hash_file) {
-@@ -2145,7 +3025,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +3111,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
