@@ -2,6 +2,18 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test20: the SH-4 stops waiting on the sound thread's lock
+
+- Change (dream-recomp, patch 0022): `Aica::update_sh4_interrupts()` publishes the SH-4 line
+  (MCIEB & MCIPD) in an atomic every time it computes it, which is under `lock_` both on the
+  sound thread (every sample) and on SH-4 register writes. The `aica.sample` batch event reads
+  that atomic and raises or clears Holly's AICA line without taking `lock_`. Interrupt latency
+  is unchanged (at most one batch, 32 samples).
+- Test: `aica: threaded, the SH-4 line follows the published state` (runtime tests, 80 cases
+  pass); the AICA cases also run clean under ThreadSanitizer.
+- Expectation: removes most of the 18.8% of game-thread busy time test19 spent in
+  `svcArbitrateLock`; stock Emerald Coast from about 0.82x towards the mid 0.9s. Estimate only.
+
 ## 2026-11-01: switch-test19 result: registers in locals, about 1.2x on the game thread
 
 - Stock 1020/307/1331, Emerald Coast (23 five-second windows): 0.82x average (0.61 to 1.00),

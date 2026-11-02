@@ -4303,7 +4303,7 @@ index 824d0b4..2fb195a 100644
              std::printf(" %08x:%llu", top[i].second, static_cast<unsigned long long>(top[i].first));
          std::printf("\n");
 diff --git a/runtime/include/dream/runtime/aica/aica.h b/runtime/include/dream/runtime/aica/aica.h
-index 1ac2d5e..0859d62 100644
+index 1ac2d5e..15bf7df 100644
 --- a/runtime/include/dream/runtime/aica/aica.h
 +++ b/runtime/include/dream/runtime/aica/aica.h
 @@ -8,8 +8,12 @@
@@ -4344,7 +4344,7 @@ index 1ac2d5e..0859d62 100644
      // SH-4 side (mem::MmioHandler)
      std::uint32_t read(std::uint32_t addr, unsigned size) override;
      void write(std::uint32_t addr, std::uint32_t value, unsigned size) override;
-@@ -64,11 +84,25 @@ private:
+@@ -64,11 +84,31 @@ private:
  public:
      Arm7 arm;
      Mixer mixer;
@@ -4367,6 +4367,12 @@ index 1ac2d5e..0859d62 100644
 +    std::condition_variable caught_up_; // the thread finished some samples
 +    std::atomic<std::uint64_t> target_{0}, done_{0};
 +    std::atomic<bool> stop_{false};
++    // SA-nx: the SH-4 interrupt line (MCIEB & MCIPD) as last computed under lock_, by the thread
++    // after each sample or by an SH-4 register access. The batch event reads it without the lock,
++    // so the SH-4 no longer waits for the thread to finish a chunk of samples (switch-test19
++    // profile: 19% of the game thread's busy time).
++    std::atomic<bool> sh4_line_{false};
++    void apply_sh4_line(bool pending);
      std::uint32_t reg_read(std::uint32_t offset, unsigned size);
      void reg_write(std::uint32_t offset, std::uint32_t value, unsigned size);
      void store(std::uint32_t offset, std::uint32_t value, unsigned size);
@@ -4412,7 +4418,7 @@ index 0000000..768ccbd
 +
 +}  // namespace dream::sh4
 diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
-index c8d4401..e96da65 100644
+index c8d4401..9e54bc3 100644
 --- a/runtime/src/aica/aica.cpp
 +++ b/runtime/src/aica/aica.cpp
 @@ -2,6 +2,8 @@
@@ -4424,7 +4430,7 @@ index c8d4401..e96da65 100644
  namespace dream::aica {
  
  Aica::Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory)
-@@ -12,12 +14,90 @@ Aica::Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory)
+@@ -12,12 +14,87 @@ Aica::Aica(sched::Scheduler& sched, holly::Intc& holly, mem::DcMemory& memory)
        memory_(memory) {
      reset();
      event_ = sched_.add("aica.sample", [this](std::uint64_t, std::uint64_t) {
@@ -4451,10 +4457,7 @@ index c8d4401..e96da65 100644
 +                    std::chrono::steady_clock::now() - from)
 +                    .count());
 +        }
-+        {
-+            std::lock_guard<std::mutex> g(lock_);
-+            update_sh4_interrupts();
-+        }
++        apply_sh4_line(sh4_line_.load(std::memory_order_acquire));
 +        sched_.request(event_, kSh4CyclesPerSample * kThreadBatch);
      });
      sched_.request(event_, kSh4CyclesPerSample);
@@ -4517,7 +4520,15 @@ index c8d4401..e96da65 100644
  void Aica::reset() {
      regs_.fill(0);
      regs_[kArmRst] = 1;  // the ARM starts held in reset; the BIOS or the title releases it
-@@ -139,10 +219,17 @@ void Aica::reg_write(std::uint32_t offset, std::uint32_t value, unsigned size) {
+@@ -26,6 +103,7 @@ void Aica::reset() {
+     arm.reset();
+     arm.set_enabled(false);
+     mixer.reset();
++    sh4_line_.store(false, std::memory_order_release);
+ }
+ 
+ void Aica::set16(std::uint32_t offset, std::uint32_t value) noexcept {
+@@ -139,10 +217,17 @@ void Aica::reg_write(std::uint32_t offset, std::uint32_t value, unsigned size) {
  }
  
  std::uint32_t Aica::read(std::uint32_t addr, unsigned size) {
@@ -4535,19 +4546,25 @@ index c8d4401..e96da65 100644
      ++sh4_side_reg_writes;
      reg_write(addr - kRegBase, value, size);
  }
-@@ -224,6 +311,11 @@ void Aica::update_arm_interrupts() {
+@@ -224,7 +309,17 @@ void Aica::update_arm_interrupts() {
  }
  
  void Aica::update_sh4_interrupts() {
-+    // SA-nx: Holly belongs to the SH-4's thread. On the sound thread this is left to the next
-+    // batch event, which re-evaluates the line on the SH-4's side (at most kThreadBatch samples,
-+    // about 0.7 ms of guest time, later).
++    // Called with lock_ held when threaded. The line is published for the batch event; Holly
++    // belongs to the SH-4's thread, so on the sound thread that is all (the next batch event, at
++    // most kThreadBatch samples, about 0.7 ms of guest time, later, applies it).
+     const bool pending = (reg16(kMcieb) & reg16(kMcipd)) != 0;
++    sh4_line_.store(pending, std::memory_order_release);
 +    if (threaded() && std::this_thread::get_id() == thread_.get_id())
 +        return;
-     const bool pending = (reg16(kMcieb) & reg16(kMcipd)) != 0;
++    apply_sh4_line(pending);
++}
++
++void Aica::apply_sh4_line(bool pending) {
      if (pending) {
          if (!holly_.raised(holly::Irq::AicaIrq)) {
-@@ -236,6 +328,19 @@ void Aica::update_sh4_interrupts() {
+             holly_.raise(holly::Irq::AicaIrq);
+@@ -236,6 +331,19 @@ void Aica::update_sh4_interrupts() {
  }
  
  void Aica::sample_tick() {
@@ -4860,6 +4877,61 @@ index b900b12..cd4d6ef 100644
      if (GuestFn fn = find_function(target, &m)) {
          fn(c, m);
          return;
+diff --git a/runtime/tests/test_arm7.cpp b/runtime/tests/test_arm7.cpp
+index 0a8ad16..efcbbd0 100644
+--- a/runtime/tests/test_arm7.cpp
++++ b/runtime/tests/test_arm7.cpp
+@@ -1,6 +1,8 @@
+ // ARM7DI core and AICA control block (WP2.5). The ARM programs are hand-assembled words placed in
+ // sound RAM; encodings were checked against arm-eabi-as in the toolchain container.
++#include <chrono>
+ #include <cstdint>
++#include <thread>
+ #include <vector>
+ 
+ #include "dream/runtime/aica/aica.h"
+@@ -214,3 +216,41 @@ TEST_CASE("aica: comparing against an unrotated immediate sets the flags") {
+     r.sys.sched.advance(8 * dream::aica::Aica::kSh4CyclesPerSample + 1);
+     CHECK(r.aica.arm.reg(1) == 1u);
+ }
++
++// SA-nx: with the sound thread running, the batch event takes the SH-4 line from what the thread
++// last published (no lock), and SH-4 register writes still change the line at once.
++TEST_CASE("aica: threaded, the SH-4 line follows the published state") {
++    Rig r;
++    using A = dream::aica::Aica;
++    r.aica.start_thread();
++    REQUIRE(r.aica.threaded());
++    r.aica.write(A::kRegBase + A::kMcieb, A::kIntSampleDone, 4);
++    // Enabling SAMPLE_DONE while it is pending raises the line on the SH-4's side immediately.
++    bool raised = false;
++    for (int i = 0; i < 200 && !raised; ++i) {
++        r.sys.sched.advance(A::kSh4CyclesPerSample * A::kThreadBatch);
++        raised = r.sys.holly.raised(dream::holly::Irq::AicaIrq);
++        if (!raised)
++            std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    CHECK(raised);
++    // Disabling it clears the line at the write, and batches after it keep it clear.
++    r.aica.write(A::kRegBase + A::kMcieb, 0, 4);
++    CHECK_FALSE(r.sys.holly.raised(dream::holly::Irq::AicaIrq));
++    for (int i = 0; i < 20; ++i) {
++        r.sys.sched.advance(A::kSh4CyclesPerSample * A::kThreadBatch);
++        CHECK_FALSE(r.sys.holly.raised(dream::holly::Irq::AicaIrq));
++    }
++    // Enabled again: the thread's next samples publish it and a batch event raises it.
++    r.aica.write(A::kRegBase + A::kMcire, A::kIntSampleDone, 4);  // clear pending first
++    r.aica.write(A::kRegBase + A::kMcieb, A::kIntSampleDone, 4);
++    raised = false;
++    for (int i = 0; i < 200 && !raised; ++i) {
++        r.sys.sched.advance(A::kSh4CyclesPerSample * A::kThreadBatch);
++        raised = r.sys.holly.raised(dream::holly::Irq::AicaIrq);
++        if (!raised)
++            std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    CHECK(raised);
++    r.aica.stop_thread();
++}
 diff --git a/runtime/tests/test_gdrom.cpp b/runtime/tests/test_gdrom.cpp
 index 0ac9967..38239a5 100644
 --- a/runtime/tests/test_gdrom.cpp
