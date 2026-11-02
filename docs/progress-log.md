@@ -2,6 +2,21 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test23 result: TA overhead gone, small gain; the game now waits at vblank
+
+- Stock only, Emerald Coast (13 windows, a 7-window pause excluded): 0.88x average (test22
+  0.84x, test21 0.86x); game-thread time per guest second 0.885 (test22 0.936), about 5% less.
+  Nothing broken (Mark).
+- Profile: the TA path fell from 33% of the game thread's busy samples to about 12%; the
+  scheduler from 6.6% to 1.4%. What did not move: in gameplay the game thread spends about 18%
+  of its time in `Live::present`, about 13% of it in `render_wait()` waiting for the render
+  thread to finish the job in flight (finishing the previous GPU frame, decoding, texture work,
+  submission) so the window can show the newest image. One offscreen target per scale, so
+  present cannot show anything while the render thread draws into it. At the title screen the
+  wait is over half of the game thread.
+- Arithmetic from the measured windows: game work 77.8% at 0.885 per guest second gives
+  0.879x; with the 13% wait given back to the game, about (77.8 + 13) / 0.885 = 1.03x.
+
 ## 2026-11-02: switch-test23: the graphics submission path
 
 - Store-queue writes from emitted code go straight into the 64 bytes of the queues
