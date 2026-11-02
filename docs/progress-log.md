@@ -2,6 +2,30 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test22: relaxed memory access (the clock, GBR and the RAM base in locals)
+
+- Why: translated code reaches guest RAM through `Memory`'s inline path, a byte pointer. At -O1
+  (most units) and with -fno-strict-aliasing (the -O2 units) every guest store may alias anything,
+  so after each store the compiler re-read `Memory`'s fast-path state (RAM base, mask, journaling
+  and watch flags) and the context fields the code uses (`cycles`, `next_event`, `gbr`), and had
+  to write `cycles` back before each store. These are the "strict" accesses of item 2.
+- Change (dream-recomp, patches 0022 and 0023), under the existing `local_regs` option:
+  - Emitted functions keep `cycles`, `next_event`, `gbr` and the fast-path state (`FastMem`:
+    RAM base, mask, stores allowed) in locals, written back and re-read at the same points as the
+    general registers (calls, polls, `write_sr`, `trapa`, returns, tail calls).
+  - Guest accesses go through `gld`/`gst`/`gld_pair`/`gst_pair`/`gsq_flush` (ops.h): main RAM
+    inline from the locals; anything else writes the clock back, calls `Memory`, and re-reads the
+    clock and the poll deadline (devices read `ctx.cycles`; Holly's `on_raise` moves
+    `next_event`).
+- Item 3 (spin loops): nothing writes main RAM behind the game thread's back between calls and
+  polls (DMA, Maple and GD-ROM run on this thread inside slow-path calls or interrupt polls), so
+  a value kept in a register across a polling loop is re-read at the loop's next poll or call.
+  No loop can spin forever on a stale value; the one hot wait loop is already the idle skip.
+- Tests: the golden replay against Flycast's recorded states now runs every golden twice, with
+  main RAM on the slow path and on the inline path (`BareMemory::use_fast_path`); emitter 13
+  cases (71,481 assertions), runtime 82 cases pass.
+- Not in this build: T and the FP registers stay in the context.
+
 ## 2026-11-01: switch-test21 result: idle skips 25x fewer, small gain; 1785 dips are render-side
 
 - Idle skips per 5-second window fell from about 100,000 to about 4,000 (the line events are

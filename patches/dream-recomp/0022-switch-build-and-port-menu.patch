@@ -4507,6 +4507,100 @@ index 0000000..768ccbd
 +const IdleSkipStats& idle_skip_stats() noexcept;
 +
 +}  // namespace dream::sh4
+diff --git a/runtime/include/dream/runtime/sh4/ops.h b/runtime/include/dream/runtime/sh4/ops.h
+index 2c8ccb4..ab2b22d 100644
+--- a/runtime/include/dream/runtime/sh4/ops.h
++++ b/runtime/include/dream/runtime/sh4/ops.h
+@@ -290,6 +290,89 @@ inline void write_pair(::dream::Memory& m, std::uint32_t addr, std::uint64_t v)
+     m.write32(addr + 4, static_cast<std::uint32_t>(v));
+ }
+ 
++// SA-nx: guest memory for emitted functions that keep the clock and the fast-path state in locals
++// (EmitOptions::local_regs, docs/emitter-design.md "Register model"). Main RAM is served inline
++// from the local copy of the RAM base, so nothing has to be re-read from Memory after each store.
++// Every other address goes through Memory with the clock written back first, since devices read
++// ctx.cycles (Spg, the scheduler catch-up before an MMIO access), and the clock and the next poll
++// deadline read back after, since a device access can raise an interrupt (Holly's on_raise pulls
++// next_event in). Only main RAM is on the inline path, and only this thread writes it between
++// polls (DMA and the other devices run inside slow-path calls or interrupt polls), so values a
++// loop reads from RAM may stay in host registers until the next call or poll.
++using FastMem = ::dream::Memory::FastView;
++DREAM_ALWAYS_INLINE FastMem fast_mem(::dream::Memory& m) noexcept {
++    return m.fast_view();
++}
++DREAM_ALWAYS_INLINE bool fast_area(std::uint32_t a) noexcept {
++    return a < 0xE0000000u && ((a >> 26) & 7u) == 3u;
++}
++template <typename T>
++[[gnu::noinline]] T gld_slow(::dream::Memory& m, std::uint32_t a) {
++    if constexpr (sizeof(T) == 1)
++        return m.read8(a);
++    else if constexpr (sizeof(T) == 2)
++        return m.read16(a);
++    else if constexpr (sizeof(T) == 4)
++        return m.read32(a);
++    else
++        return m.read64(a);
++}
++template <typename T>
++[[gnu::noinline]] void gst_slow(::dream::Memory& m, std::uint32_t a, T v) {
++    if constexpr (sizeof(T) == 1)
++        m.write8(a, v);
++    else if constexpr (sizeof(T) == 2)
++        m.write16(a, v);
++    else if constexpr (sizeof(T) == 4)
++        m.write32(a, v);
++    else
++        m.write64(a, v);
++}
++template <typename T>
++DREAM_ALWAYS_INLINE T gld(::dream::Memory& m, Ctx& c, const FastMem& f, std::uint64_t& cyc,
++                          std::uint64_t& nev, std::uint32_t a) {
++    if (f.ram && fast_area(a)) [[likely]] {
++        T v;
++        std::memcpy(&v, f.ram + (a & f.mask), sizeof v);
++        return v;
++    }
++    c.cycles = cyc;
++    const T v = gld_slow<T>(m, a);
++    cyc = c.cycles;
++    nev = c.next_event;
++    return v;
++}
++template <typename T>
++DREAM_ALWAYS_INLINE void gst(::dream::Memory& m, Ctx& c, const FastMem& f, std::uint64_t& cyc,
++                             std::uint64_t& nev, std::uint32_t a, T v) {
++    if (f.store_ok && fast_area(a)) [[likely]] {
++        std::memcpy(f.ram + (a & f.mask), &v, sizeof v);
++        return;
++    }
++    c.cycles = cyc;
++    gst_slow<T>(m, a, v);
++    cyc = c.cycles;
++    nev = c.next_event;
++}
++DREAM_ALWAYS_INLINE std::uint64_t gld_pair(::dream::Memory& m, Ctx& c, const FastMem& f,
++                                           std::uint64_t& cyc, std::uint64_t& nev,
++                                           std::uint32_t a) {
++    const std::uint64_t hi = gld<std::uint32_t>(m, c, f, cyc, nev, a);
++    return (hi << 32) | gld<std::uint32_t>(m, c, f, cyc, nev, a + 4);
++}
++DREAM_ALWAYS_INLINE void gst_pair(::dream::Memory& m, Ctx& c, const FastMem& f, std::uint64_t& cyc,
++                                  std::uint64_t& nev, std::uint32_t a, std::uint64_t v) {
++    gst<std::uint32_t>(m, c, f, cyc, nev, a, static_cast<std::uint32_t>(v >> 32));
++    gst<std::uint32_t>(m, c, f, cyc, nev, a + 4, static_cast<std::uint32_t>(v));
++}
++DREAM_ALWAYS_INLINE void gsq_flush(::dream::Memory& m, Ctx& c, std::uint64_t& cyc,
++                                   std::uint64_t& nev, std::uint32_t a) {
++    c.cycles = cyc;
++    m.sq_flush(a);
++    cyc = c.cycles;
++    nev = c.next_event;
++}
++
+ // FTRC: truncate toward zero with saturation; NaN gives the negative-overflow pattern.
+ inline std::uint32_t ftrc(float f) noexcept {
+     if (std::isnan(f))
 diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
 index c8d4401..9e54bc3 100644
 --- a/runtime/src/aica/aica.cpp
@@ -5561,6 +5655,54 @@ index bdb126a..c1c99f7 100644
    # GCC-compiled C unit (tests/sh4/cprogs, `make specs` prints this line)
    "c1_idioms|../cprogs/c1_idioms.bin|0x8c010000|0x8c010000:0x8c010024:div_mod 0x8c010028:0x8c010072:udiv_mix 0x8c010080:0x8c0100e4:dense_switch 0x8c0100e8:0x8c010100:mul64 0x8c010100:0x8c010132:sub64 0x8c010134:0x8c010178:pack_bytes 0x8c010180:0x8c0101d6:vec_transform 0x8c0101d8:0x8c010222:sort_words 0x8c010224:0x8c010246:dot3 0x8c010248:0x8c01026a:clamp_scale 0x8c010270:0x8c01027c:float_to_fixed 0x8c010280:0x8c010526:fib 0x8c01052c:0x8c010552:str_len 0x8c010554:0x8c010574:mem_copy 0x8c010578:0x8c0106b8:udivsi3_i4i 0x8c01059e:0x8c0105d4:udivsi3_i4i_059e 0x8c0105cc:0x8c0105d4:udivsi3_i4i_05cc 0x8c0105d4:0x8c010648:udivsi3_i4i_05d4 0x8c010648:0x8c010796:sdivsi3_i4i 0x8c010674:0x8c0106b8:sdivsi3_i4i_0674 0x8c01069a:0x8c0106b8:sdivsi3_i4i_069a"
  )
+diff --git a/tests/sh4/test_golden.cpp b/tests/sh4/test_golden.cpp
+index c9028a3..8ca88c5 100644
+--- a/tests/sh4/test_golden.cpp
++++ b/tests/sh4/test_golden.cpp
+@@ -107,12 +107,15 @@ Golden parse(const std::filesystem::path& path) {
+ // program is also run purely interpreted from the loaded image, and in hybrid mode where calls into
+ // translated functions are made natively; all three must reproduce the oracle's state, which is the
+ // interpreter's correctness argument (docs/runtime-devinterp.md).
+-enum class Mode { Translated, Interpreted, Hybrid };
++// TranslatedFast (SA-nx): the emitted function with main RAM served inline (Memory::fast_view).
++enum class Mode { Translated, TranslatedFast, Interpreted, Hybrid };
+ 
+ const char* mode_name(Mode md) {
+     switch (md) {
+         case Mode::Translated:
+             return "translated";
++        case Mode::TranslatedFast:
++            return "translated, inline RAM";
+         case Mode::Interpreted:
+             return "interpreted";
+         default:
+@@ -135,6 +138,8 @@ void replay(const Golden& g, const std::filesystem::path& image, dream::sh4::Gue
+         x = x * 1664525u + 1013904223u;
+         m.write32(g.fill_addr + i, g.fill_addr + ((x >> 8) % g.fill_len & ~3u));
+     }
++    if (md == Mode::TranslatedFast)
++        m.use_fast_path(true);
+     dream::sh4::Ctx c{};
+     c.sr = 0x700000F0;
+     c.r[15] = 0x8C00F400;
+@@ -143,7 +148,7 @@ void replay(const Golden& g, const std::filesystem::path& image, dream::sh4::Gue
+     c.pc = g.entry;
+     c.pr = 0x8C00FFF0;
+     dream::sh4::write_fpscr(c, g.fpscr);
+-    if (md == Mode::Translated) {
++    if (md == Mode::Translated || md == Mode::TranslatedFast) {
+         dream::sh4::run_guest(c, m, fn);
+     } else {
+ #ifdef DREAM_DEV_INTERPRETER
+@@ -197,7 +202,7 @@ TEST_CASE("golden replay: every captured oracle state is reproduced") {
+             files.push_back(e.path());
+     std::sort(files.begin(), files.end());
+     REQUIRE(!files.empty());
+-    std::vector<Mode> modes{Mode::Translated};
++    std::vector<Mode> modes{Mode::Translated, Mode::TranslatedFast};
+ #ifdef DREAM_DEV_INTERPRETER
+     modes.push_back(Mode::Interpreted);
+     modes.push_back(Mode::Hybrid);
 diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
 index 4cee63e..a3dead3 100644
 --- a/tests/sh4/test_programs.cpp
@@ -5597,10 +5739,10 @@ index e47a463..7a46513 100644
      // Split the unit's function bodies over this many translation units (SA-nx). A 6.7 MB binary
      // emits about 160 MB of C++, which no compiler handles well as one file. Part 0 also holds the
 diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
-index 26c7374..d0d076a 100644
+index 26c7374..43f0b9b 100644
 --- a/translator/src/emit/emit.cpp
 +++ b/translator/src/emit/emit.cpp
-@@ -39,7 +39,65 @@ std::string label(std::uint32_t a) {
+@@ -39,7 +39,109 @@ std::string label(std::uint32_t a) {
      std::snprintf(buf, sizeof buf, "L_%08x", a);
      return buf;
  }
@@ -5626,7 +5768,46 @@ index 26c7374..d0d076a 100644
 +}
 +// Replaces the markers in a finished body with the registers it names. The set comes from the
 +// text itself, not from every R() call, because some lowerings name operands they do not use.
-+std::string localise(const std::string& body) {
++// Replaces every occurrence of `from` in `s` with `to`.
++void replace_all(std::string& s, const std::string& from, const std::string& to) {
++    std::string out;
++    out.reserve(s.size() + s.size() / 8);
++    std::size_t at = 0;
++    for (std::size_t i = s.find(from); i != std::string::npos; i = s.find(from, at)) {
++        out.append(s, at, i - at);
++        out += to;
++        at = i + from.size();
++    }
++    out.append(s, at, std::string::npos);
++    s.swap(out);
++}
++
++std::string localise(const std::string& body_in) {
++    // Everything before the declaration (the entry poll) still works on the context.
++    const std::size_t at = body_in.find(kDecl);
++    const std::string head = at == std::string::npos ? std::string() : body_in.substr(0, at);
++    std::string body = at == std::string::npos ? body_in : body_in.substr(at);
++    // SA-nx: the clock, the poll deadline, GBR and the fast-memory state are locals too, and guest
++    // memory goes through the helpers that keep them (ops.h, gld/gst). Done before the markers
++    // are expanded, so the spill and load text below keeps naming the context's fields.
++    static const std::pair<const char*, const char*> kMem[] = {
++        {"m.read8(", "gld<std::uint8_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.read16(", "gld<std::uint16_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.read32(", "gld<std::uint32_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.read64(", "gld<std::uint64_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.write8(", "gst<std::uint8_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.write16(", "gst<std::uint16_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.write32(", "gst<std::uint32_t>(m, c, fm_, cyc_, nev_, "},
++        {"m.write64(", "gst<std::uint64_t>(m, c, fm_, cyc_, nev_, "},
++        {"read_pair(m, ", "gld_pair(m, c, fm_, cyc_, nev_, "},
++        {"write_pair(m, ", "gst_pair(m, c, fm_, cyc_, nev_, "},
++        {"m.sq_flush(", "gsq_flush(m, c, cyc_, nev_, "},
++        {"c.cycles", "cyc_"},
++        {"c.next_event", "nev_"},
++        {"c.gbr", "gbr_"},
++    };
++    for (const auto& [from, to] : kMem)
++        replace_all(body, from, to);
 +    std::uint32_t used = 0;
 +    for (std::size_t i = body.find("gpr"); i != std::string::npos; i = body.find("gpr", i + 3)) {
 +        std::size_t j = i + 3;
@@ -5635,18 +5816,23 @@ index 26c7374..d0d076a 100644
 +        if (j > i + 3 && n < 16)
 +            used |= 1u << n;
 +    }
-+    std::string decl, spill, load;
++    std::string decl =
++        "    [[maybe_unused]] std::uint64_t cyc_ = c.cycles, nev_ = c.next_event;\n"
++        "    [[maybe_unused]] std::uint32_t gbr_ = c.gbr;\n"
++        "    [[maybe_unused]] FastMem fm_ = fast_mem(m);\n";
++    std::string spill = "c.cycles = cyc_; c.gbr = gbr_; ", load = " cyc_ = c.cycles; nev_ = c.next_event; gbr_ = c.gbr; fm_ = fast_mem(m);";
++    std::string gprs;
 +    for (unsigned n = 0; n < 16; ++n)
 +        if (used & (1u << n)) {
 +            const std::string k = std::to_string(n);
-+            decl += (decl.empty() ? "    std::uint32_t " : ", ") + std::string("gpr") + k + " = c.r[" + k + "]";
++            gprs += (gprs.empty() ? "    std::uint32_t " : ", ") + std::string("gpr") + k + " = c.r[" + k + "]";
 +            spill += "c.r[" + k + "] = gpr" + k + "; ";
 +            load += " gpr" + k + " = c.r[" + k + "];";
 +        }
-+    if (!decl.empty())
-+        decl += ";\n";
-+    std::string out;
-+    out.reserve(body.size() + body.size() / 4);
++    if (!gprs.empty())
++        decl += gprs + ";\n";
++    std::string out = head;
++    out.reserve(head.size() + body.size() + body.size() / 4);
 +    for (std::size_t i = 0; i < body.size();) {
 +        if (body[i] == '\x01' && i + 2 < body.size() && body[i + 2] == '\x01') {
 +            const char k = body[i + 1];
@@ -5666,7 +5852,7 @@ index 26c7374..d0d076a 100644
      return "c.r[" + std::to_string(n) + "]";
  }
  std::string S32(const std::string& e) {
-@@ -265,6 +323,8 @@ public:
+@@ -265,6 +367,8 @@ public:
          if (opt_.irq_checks)
              out << "    if (c.cycles >= c.next_event) { c.pc = resume_pc ? resume_pc : "
                  << hexu(spec_.entry) << "; deliver_irq(c, m); }\n";
@@ -5675,7 +5861,7 @@ index 26c7374..d0d076a 100644
          out << "    if (resume_pc) {\n        switch (resume_pc) {\n";
          for (std::uint32_t b : blocks_)
              out << "            case " << hexu(b) << ": goto " << label(b) << ";\n";
-@@ -295,20 +355,28 @@ public:
+@@ -295,20 +399,28 @@ public:
                          // landing one instruction into a prologue, or shared code): control
                          // continues in that function, so tail-call it.
                          out << "    // falls through into the function at " << hex(stop) << "\n";
@@ -5707,7 +5893,7 @@ index 26c7374..d0d076a 100644
          out << "void " << name << "(Ctx& c, Memory& m) { ";
          if (opt_.replay_hooks) {
              // The mode this function was compiled for travels with the hook, so a development run
-@@ -891,8 +959,8 @@ private:
+@@ -891,8 +1003,8 @@ private:
      std::string irq_check_if_backedge(std::uint32_t target, std::uint32_t pc) const {
          // Braced: GCC's -Wmisleading-indentation rejects `if (x) f(); goto L;` on one line.
          return (opt_.irq_checks && target <= pc)
@@ -5718,7 +5904,7 @@ index 26c7374..d0d076a 100644
                     : "";
      }
  
-@@ -916,7 +984,7 @@ private:
+@@ -916,7 +1028,7 @@ private:
                  out << "    if (" << cond << ") { c.cycles += 1; " << irq_check_if_backedge(t, pc)
                      << "goto " << label(t) << "; }\n";
              } else {
@@ -5727,7 +5913,7 @@ index 26c7374..d0d076a 100644
                      << " return; }\n";
              }
              return pc + 2;
-@@ -932,7 +1000,7 @@ private:
+@@ -932,7 +1044,7 @@ private:
          const bool illegal_slot =
              sh4::has_delay_slot(slot.op) || slot.op == Op::BT || slot.op == Op::BF;
          const std::string slot_code = illegal_slot
@@ -5736,7 +5922,7 @@ index 26c7374..d0d076a 100644
                                                  hexu(pc + 2) + "); // illegal slot instruction"
                                            : lower(pc + 2, slot);
          auto emit_slot = [&] {
-@@ -954,7 +1022,7 @@ private:
+@@ -954,7 +1066,7 @@ private:
                      out << "        if (taken) { " << irq_check_if_backedge(t, pc) << "goto "
                          << label(t) << "; }\n";
                  } else {
@@ -5745,7 +5931,7 @@ index 26c7374..d0d076a 100644
                  }
                  break;
              }
-@@ -965,7 +1033,7 @@ private:
+@@ -965,7 +1077,7 @@ private:
                      out << "        " << irq_check_if_backedge(t, pc) << "goto " << label(t)
                          << ";\n";
                  } else {
@@ -5754,7 +5940,7 @@ index 26c7374..d0d076a 100644
                  }
                  break;
              }
-@@ -973,7 +1041,8 @@ private:
+@@ -973,7 +1085,8 @@ private:
                  const std::uint32_t t = sh4::pcrel_target(ins, pc);
                  out << "        c.pr = " << hexu(pc + 4) << ";\n";
                  emit_slot();
@@ -5764,7 +5950,7 @@ index 26c7374..d0d076a 100644
                  break;
              }
              case Op::BSRF:
-@@ -987,8 +1056,8 @@ private:
+@@ -987,8 +1100,8 @@ private:
                  if (constant && known_.count(direct)) {
                      out << "        c.pr = " << hexu(pc + 4) << ";\n";
                      emit_slot();
@@ -5775,7 +5961,7 @@ index 26c7374..d0d076a 100644
                      ++result_.direct_calls;
                      break;
                  }
-@@ -999,7 +1068,8 @@ private:
+@@ -999,7 +1112,8 @@ private:
                      out << "        const std::uint32_t target = " << R(ins.m) << ";\n";
                  out << "        c.pr = " << hexu(pc + 4) << ";\n";
                  emit_slot();
@@ -5785,7 +5971,7 @@ index 26c7374..d0d076a 100644
                  break;
              }
              case Op::BRAF:
-@@ -1021,7 +1091,7 @@ private:
+@@ -1021,7 +1135,7 @@ private:
                          out << "            case " << hexu(t) << ": "
                              << irq_check_if_backedge(t, pc) << "goto " << label(t) << ";\n";
                      }
@@ -5794,7 +5980,7 @@ index 26c7374..d0d076a 100644
                          << "; set_tail_entry_pr(entry_pr, target); jump_indirect(c, m, target); "
                             "return;\n";
                      out << "        }\n";
-@@ -1029,6 +1099,8 @@ private:
+@@ -1029,6 +1143,8 @@ private:
                      if (ins.op == Op::BRAF)
                          note(pc, ins,
                               "computed jump with no recovered table: emitted as tail call");
@@ -5803,7 +5989,7 @@ index 26c7374..d0d076a 100644
                      // A jump to the address this function must return to is a return: Sonic
                      // Adventure's task yield (0x0C099990) ends `mov.l @r15+,r0; jmp @r0`. As a
                      // tail call it re-entered the caller's middle as a second activation, and
-@@ -1049,6 +1121,8 @@ private:
+@@ -1049,6 +1165,8 @@ private:
                  // and run_guest re-enters the target. A resumed body returns to run_guest anyway.
                  out << "        const std::uint32_t rts_target = c.pr;\n";
                  emit_slot();
@@ -5812,7 +5998,7 @@ index 26c7374..d0d076a 100644
                  if (opt_.trace)
                      out << "        trace_return(c, m, " << hexu(pc) << ");\n";
                  out << "        if (!resume_pc && rts_target != entry_pr) nonlocal_return(c, m, "
-@@ -1057,13 +1131,16 @@ private:
+@@ -1057,13 +1175,16 @@ private:
                  break;
              case Op::RTE:
                  emit_slot();
@@ -5830,7 +6016,7 @@ index 26c7374..d0d076a 100644
                  break;
          }
          out << "    }\n";
-@@ -1265,7 +1342,7 @@ private:
+@@ -1265,7 +1386,7 @@ private:
                                  std::to_string(m) + "));"
                            : "m.write32(" + rn + " + " + r0 + ", f2u(" + frm + "));";
              default:
@@ -5839,7 +6025,7 @@ index 26c7374..d0d076a 100644
          }
      }
  
-@@ -1525,7 +1602,7 @@ private:
+@@ -1525,7 +1646,7 @@ private:
              case Op::NOP:
                  return "/* nop */";
              case Op::LDC_SR:
@@ -5848,7 +6034,7 @@ index 26c7374..d0d076a 100644
              case Op::LDC_GBR:
                  return "c.gbr = " + rm + ";";
              case Op::LDC_VBR:
-@@ -1539,7 +1616,7 @@ private:
+@@ -1539,7 +1660,7 @@ private:
              case Op::LDC_BANK:
                  return bank + " = " + rm + ";";
              case Op::LDC_L_SR:
@@ -5857,7 +6043,7 @@ index 26c7374..d0d076a 100644
              case Op::LDC_L_GBR:
                  return "c.gbr = m.read32(" + rm + "); " + rm + " += 4;";
              case Op::LDC_L_VBR:
-@@ -1609,7 +1686,7 @@ private:
+@@ -1609,7 +1730,7 @@ private:
              case Op::STS_L_PR:
                  return rn + " -= 4; m.write32(" + rn + ", c.pr);";
              case Op::TRAPA:
@@ -5866,7 +6052,7 @@ index 26c7374..d0d076a 100644
              case Op::MOVCA_L:
                  return "m.write32(" + rn + ", " + r0 + ");";
              case Op::PREF:
-@@ -1672,7 +1749,7 @@ private:
+@@ -1672,7 +1793,7 @@ private:
              default:
                  ++result_.unlowered;
                  note(pc, ins, "not lowered yet");

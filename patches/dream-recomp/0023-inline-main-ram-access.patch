@@ -55,10 +55,10 @@ index da93d0a..7e50eca 100644
      void sq_flush(std::uint32_t a) override;
  
 diff --git a/runtime/include/dream/runtime/memory.h b/runtime/include/dream/runtime/memory.h
-index 6680b09..7ffe353 100644
+index 6680b09..9948963 100644
 --- a/runtime/include/dream/runtime/memory.h
 +++ b/runtime/include/dream/runtime/memory.h
-@@ -11,22 +11,103 @@
+@@ -11,22 +11,113 @@
  #include <stdexcept>
  #include <string>
  
@@ -108,6 +108,16 @@ index 6680b09..7ffe353 100644
 +    DREAM_ALWAYS_INLINE void write16(std::uint32_t a, std::uint16_t v) { fast_write(a, v, &Memory::do_write16); }
 +    DREAM_ALWAYS_INLINE void write32(std::uint32_t a, std::uint32_t v) { fast_write(a, v, &Memory::do_write32); }
 +    DREAM_ALWAYS_INLINE void write64(std::uint32_t a, std::uint64_t v) { fast_write(a, v, &Memory::do_write64); }
++    // SA-nx: the inline path's state, for emitted functions that keep it in locals (FastMem).
++    struct FastView {
++        std::uint8_t* ram;
++        std::uint32_t mask;
++        bool store_ok;
++    };
++    DREAM_ALWAYS_INLINE FastView fast_view() const noexcept {
++        return {fast_ram_, fast_ram_mask_,
++                fast_ram_ != nullptr && !journaling && !hash_writes && !(watch_lo < watch_hi)};
++    }
      // Store queue: writes to 0xE0000000..0xE3FFFFFF buffer in the SQ; PREF flushes 32 bytes.
      virtual void sq_write32(std::uint32_t addr, std::uint32_t v) = 0;
      virtual void sq_flush(std::uint32_t addr) = 0;
@@ -170,9 +180,15 @@ index 6680b09..7ffe353 100644
  };
  
  // 16 MB of main RAM at every alias of area 3 (0x0C000000 physical), nothing else. Accesses outside
-@@ -39,30 +120,30 @@ public:
+@@ -38,31 +129,36 @@ public:
+     BareMemory() : ram_(new std::uint8_t[kRamSize]()) {}
  
      std::uint8_t* ram() noexcept { return ram_.get(); }
++    // SA-nx: serve area 3 inline as DcMemory does, so tests cover both paths of emitted code.
++    void use_fast_path(bool on) noexcept {
++        fast_ram_ = on ? ram_.get() : nullptr;
++        fast_ram_mask_ = kRamSize - 1;
++    }
  
 -    std::uint8_t read8(std::uint32_t a) override { return ram_[idx(a)]; }
 -    std::uint16_t read16(std::uint32_t a) override {
