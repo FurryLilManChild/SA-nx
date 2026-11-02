@@ -2,6 +2,24 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test24 result and switch-test25: smooth pacing works; no more catching up
+
+- test24, stock, Emerald Coast with FRAME PACING smooth (12 windows): 0.87x to 1.20x, about 1.02x
+  on average, the game thread 73 to 97% busy, render wait gone (0%), about 150 of 300 refreshes
+  per window kept the last frame (the game draws 30 a second). Then low latency in the same
+  session (9 windows): about 0.86x with the 12 to 17% wait back. Mark: a noticeable improvement
+  in play; the title screen only a little quicker (there the render thread is 67 to 81% busy, so
+  it is the render thread, not the wait, that limits it at stock).
+- Problem: speeds above 1x (1.18x, 1.20x, 1.31x), with the sound running fast. The launcher only
+  ever slept while ahead of real time and never wrote off time it fell behind; the wait in every
+  present used to hold the guest to the display, so the debt was never paid back by sprinting.
+  With smooth pacing nothing held it, and after each slow stretch the game ran fast until it had
+  caught up.
+- Problem: the on-screen FPS counted presented frames only, so it read about 30 while every
+  other refresh kept the last frame.
+- switch-test25: lateness beyond one 60 Hz refresh is written off (the pacing baseline moves
+  forward), in both pacing modes; the on-screen FPS counts refreshes that kept the last frame.
+
 ## 2026-11-02: switch-test24: frame pacing, "smooth" by default
 
 - `Live::present` (each VBlank-out): with `PortOptions::pacing` 0 ("smooth", the default), when
