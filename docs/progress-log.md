@@ -2,6 +2,29 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-01: switch-test19 result: registers in locals, about 1.2x on the game thread
+
+- Stock 1020/307/1331, Emerald Coast (23 five-second windows): 0.82x average (0.61 to 1.00),
+  game thread 83% busy, 10% of it waiting on the render thread. Game-thread time per guest
+  second about 1.0, against 1.2 to 1.3 on test18: roughly 1.2x to 1.25x faster. Still about
+  1.2x short of full speed at stock.
+- 1785/768/1600, Emerald Coast: 1.00x throughout, game thread about 66% busy (test18 about 71%).
+- No crashes, no unmapped accesses, err log only the NVK conformance line. The 0 fps and
+  negative percentages near the start are the port menu being open across a stats window
+  (cosmetic accounting bug in the perf line).
+- Profile (whole session, stock and 1785 mixed): 18.8% of the game thread's busy samples are
+  `svcArbitrateLock` on the AICA `lock_`, taken by the `aica.sample` batch event every 32 samples
+  to call `update_sh4_interrupts()` while the sound thread holds it running ARM7 and mixer
+  chunks. 85% of those come from the idle-skip wait function (0x0C641E40), so the waits sit on
+  the critical path: even at 0.82x about half of guest time is skipped idle (about 19,000 skips a
+  second, one per SPG scanline event, about 20 us of guest time each). SD reads 5.7%,
+  `nonlocal_return` exceptions 2.8%.
+- Next (proposed): publish the AICA interrupt line in an atomic from the thread (and from SH-4
+  register writes, under the lock), read it lock-free in the batch event. After that: SPG
+  scheduling only the line events that matter, so idle skips jump further.
+- Pipeline key list holds only 6 variants, so the Mystic Ruins first-visit slowness is probably
+  not pipeline compiles; unexplained until a log of such a run arrives.
+
 ## 2026-11-01: switch-test19: guest registers in host locals (the "register work")
 
 - Release 0.5.0 is on hold at Mark's request so the register work goes first.
