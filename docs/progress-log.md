@@ -22,6 +22,8 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   Runtime 82 cases, emitter 13 cases pass.
 - Expectation: most of that 12% at stock, maybe 0.85x to about 0.9x. Risk: code that reads
   the scanline (flicker, tearing, stutter), and interrupt timing.
+- Build: 13 of 13 steps. NRO sha256
+  ebc6b0e5a7bcaf8f73ca2c9d6bd43b6505732b272ad194c9558d5bd9e94f55bd, verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test21.elf.
 
 ## 2026-11-01: switch-test20 result: lock wait gone, small gain
 
