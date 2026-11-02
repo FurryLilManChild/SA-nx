@@ -13,6 +13,8 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   pass); the AICA cases also run clean under ThreadSanitizer.
 - Expectation: removes most of the 18.8% of game-thread busy time test19 spent in
   `svcArbitrateLock`; stock Emerald Coast from about 0.82x towards the mid 0.9s. Estimate only.
+- Build: 5 of 5 steps (runtime only). NRO sha256
+  6b68d6f6d53649d0565a5296f0124ffc4084e29e52a1444916eb07d9b0cfb70f, verified in `out\\sd\\switch\\sonicadv\\`; ELF kept as test20.elf.
 
 ## 2026-11-01: switch-test19 result: registers in locals, about 1.2x on the game thread
 
