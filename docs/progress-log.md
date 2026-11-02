@@ -2,6 +2,22 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-02: switch-test24: frame pacing, "smooth" by default
+
+- `Live::present` (each VBlank-out): with `PortOptions::pacing` 0 ("smooth", the default), when
+  the render thread still has a job in flight the refresh is skipped: the last finished frame
+  stays on screen and the game runs on instead of waiting in `render_wait()`. Never two
+  refreshes in a row, so a render thread that is always busy still has its frames shown. Window
+  events are still polled. The perf log gains a `pacing:` line (refreshes that kept the last
+  frame).
+- Pacing 1 ("low latency") keeps the old behaviour. Port menu row FRAME PACING, saved as
+  `PACING=smooth|latency` in `sonicadv_options.txt`.
+- Why: switch-test23 measured the wait at 13% of the game thread in Emerald Coast at stock and
+  over half at the title screen. Cost: when a refresh is skipped the picture is one refresh
+  (16.7 ms) behind until the next; when the render thread keeps up nothing changes.
+- Tests: the port menu test covers the new row and its text form; host suites pass (dcdisc's
+  pytest needs pycdlib, missing in this container, unrelated).
+
 ## 2026-11-02: switch-test23 result: TA overhead gone, small gain; the game now waits at vblank
 
 - Stock only, Emerald Coast (13 windows, a 7-window pause excluded): 0.88x average (test22
