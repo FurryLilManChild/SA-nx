@@ -2,6 +2,25 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-03: release 0.5.1: the game could run uncapped
+
+- Report from a player (and Mark, once, last night): speed between 0.75x and 1.37x, 1.70x on
+  the title, the counter at 60 to 90. No logs available (Mark away from home).
+- Cause found in the pacing code: the launcher slept only when the guest was ahead of real time
+  by less than one second. Once the guest clock got a second or more ahead, it never slept
+  again and the game ran as fast as the Switch could, for the rest of the session. How it first
+  got that far ahead is not known without a log (a stretch with no VBlank-out, during which
+  nothing paces the guest, is one way).
+- Fix: when the guest is ahead by more than two refreshes (33.4 ms), the baseline is moved back so
+  it is exactly two refreshes ahead, and that is slept. The log prints `pacing: the guest was N ms
+  ahead` for the first 20 times, so the next log shows when and by how much.
+- FPS counter: counts frames the game draws (`rendered`), not refreshes: 30 at full speed in
+  stages, 60 in the menus (Mark asked for a counter that does not read 60 as 1x).
+- Version 0.5.1 (release build). Zip sha256 cd84f30d2464b6686de320ff6886a626203f41919fea1bc5acea38000e79f01b,
+  NRO sha256 5ac569631df47541786021cdc582f0a6e6c8c8414cbf310ed6908e4551c3c0dd, in `out\\release\\` with
+  release_notes_0.5.1.md. ELF kept as release-0.5.1.elf. Not run on a Switch before release:
+  built and packaged only.
+
 ## 2026-11-02: release 0.5.0 built
 
 - test28 result: nothing went backwards. Unwinding 3.2% to 2.0% of the game thread below full

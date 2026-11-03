@@ -8,7 +8,7 @@ Vulkan.
 
 ## Status
 
-Version 0.5.0: playable. Tested through the title, menus, character select, Emerald Coast and
+Version 0.5.1: playable. Tested through the title, menus, character select, Emerald Coast and
 other stages, at full speed at the Switch's stock clocks in play with the default settings. Not
 every stage and story has been played through on this version yet; reports are welcome.
 
@@ -19,6 +19,9 @@ every stage and story has been played through on this version yet; reports are w
   translucency at stock clocks runs below full speed in heavier scenes.
 - The port menu also has: in-game resolution (1x, 1.5x, 2x), screen shape (4:3 or stretched),
   volume, frame pacing (smooth or low latency), the FPS counter, and controller remapping.
+- The FPS counter shows the frames the game draws and its speed against the Dreamcast. In
+  stages the game draws 30 frames a second, so full speed reads **30 FPS 1.00X**; the menus
+  draw 60.
 
 ## Known issues
 
