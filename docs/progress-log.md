@@ -2,6 +2,36 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-03: phase 2 begins; test2.1: cutscene code translated, movie measurement
+
+- Mark: tests are now numbered by phase (this is test 2.1, then 2.2, ...). Goal of phase 2: 1.0.
+- Found while scoping 1.0: the story cutscenes' own code was never translated. 236 EV*.PRS
+  files on the disc (copied from Mark's PC over the bridge); 207 carry code (word 0 points at
+  the entry at 0x8CB80000, word 1 into the file), 29 (EV_*) are PVMH texture archives. Every
+  cutscene therefore ran in the dev interpreter.
+- Measured before configuring them: with the default overlay signatures (32 instruction words),
+  184 function signatures in one file also match a different function in another file at the
+  same address, and 14,961 functions are identical to another file's while that file's other
+  code differs (shared helpers at fixed offsets). Either way the wrong translation could run.
+- dream-recomp (patch 0022):
+  - relocation `full_signature`: the signature covers the function's whole extent;
+  - relocation `dispatch_calls`: calls and tail jumps to functions of the same unit go through
+    `call_indirect`, so every callee checks its own signature;
+  - relocation `parts = N` (translator and DreamAddGame.cmake): events are one unit each;
+  - `dream-translate emit --overlay --full-signature --dispatch-calls`, and an optional flags field
+    in tests/sh4/programs/programs.cmake.
+  - Differential tests: p4 at 0x8C060000 through the dispatcher gives the same results as direct
+    calls; with the callee's code changed in RAM the call goes to the untranslated path (a
+    direct call would have run the stale callee); c1's fib (678 bytes) with a whole-extent
+    signature stops matching after a change 0x2A4 bytes in. Emitter 16 cases, translator 11,
+    runtime 87 pass.
+- Config: the 207 files as overlays at 0x8CB80000 with no_fold, full_signature, dispatch_calls,
+  parts = 1. Translated in the cloud: 13,596 functions, 953,831 instructions, 3,550 not lowered,
+  about 179 MB of C++. tools/prs_extract.py gains `--events` (PC builds need it once).
+- Movie measurement: test2.1 is a test build (SANX_RELEASE off): the profiler with its movie
+  sections (pc_movie, stacks_movie) and the sound/movie line in the timing log are back.
+- Also in: triggers full at once (below).
+
 ## 2026-11-03: for the next release: triggers full at once (no ramp)
 
 - Mark: a pressed trigger should be fully pressed right away. The Switch's ZL and ZR are digital,

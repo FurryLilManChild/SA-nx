@@ -561,10 +561,32 @@ index 0000000..e55e77a
 +    return failures ? 1 : 0;
 +}
 diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
-index 08a8560..f36eefa 100644
+index 08a8560..da92cd9 100644
 --- a/cmake/DreamAddGame.cmake
 +++ b/cmake/DreamAddGame.cmake
-@@ -109,11 +109,21 @@ function(dream_add_game id)
+@@ -94,9 +94,18 @@ function(dream_add_game id)
+     string(REGEX MATCH "file[ \t]*=[ \t]*\"([^\"]+)\"" _fm "${_b}")
+     if(CMAKE_MATCH_1)
+       list(APPEND _extra_deps ${_dir}/${CMAKE_MATCH_1})
+-      foreach(k RANGE 1 7)
+-        list(APPEND _units ${_gen}/${id}_reloc_${d}_part${k}.cpp)
+-      endforeach()
++      # SA-nx: `parts = N` overrides the 8 parts a file gets by default (the translator reads it too).
++      set(_np 8)
++      string(REGEX MATCH "(^|\n)[ \t]*parts[ \t]*=[ \t]*([0-9]+)" _pm "${_b}")
++      if(_pm)
++        set(_np ${CMAKE_MATCH_2})
++      endif()
++      if(_np GREATER 1)
++        math(EXPR _lastp "${_np} - 1")
++        foreach(k RANGE 1 ${_lastp})
++          list(APPEND _units ${_gen}/${id}_reloc_${d}_part${k}.cpp)
++        endforeach()
++      endif()
+     endif()
+   endforeach()
+ 
+@@ -109,11 +118,21 @@ function(dream_add_game id)
    endif()
  
    separate_arguments(DREAM_TRANSLATE_EXTRA_FLAGS)
@@ -6322,6 +6344,32 @@ index 947fb1b..5dfc2e0 100644
 +    CHECK(ran_b == 1);
 +    CHECK(s.now() == 2000u);
 +}
+diff --git a/tests/sh4/CMakeLists.txt b/tests/sh4/CMakeLists.txt
+index ab43c15..750e02c 100644
+--- a/tests/sh4/CMakeLists.txt
++++ b/tests/sh4/CMakeLists.txt
+@@ -18,6 +18,12 @@ foreach(entry IN LISTS DREAM_SH4_PROGRAMS)
+   list(GET entry 1 bin)
+   list(GET entry 2 base)
+   list(GET entry 3 specs)
++  set(extra_flags)
++  list(LENGTH entry _nfields)
++  if(_nfields GREATER 4)
++    list(GET entry 4 _flags)
++    separate_arguments(extra_flags UNIX_COMMAND "${_flags}")
++  endif()
+   separate_arguments(spec_list UNIX_COMMAND "${specs}")
+   set(fn_args)
+   foreach(s IN LISTS spec_list)
+@@ -31,7 +37,7 @@ foreach(entry IN LISTS DREAM_SH4_PROGRAMS)
+   add_custom_command(
+     OUTPUT ${src} ${hdr}
+     COMMAND dream-translate emit --image ${bin} --base ${base}
+-            ${fn_args} --out ${src} --header ${hdr}
++            ${fn_args} ${extra_flags} --out ${src} --header ${hdr}
+     DEPENDS dream-translate ${bin} ${CMAKE_CURRENT_SOURCE_DIR}/programs/programs.cmake
+     COMMENT "Translating ${name}"
+     VERBATIM)
 diff --git a/tests/sh4/programs/p14_bank.bin b/tests/sh4/programs/p14_bank.bin
 new file mode 100644
 index 0000000000000000000000000000000000000000..4c58169e9f66fc39d1d698fcec1f3e5a42a66f90
@@ -6365,15 +6413,27 @@ index 0000000..8fb33d5
 +	rts			! 000b
 +	nop			! 0009
 diff --git a/tests/sh4/programs/programs.cmake b/tests/sh4/programs/programs.cmake
-index bdb126a..c1c99f7 100644
+index bdb126a..33e26b0 100644
 --- a/tests/sh4/programs/programs.cmake
 +++ b/tests/sh4/programs/programs.cmake
-@@ -18,6 +18,8 @@ set(DREAM_SH4_PROGRAMS
+@@ -1,5 +1,5 @@
+ # Test programs assembled in the toolchain container (see *.s); each entry is
+-#   name|bin|base|function-specs (space separated ENTRY:END:name)
++#   name|bin|base|function-specs (space separated ENTRY:END:name)[|extra emit flags]
+ # Regenerate the .bin files with tools/docker/run.sh and the commands in tests/sh4/README.md.
+ set(DREAM_SH4_PROGRAMS
+   "p1_sum|p1_sum.bin|0x8c010000|0x8c010000:0x8c010014:sum"
+@@ -18,6 +18,13 @@ set(DREAM_SH4_PROGRAMS
    "p12_selfcmp|p12_selfcmp.bin|0x8c010000|0x8c010000:0x8c01005c:selfcmp"
    # Own base: position independent, kept out of the shared function table like p10.
    "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail 0x8c040014:0x8c040020:tailpr_main2 0x8c040024:0x8c040032:tailpr_main3 0x8c040034:0x8c04003e:tailpr_jret"
 +  # Own base: a bank switch inside a function (SA-nx, registers in host locals).
 +  "p14_bank|p14_bank.bin|0x8c050000|0x8c050000:0x8c050024:bank"
++  # SA-nx: overlays sharing one address (Sonic Adventure's cutscene files). p4 again at its own
++  # base, emitted with every call through the dispatcher and whole-extent signatures; and c1's fib
++  # (678 bytes) signed over its whole extent.
++  "p4_dispatch|p4_calls.bin|0x8c060000|0x8c060000:0x8c060022:calls_d 0x8c060022:0x8c060026:inc_d 0x8c060026:0x8c06002c:dbl_d|--overlay --full-signature --dispatch-calls"
++  "c1_fullsig|../cprogs/c1_idioms.bin|0x8c070000|0x8c070280:0x8c070526:fib_full|--overlay --full-signature"
    # GCC-compiled C unit (tests/sh4/cprogs, `make specs` prints this line)
    "c1_idioms|../cprogs/c1_idioms.bin|0x8c010000|0x8c010000:0x8c010024:div_mod 0x8c010028:0x8c010072:udiv_mix 0x8c010080:0x8c0100e4:dense_switch 0x8c0100e8:0x8c010100:mul64 0x8c010100:0x8c010132:sub64 0x8c010134:0x8c010178:pack_bytes 0x8c010180:0x8c0101d6:vec_transform 0x8c0101d8:0x8c010222:sort_words 0x8c010224:0x8c010246:dot3 0x8c010248:0x8c01026a:clamp_scale 0x8c010270:0x8c01027c:float_to_fixed 0x8c010280:0x8c010526:fib 0x8c01052c:0x8c010552:str_len 0x8c010554:0x8c010574:mem_copy 0x8c010578:0x8c0106b8:udivsi3_i4i 0x8c01059e:0x8c0105d4:udivsi3_i4i_059e 0x8c0105cc:0x8c0105d4:udivsi3_i4i_05cc 0x8c0105d4:0x8c010648:udivsi3_i4i_05d4 0x8c010648:0x8c010796:sdivsi3_i4i 0x8c010674:0x8c0106b8:sdivsi3_i4i_0674 0x8c01069a:0x8c0106b8:sdivsi3_i4i_069a"
  )
@@ -6426,10 +6486,10 @@ index c9028a3..8ca88c5 100644
      modes.push_back(Mode::Interpreted);
      modes.push_back(Mode::Hybrid);
 diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
-index 4cee63e..a3dead3 100644
+index 4cee63e..2b47ff1 100644
 --- a/tests/sh4/test_programs.cpp
 +++ b/tests/sh4/test_programs.cpp
-@@ -302,3 +302,16 @@ TEST_CASE("p7_fpuedge: FPU edge cases match the interpreter's captured state") {
+@@ -302,3 +302,74 @@ TEST_CASE("p7_fpuedge: FPU edge cases match the interpreter's captured state") {
      }
      CHECK(c.fpscr == 0x00040001u);
  }
@@ -6446,11 +6506,87 @@ index 4cee63e..a3dead3 100644
 +    CHECK(c.r[15] == sp);
 +    CHECK(c.sr == 0x700000F0u);
 +}
++
++namespace {
++// Records untranslated targets instead of running them.
++struct MissRecorder : dream::sh4::Hooks {
++    std::vector<std::uint32_t> targets;
++    void on_poll(Ctx& c, dream::Memory&) override { c.next_event = ~std::uint64_t{0}; }
++    void on_trapa(Ctx&, dream::Memory&, std::uint32_t) override { FAIL("trapa"); }
++    void on_rte(Ctx&, dream::Memory&) override { FAIL("rte"); }
++    void on_untranslated(Ctx&, dream::Memory&, std::uint32_t t) override { targets.push_back(t); }
++};
++}  // namespace
++
++TEST_CASE("p4_dispatch: calls through the dispatcher give the same results as direct calls") {
++    // SA-nx: overlay units emitted with --dispatch-calls --full-signature (the cutscene files).
++    dream::BareMemory m;
++    load_image(m, "p4_calls.bin", 0x8C060000);
++    MissRecorder rec;
++    dream::sh4::set_hooks(&rec);
++    for (std::uint32_t n : {0u, 7u, 1000u}) {
++        Ctx c = fresh();
++        c.next_event = ~std::uint64_t{0};
++        const std::uint32_t sp = c.r[15];
++        c.r[4] = n;
++        dream::gen::calls_d(c, m);
++        CHECK(c.r[0] == ((n + 1) * 2) + 100 + 5);
++        CHECK(c.r[15] == sp);
++    }
++    CHECK(rec.targets.empty());
++    dream::sh4::set_hooks(nullptr);
++}
++
++TEST_CASE("p4_dispatch: a callee whose code in RAM differs is not run from the translation") {
++    // Another overlay file can match the caller and differ in the callee. A direct C++ call would
++    // run this unit's callee anyway; through the dispatcher the callee's own signature fails and
++    // the call goes to the untranslated path.
++    dream::BareMemory m;
++    load_image(m, "p4_calls.bin", 0x8C060000);
++    m.write16(0x8C060024, 0x7002);  // _inc's slot: add #1,r0 becomes add #2,r0
++    MissRecorder rec;
++    dream::sh4::set_hooks(&rec);
++    Ctx c = fresh();
++    c.next_event = ~std::uint64_t{0};
++    c.r[4] = 7;
++    dream::gen::calls_d(c, m);
++    dream::sh4::set_hooks(nullptr);
++    REQUIRE(rec.targets.size() == 1);
++    CHECK(rec.targets[0] == 0x8C060022u);
++    CHECK(c.r[0] == (7u * 2) + 100 + 5);  // the recorder ran nothing in _inc's place
++}
++
++TEST_CASE("c1_fullsig: a whole-extent signature sees a change at the end of the function") {
++    dream::BareMemory m;
++    load_image(m, "../cprogs/c1_idioms.bin", 0x8C070000);
++    CHECK(dream::sh4::find_function(0x8C070280u, &m) == &dream::gen::fib_full);
++    // 0x2A4 bytes in: well past the 32 words a default overlay signature covers.
++    m.write16(0x8C070524, static_cast<std::uint16_t>(m.read16(0x8C070524) ^ 0x0100u));
++    CHECK(dream::sh4::find_function(0x8C070280u, &m) == nullptr);
++}
+diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
+index 2c5ed17..66401f8 100644
+--- a/translator/include/dream/translator/config/game_config.h
++++ b/translator/include/dream/translator/config/game_config.h
+@@ -23,6 +23,13 @@ struct Relocation {
+     // SA-nx: a code file the program loads from disc at run time, instead of a copy out of the
+     // main binary. `source` is then a byte offset into this file (resolved against the config).
+     std::filesystem::path file;
++    // SA-nx: translation units the copy is split into; 0 means the default (8 for a file, 1 for a
++    // copy out of the main binary). Small files (the cutscene events) take 1: eight near-empty
++    // parts each would only add compile steps. cmake/DreamAddGame.cmake reads the same key.
++    std::uint32_t parts = 0;
++    // SA-nx: see EmitOptions::full_signature and dispatch_calls (overlays sharing an address).
++    bool full_signature = false;
++    bool dispatch_calls = false;
+ };
+ 
+ struct GameConfig {
 diff --git a/translator/include/dream/translator/emit.h b/translator/include/dream/translator/emit.h
-index e47a463..7a46513 100644
+index e47a463..c6ff163 100644
 --- a/translator/include/dream/translator/emit.h
 +++ b/translator/include/dream/translator/emit.h
-@@ -48,6 +48,9 @@ struct EmitOptions {
+@@ -48,7 +48,19 @@ struct EmitOptions {
      // it costs a constructor and destructor per call even when no harness is installed.
      bool replay_hooks = false;
      bool irq_checks = true;  // interrupt polls at entry and back-edges (ADR 7)
@@ -6458,10 +6594,39 @@ index e47a463..7a46513 100644
 +    // (ADR 4), written back to the context around them. --no-local-regs turns it off.
 +    bool local_regs = true;
      bool overlay = false;    // table entries carry the code words they were translated from
++    // SA-nx, for overlays where many files share one address (Sonic Adventure's 207 cutscene
++    // files at 0x8CB80000, whose shared helpers often start alike and differ further in): the
++    // signature covers the function's whole extent instead of its first 32 instruction words...
++    bool full_signature = false;
++    // ...and every call or jump to another function of the unit goes through the runtime's
++    // dispatcher, so each callee checks its own signature too. A direct C++ call would run this
++    // unit's callee even when another file, identical in the caller but not in the callee, is
++    // the one in RAM.
++    bool dispatch_calls = false;
      // Split the unit's function bodies over this many translation units (SA-nx). A 6.7 MB binary
      // emits about 160 MB of C++, which no compiler handles well as one file. Part 0 also holds the
+     // registration table; the other parts land in EmitResult::extra_sources.
+diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
+index 295ca6f..8ce740f 100644
+--- a/translator/src/config/game_config.cpp
++++ b/translator/src/config/game_config.cpp
+@@ -147,6 +147,14 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+                 return false;
+             r.no_fold = rv["no_fold"].value_or(false);
+             r.overlay = rv["overlay"].value_or(false);
++            r.full_signature = rv["full_signature"].value_or(false);
++            r.dispatch_calls = rv["dispatch_calls"].value_or(false);
++            if (rv["parts"] && !get_u32(rv["parts"], "relocations.parts", r.parts, error, true))
++                return false;
++            if (r.parts > 64) {
++                error = "relocations.parts must be 64 or fewer";
++                return false;
++            }
+             std::string file;
+             if (!get_str(rv["file"], "relocations.file", file, error, false))
+                 return false;
 diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
-index 26c7374..43f0b9b 100644
+index 26c7374..927cf6e 100644
 --- a/translator/src/emit/emit.cpp
 +++ b/translator/src/emit/emit.cpp
 @@ -39,7 +39,109 @@ std::string label(std::uint32_t a) {
@@ -6615,6 +6780,15 @@ index 26c7374..43f0b9b 100644
          out << "void " << name << "(Ctx& c, Memory& m) { ";
          if (opt_.replay_hooks) {
              // The mode this function was compiled for travels with the hook, so a development run
+@@ -873,7 +985,7 @@ private:
+ 
+     std::string call_target_expr(std::uint32_t target) const {
+         auto it = known_.find(normalise(target));
+-        if (it != known_.end())
++        if (it != known_.end() && !opt_.dispatch_calls)
+             return it->second + "(c, m);";
+         return "call_indirect(c, m, " + hexu(target) + ");";
+     }
 @@ -891,8 +1003,8 @@ private:
      std::string irq_check_if_backedge(std::uint32_t target, std::uint32_t pc) const {
          // Braced: GCC's -Wmisleading-indentation rejects `if (x) f(); goto L;` on one line.
@@ -6783,8 +6957,18 @@ index 26c7374..43f0b9b 100644
          }
      }
  
+@@ -1902,7 +2023,8 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
+         const std::uint32_t image_end = image.base + static_cast<std::uint32_t>(image.bytes.size());
+         for (const auto& f : specs) {
+             src << "const std::uint16_t kSig_" << f.name << "[] = {";
+-            const std::uint32_t stop = std::min({f.end, f.entry + 64u, image_end});
++            const std::uint32_t stop =
++                std::min({f.end, options.full_signature ? f.end : f.entry + 64u, image_end});
+             for (std::uint32_t a = f.entry; a < stop; a += 2) src << hexu(image.read16(a)) << ", ";
+             src << "};\n";
+         }
 diff --git a/translator/src/main.cpp b/translator/src/main.cpp
-index 4ef6d21..8cedc09 100644
+index 4ef6d21..0364552 100644
 --- a/translator/src/main.cpp
 +++ b/translator/src/main.cpp
 @@ -3,7 +3,7 @@
@@ -6796,13 +6980,14 @@ index 4ef6d21..8cedc09 100644
  #include <algorithm>
  #include <cstdio>
  #include <cstdlib>
-@@ -34,12 +34,12 @@ int usage(int code) {
+@@ -34,12 +34,13 @@ int usage(int code) {
                   "functions.json] [--no-pointers] [--no-sweep]\n"
                   "  dream-translate emit --image FILE --base ADDR --function ENTRY:END[:name]... "
                   "--out FILE.cpp\n"
 -                 "                       [--header FILE.h] [--no-fold] [--trace] [--no-irq] "
 +                 "                       [--header FILE.h] [--no-fold] [--trace] [--no-irq] [--no-local-regs] "
                   "[--symbols FILE.tsv]\n"
++                 "                       [--overlay] [--full-signature] [--dispatch-calls]\n"
                   "  dream-translate symbols --ghidra functions.json --out symbols.tsv "
                   "[--keep-conflicts]\n"
                   "  dream-translate game --config games/ID/ID.toml --out-dir DIR [--no-fold] "
@@ -6811,16 +6996,22 @@ index 4ef6d21..8cedc09 100644
                   dream::translator::version().data());
      return code;
  }
-@@ -170,6 +170,8 @@ int cmd_emit(int argc, char** argv) {
+@@ -170,6 +171,14 @@ int cmd_emit(int argc, char** argv) {
              opt.trace = true;
          else if (!std::strcmp(argv[i], "--no-irq"))
              opt.irq_checks = false;
 +        else if (!std::strcmp(argv[i], "--no-local-regs"))
 +            opt.local_regs = false;
++        else if (!std::strcmp(argv[i], "--overlay"))
++            opt.overlay = true;
++        else if (!std::strcmp(argv[i], "--full-signature"))
++            opt.full_signature = true;
++        else if (!std::strcmp(argv[i], "--dispatch-calls"))
++            opt.dispatch_calls = true;
          else if (!std::strcmp(argv[i], "--functions") && i + 1 < argc) {
              std::string err;
              if (!dream::translator::load_functions_json(argv[++i], fns, err)) {
-@@ -463,6 +465,8 @@ int cmd_game(int argc, char** argv) {
+@@ -463,6 +472,8 @@ int cmd_game(int argc, char** argv) {
              opt.trace = true;
          else if (!std::strcmp(argv[i], "--no-irq"))
              opt.irq_checks = false;
@@ -6829,3 +7020,16 @@ index 4ef6d21..8cedc09 100644
          else if (!std::strcmp(argv[i], "--parts") && i + 1 < argc)
              opt.parts = static_cast<unsigned>(std::max(1, std::atoi(argv[++i])));
          else
+@@ -535,9 +546,11 @@ int cmd_game(int argc, char** argv) {
+         if (rel.no_fold)
+             view_opt.fold_literals = false;
+         view_opt.overlay = rel.overlay;
++        view_opt.full_signature = rel.full_signature;
++        view_opt.dispatch_calls = rel.dispatch_calls;
+         // Copies out of the main binary are small. A whole code file loaded from disc can be
+         // megabytes, so it is split like the main unit; cmake/DreamAddGame.cmake expects 8 parts.
+-        view_opt.parts = rel.file.empty() ? 1 : 8;
++        view_opt.parts = rel.parts ? rel.parts : (rel.file.empty() ? 1 : 8);
+         rc |= translate_view(cfg, view, seeds_r, stem, out_dir, view_opt,
+                              cfg.symbols ? &syms : nullptr);
+     }

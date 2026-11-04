@@ -7,6 +7,10 @@ loads to 0x8C900000 (ADV00.PRS = Station Square, confirmed byte for byte against
 games/<id>/extracted/modules/<NAME>.bin (gitignored, like the rest of extracted/).
 
   python3 tools/prs_extract.py games/sonicadv/extracted/fs/SONICAD games/sonicadv/extracted/modules
+  python3 tools/prs_extract.py --events games/sonicadv/extracted/fs/SONICAD games/sonicadv/extracted/events
+
+--events writes the story cutscene files (EV*.PRS) that carry code: they load at 0x8CB80000 and
+their first word points at their entry function there (207 of them; EV_*.PRS are textures).
 
 Only files whose literal pools point back into themselves at 0x8C900000 are written (code modules).
 """
@@ -72,12 +76,21 @@ def is_code_module(data: bytes, base: int = 0x0C900000) -> bool:
     return self_ptrs > 200 and rts > 20
 
 
+def is_event_code(data: bytes) -> bool:
+    return len(data) >= 8 and (struct.unpack_from("<I", data, 0)[0] >> 16) == 0x0CB8
+
+
 def main() -> int:
-    src_dir, out_dir = sys.argv[1], sys.argv[2]
+    args = sys.argv[1:]
+    events = "--events" in args
+    args = [a for a in args if a != "--events"]
+    src_dir, out_dir = args[0], args[1]
     os.makedirs(out_dir, exist_ok=True)
     wrote = 0
     for name in sorted(os.listdir(src_dir)):
         if not name.upper().endswith(".PRS"):
+            continue
+        if events != name.upper().startswith("EV"):
             continue
         dest = os.path.join(out_dir, os.path.splitext(name)[0] + ".bin")
         if os.path.exists(dest):
@@ -87,13 +100,13 @@ def main() -> int:
             data = prs_decompress(open(os.path.join(src_dir, name), "rb").read())
         except IndexError:
             continue  # not PRS after all
-        if not is_code_module(data):
+        if not (is_event_code(data) if events else is_code_module(data)):
             continue
         with open(dest, "wb") as f:  # overwrite in place; never delete
             f.write(data)
         wrote += 1
         print(f"{name}: {len(data)} bytes -> {dest}")
-    print(f"{wrote} code modules in {out_dir}")
+    print(f"{wrote} code {'events' if events else 'modules'} in {out_dir}")
     return 0
 
 

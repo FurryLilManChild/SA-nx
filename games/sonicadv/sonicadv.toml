@@ -413,3 +413,2498 @@ size = 0x4000
 dest = 0x8C900000
 overlay = true
 entries = [0x8C900040, 0x8C900260, 0x8C900166, 0x8C900B60, 0x8C900DC0, 0x8C900C62, 0x8C901BE0, 0x8C901E20, 0x8C901CC6]
+
+# Cutscene code (2026-11-03, phase 2): the 207 EV*.PRS story event files that carry code. Each is
+# PRS-compressed (tools/prs_extract.py --events writes them to extracted/events/) and loads at
+# 0x8CB80000; word 0 of the file is its entry function. Untranslated until now, so every cutscene
+# ran in the interpreter. The 29 EV_*.PRS files are texture archives (PVMH), not code.
+# Many files share helper functions at the same offsets that start alike and differ further in
+# (184 signature collisions with the default 32-word signatures, measured over all 207 files), so
+# these units sign each function's whole extent and send every call through the dispatcher
+# (full_signature, dispatch_calls), read literals from RAM (no_fold), and are one unit each
+# (parts = 1). Size: the last dense code window plus one, or the header's second pointer if
+# further, or the whole file when small.
+[[relocations]]
+file = "extracted/events/EV0001.bin"
+source = 0x0
+size = 0x6F8C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0002.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80424]
+
+[[relocations]]
+file = "extracted/events/EV0003.bin"
+source = 0x0
+size = 0x14000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB804B2]
+
+[[relocations]]
+file = "extracted/events/EV0006.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0007.bin"
+source = 0x0
+size = 0x9000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0008.bin"
+source = 0x0
+size = 0xB1A4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0009.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV000B.bin"
+source = 0x0
+size = 0x8704
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV000C.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV000D.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB8004A]
+
+[[relocations]]
+file = "extracted/events/EV0011.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0012.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0013.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0014.bin"
+source = 0x0
+size = 0x778
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0015.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0016.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0017.bin"
+source = 0x0
+size = 0x270C8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80068]
+
+[[relocations]]
+file = "extracted/events/EV001A.bin"
+source = 0x0
+size = 0x8000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV001B.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV001C.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV001D.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV001E.bin"
+source = 0x0
+size = 0x8000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0020.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0021.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0022.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0023.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0024.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0026.bin"
+source = 0x0
+size = 0xBE50
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0028.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0029.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV002A.bin"
+source = 0x0
+size = 0x1000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV002B.bin"
+source = 0x0
+size = 0xB09C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0030.bin"
+source = 0x0
+size = 0xF000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0031.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0032.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0033.bin"
+source = 0x0
+size = 0x9000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0034.bin"
+source = 0x0
+size = 0xC000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0035.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0038.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0039.bin"
+source = 0x0
+size = 0x8804
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV003A.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV003B.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB800A6]
+
+[[relocations]]
+file = "extracted/events/EV003E.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0040.bin"
+source = 0x0
+size = 0xF6C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0042.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0044.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0045.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0046.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0047.bin"
+source = 0x0
+size = 0x1AB18
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB8005E]
+
+[[relocations]]
+file = "extracted/events/EV0048.bin"
+source = 0x0
+size = 0x27430
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80068]
+
+[[relocations]]
+file = "extracted/events/EV004B.bin"
+source = 0x0
+size = 0x70A8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV004C.bin"
+source = 0x0
+size = 0x5758
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB800B4]
+
+[[relocations]]
+file = "extracted/events/EV004D.bin"
+source = 0x0
+size = 0xD000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB800CC]
+
+[[relocations]]
+file = "extracted/events/EV004E.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0050.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0051.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0052.bin"
+source = 0x0
+size = 0x9C98
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0053.bin"
+source = 0x0
+size = 0x94
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0054.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0055.bin"
+source = 0x0
+size = 0x2AA4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0056.bin"
+source = 0x0
+size = 0xDC4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0058.bin"
+source = 0x0
+size = 0x814
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0060.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0061.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0062.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0063.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0064.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80206]
+
+[[relocations]]
+file = "extracted/events/EV0065.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0066.bin"
+source = 0x0
+size = 0x3EAC
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0067.bin"
+source = 0x0
+size = 0x1F5C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0068.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0069.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV006A.bin"
+source = 0x0
+size = 0x7368
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB800B8]
+
+[[relocations]]
+file = "extracted/events/EV006B.bin"
+source = 0x0
+size = 0x94
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV006C.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV006D.bin"
+source = 0x0
+size = 0x5684
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB800B8]
+
+[[relocations]]
+file = "extracted/events/EV006E.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV006F.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0070.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0071.bin"
+source = 0x0
+size = 0x2A000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0072.bin"
+source = 0x0
+size = 0x9300
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0075.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0080.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0082.bin"
+source = 0x0
+size = 0xC24
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0083.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0084.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0085.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0086.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0087.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0088.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80400]
+
+[[relocations]]
+file = "extracted/events/EV0089.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV008A.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV008B.bin"
+source = 0x0
+size = 0x88F8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV008C.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV008D.bin"
+source = 0x0
+size = 0x2A80
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV008E.bin"
+source = 0x0
+size = 0xADC
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV008F.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0091.bin"
+source = 0x0
+size = 0x17198
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0092.bin"
+source = 0x0
+size = 0xD8C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0094.bin"
+source = 0x0
+size = 0x5A0
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0095.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0096.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0097.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0098.bin"
+source = 0x0
+size = 0xD78
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0099.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV009A.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80278]
+
+[[relocations]]
+file = "extracted/events/EV009B.bin"
+source = 0x0
+size = 0xD10
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV009C.bin"
+source = 0x0
+size = 0x94
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV009D.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV009F.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00A0.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B0.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B1.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B2.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B3.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B4.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B5.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B7.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B8.bin"
+source = 0x0
+size = 0x1EF0
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00B9.bin"
+source = 0x0
+size = 0x10C8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00BA.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00BB.bin"
+source = 0x0
+size = 0x5024
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB801FC]
+
+[[relocations]]
+file = "extracted/events/EV00BC.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00BD.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00BE.bin"
+source = 0x0
+size = 0x3D0
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00BF.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00C0.bin"
+source = 0x0
+size = 0x558
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00C1.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00C2.bin"
+source = 0x0
+size = 0xA800
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB800B4]
+
+[[relocations]]
+file = "extracted/events/EV00C3.bin"
+source = 0x0
+size = 0x93D0
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00C4.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00C5.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00C7.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D0.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D1.bin"
+source = 0x0
+size = 0x97C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D2.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D3.bin"
+source = 0x0
+size = 0x4000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D4.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D8.bin"
+source = 0x0
+size = 0x804
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00D9.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00DA.bin"
+source = 0x0
+size = 0x3B3C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00DB.bin"
+source = 0x0
+size = 0xA6C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00DC.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00DD.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00DE.bin"
+source = 0x0
+size = 0x9000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00DF.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00E0.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00E1.bin"
+source = 0x0
+size = 0x94
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00E2.bin"
+source = 0x0
+size = 0x82B8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00E3.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F0.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F2.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80400]
+
+[[relocations]]
+file = "extracted/events/EV00F3.bin"
+source = 0x0
+size = 0x5000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80400]
+
+[[relocations]]
+file = "extracted/events/EV00F4.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F5.bin"
+source = 0x0
+size = 0x976C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F6.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F7.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F8.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00F9.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00FA.bin"
+source = 0x0
+size = 0x3000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80044]
+
+[[relocations]]
+file = "extracted/events/EV00FB.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00FD.bin"
+source = 0x0
+size = 0x9A00
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00FE.bin"
+source = 0x0
+size = 0xA000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV00FF.bin"
+source = 0x0
+size = 0x6000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0100.bin"
+source = 0x0
+size = 0x868
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0101.bin"
+source = 0x0
+size = 0x4C8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0102.bin"
+source = 0x0
+size = 0xEE4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0103.bin"
+source = 0x0
+size = 0x220
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0104.bin"
+source = 0x0
+size = 0x1F38
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0106.bin"
+source = 0x0
+size = 0x610
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0107.bin"
+source = 0x0
+size = 0x24C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0110.bin"
+source = 0x0
+size = 0x84C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0111.bin"
+source = 0x0
+size = 0x528
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0112.bin"
+source = 0x0
+size = 0xF00
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0113.bin"
+source = 0x0
+size = 0x210
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0114.bin"
+source = 0x0
+size = 0x1F78
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0120.bin"
+source = 0x0
+size = 0x31C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0121.bin"
+source = 0x0
+size = 0x278
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0122.bin"
+source = 0x0
+size = 0x2F0
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0130.bin"
+source = 0x0
+size = 0x408
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0131.bin"
+source = 0x0
+size = 0x1E8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0140.bin"
+source = 0x0
+size = 0x4C0
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0141.bin"
+source = 0x0
+size = 0x634
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0142.bin"
+source = 0x0
+size = 0x2000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0150.bin"
+source = 0x0
+size = 0x254
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0160.bin"
+source = 0x0
+size = 0x7000
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0165.bin"
+source = 0x0
+size = 0x291C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0166.bin"
+source = 0x0
+size = 0x41FC
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0167.bin"
+source = 0x0
+size = 0x36A4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0168.bin"
+source = 0x0
+size = 0x28C4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0169.bin"
+source = 0x0
+size = 0x2938
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV016A.bin"
+source = 0x0
+size = 0x709C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV016B.bin"
+source = 0x0
+size = 0x6F8C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV016C.bin"
+source = 0x0
+size = 0x6F30
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV016D.bin"
+source = 0x0
+size = 0x6F88
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV016E.bin"
+source = 0x0
+size = 0x79F8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV016F.bin"
+source = 0x0
+size = 0x7A10
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0170.bin"
+source = 0x0
+size = 0x794C
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0171.bin"
+source = 0x0
+size = 0x7A78
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0176.bin"
+source = 0x0
+size = 0x128
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0177.bin"
+source = 0x0
+size = 0x128
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0178.bin"
+source = 0x0
+size = 0x1A8
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0179.bin"
+source = 0x0
+size = 0x188
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV017A.bin"
+source = 0x0
+size = 0x168
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV017B.bin"
+source = 0x0
+size = 0x168
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV017C.bin"
+source = 0x0
+size = 0x168
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
+[[relocations]]
+file = "extracted/events/EV0180.bin"
+source = 0x0
+size = 0x140B4
+dest = 0x8CB80000
+overlay = true
+no_fold = true
+parts = 1
+full_signature = true
+dispatch_calls = true
+entries = [0x8CB80020]
+
