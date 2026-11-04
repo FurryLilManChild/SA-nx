@@ -2,6 +2,19 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-03: for the next release: triggers full at once (no ramp)
+
+- Mark: a pressed trigger should be fully pressed right away. The Switch's ZL and ZR are digital,
+  and the bindings defaulted to ramping them to full over 0.15 s (dream-recomp's choice for
+  keyboards driving a car).
+- Patch 0022: `Bindings::trigger_ramp` defaults to off. The bindings file is now version 2; a
+  version 1 file's `trigger_ramp = 1` is ignored, because version 1 wrote the old default whenever
+  any control was rebound, so it was never a player's choice. CONTROLS > TRIGGER RAMP can still
+  turn it on. Test: defaults, version 1 and 2 files (render tests 79 cases pass).
+- Also reported, not yet changed: the stick "pulling left" in Station Square happens on Mark's
+  real Dreamcast too (the game's camera-relative movement), so it is left as it is.
+- Not built yet: goes into the next Switch build.
+
 ## 2026-11-03: release 0.5.1: the game could run uncapped
 
 - Report from a player (and Mark, once, last night): speed between 0.75x and 1.37x, 1.70x on

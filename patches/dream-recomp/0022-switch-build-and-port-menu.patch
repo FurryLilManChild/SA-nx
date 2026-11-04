@@ -698,6 +698,23 @@ index 8dfec0a..de9b125 100644
  
  # A standalone check that the whole graphics stack works on this machine: opens a window and draws
  # a triangle. Not a test (it needs a display); run it by hand.
+diff --git a/render/include/dream/render/input.h b/render/include/dream/render/input.h
+index e9d1aa2..0433ed2 100644
+--- a/render/include/dream/render/input.h
++++ b/render/include/dream/render/input.h
+@@ -80,9 +80,9 @@ struct Bindings {
+     // Percent of an axis's travel ignored around the centre. A worn stick steers on its own
+     // without one, which reads as a physics bug rather than as a hardware fault.
+     int deadzone_percent = 20;
+-    // Ramp a digital trigger to full over about 150 ms rather than jumping. A keyboard accelerator
+-    // is otherwise fully down or fully up, which for a driving game is most of why a pad matters.
+-    bool trigger_ramp = true;
++    // Ramp a digital trigger to full over about 150 ms rather than jumping. Off by default: a
++    // pressed trigger reads fully pressed at once (SA-nx). The CONTROLS screen can turn it on.
++    bool trigger_ramp = false;
+ 
+     static Bindings defaults();
+     std::string to_text() const;
 diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
 new file mode 100644
 index 0000000..67fb248
@@ -1252,6 +1269,47 @@ index b2489da..eaeee40 100644
      // Rounded up, not truncated. A footprint of 2.67 texels wants three taps; taking two leaves a
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
+diff --git a/render/src/input.cpp b/render/src/input.cpp
+index 3e9a7c4..ee53f10 100644
+--- a/render/src/input.cpp
++++ b/render/src/input.cpp
+@@ -171,7 +171,7 @@ std::string Bindings::to_text() const {
+     std::ostringstream o;
+     o << "# dream-recomp input bindings. Rewritten whenever they change in the UI.\n"
+       << "# Physical inputs are SDL's own names, so this file survives an SDL upgrade.\n"
+-      << "version = 1\n"
++      << "version = 2\n"
+       << "deadzone = " << deadzone_percent << "\n"
+       << "trigger_ramp = " << (trigger_ramp ? 1 : 0) << "\n";
+     auto section = [&o](const char* name, const DeviceBindings& d) {
+@@ -196,6 +196,9 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+             *warnings += s + "\n";
+     };
+     DeviceBindings* current = nullptr;
++    // Version 1 files wrote trigger_ramp = 1 as the old default whenever any control changed, so
++    // their ramp setting is not a player's choice and is ignored.
++    int version = 1;
+     std::string line;
+     std::istringstream in{std::string(text)};
+     unsigned lineno = 0;
+@@ -233,8 +236,15 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+                     warn("line " + std::to_string(lineno) + ": deadzone is not a number: " + value);
+                 }
+             } else if (key == "trigger_ramp") {
+-                out.trigger_ramp = value != "0";
+-            } else if (key != "version") {
++                if (version >= 2)
++                    out.trigger_ramp = value != "0";
++            } else if (key == "version") {
++                try {
++                    version = std::stoi(value);
++                } catch (...) {
++                    warn("line " + std::to_string(lineno) + ": version is not a number: " + value);
++                }
++            } else {
+                 warn("line " + std::to_string(lineno) + ": unknown setting " + key);
+             }
+             continue;
 diff --git a/render/src/overlay.cpp b/render/src/overlay.cpp
 index a9f0841..41b3a97 100644
 --- a/render/src/overlay.cpp
@@ -3059,6 +3117,38 @@ index 0000000..d6960fc
 +}
 +
 +}  // namespace dream::render::vk
+diff --git a/render/tests/test_input.cpp b/render/tests/test_input.cpp
+index b46d2cc..0a17cc1 100644
+--- a/render/tests/test_input.cpp
++++ b/render/tests/test_input.cpp
+@@ -60,12 +60,12 @@ TEST_CASE("bindings round-trip through the file format") {
+     a.keyboard[PadControl::A] = Binding{BindSource::Key, "Space", 1};
+     a.gamepad[PadControl::StickLeft] = Binding{BindSource::Axis, "rightx", -1};
+     a.deadzone_percent = 35;
+-    a.trigger_ramp = false;
++    a.trigger_ramp = true;
+     const Bindings b = Bindings::from_text(a.to_text());
+     CHECK(b.keyboard[PadControl::A].text() == "key:Space");
+     CHECK(b.gamepad[PadControl::StickLeft].text() == "axis:rightx-");
+     CHECK(b.deadzone_percent == 35);
+-    CHECK(b.trigger_ramp == false);
++    CHECK(b.trigger_ramp == true);
+     for (unsigned i = 0; i < kPadControlCount; ++i) {
+         const auto c = static_cast<PadControl>(i);
+         CHECK(b.keyboard[c] == a.keyboard[c]);
+@@ -109,3 +109,12 @@ TEST_CASE("a silly dead zone is clamped, not obeyed") {
+     CHECK(Bindings::from_text("deadzone = 5000\n").deadzone_percent == 90);
+     CHECK(Bindings::from_text("deadzone = -3\n").deadzone_percent == 0);
+ }
++
++TEST_CASE("bindings: triggers are full at once unless the player turns the ramp on") {
++    CHECK(Bindings::defaults().trigger_ramp == false);
++    // A version 1 file wrote the old default (on) whenever any control was rebound.
++    CHECK(Bindings::from_text("version = 1\ntrigger_ramp = 1\n").trigger_ramp == false);
++    CHECK(Bindings::from_text("trigger_ramp = 1\n").trigger_ramp == false);
++    CHECK(Bindings::from_text("version = 2\ntrigger_ramp = 1\n").trigger_ramp == true);
++    CHECK(Bindings::from_text("version = 2\ntrigger_ramp = 0\n").trigger_ramp == false);
++}
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
 index 0000000..86c3828
