@@ -31,6 +31,12 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
 - Movie measurement: test2.1 is a test build (SANX_RELEASE off): the profiler with its movie
   sections (pc_movie, stacks_movie) and the sound/movie line in the timing log are back.
 - Also in: triggers full at once (below).
+- Build: 585 steps (the translation changed, so every unit recompiled; one restart after the
+  2-hour command limit). The link then failed with no message: 530 objects made a 42,979-character
+  command, past Windows' 32,767 under Wine. switch/link_rsp.sh (the linker launcher) puts the
+  objects in a response file. NRO 266,227,743 bytes (180 MB before), sha256
+  1353e9a604bb02029d7b509ea537110fb2ca1f820a7eba500059454abb343a3b, verified in
+  `out\\sd\\switch\\sonicadv\\` with the new sonicadv.toml; ELF kept as test2.1.elf.
 
 ## 2026-11-03: for the next release: triggers full at once (no ramp)
 
