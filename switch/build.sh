@@ -63,6 +63,7 @@ cmake -S "$REPO" -B "$BUILD" -G Ninja \
     -DDREAM_DEV_INTERPRETER=ON -DDREAM_BUILD_TESTS=OFF -DDREAM_WERROR=OFF \
     -DDREAM_TRANSLATE_PARTS="$PARTS" \
     -DDREAM_HOST_TRANSLATE="$HOST/translator/dream-translate" \
+    -DCMAKE_CXX_LINKER_LAUNCHER="$REPO/switch/link_rsp.sh" \
     -DNVK_SDK="$NVK_SDK" >/dev/null
 ninja -C "$BUILD" -j"$JOBS" sonicadv_boot_nro
 
