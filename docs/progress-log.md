@@ -32,7 +32,12 @@ Newest first. One entry per session: what broke, the cause, the fix, with eviden
   compared; a difference switches it off and restores the translation's result (checked by
   injecting a fault: caught on the first call, results equal to the translation).
 - dream-translate now leaves an unchanged unit's file alone (the custom command has restat), so a
-  config change recompiles only the units it changed.
+  config change recompiles only the units it changed (72 of 1,052 this time). The first try still
+  recompiled everything: the override hook had been declared in abi.h, which every translated unit
+  includes. Moved to native_override.h, abi.h restored byte for byte; 50 steps after that.
+- Build: NRO 515,727,391 bytes, sha256
+  a542108e295c8ba72a454da4b2acd4b53f8f5f48be6a5dbdfe3859a71fb1dca6, with both tomls in
+  out\\sd\\switch\\sonicadv\\ on Mark's PC (hash checked there).
 
 ## 2026-11-09: release 0.6.0 (what Test 2.2 played, PAL and US)
 
