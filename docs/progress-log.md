@@ -2,6 +2,25 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-08: test2.2: radial stick dead zone, optional square stick
+
+- A player claimed the Dreamcast stick's range is square. Not confirmed by any source found. Either
+  way a square/round difference only scales both axes alike, so it cannot steer Sonic; Mark's
+  own Dreamcast showed the Station Square curve too.
+- What the check did find: the port's dead zone was per axis (each half axis rescaled from 20%).
+  That bent small steering towards the axes (20 degrees off forward reached the game as about 11)
+  and left a full diagonal at about 0.63 per axis (about 90% strength).
+- Patch 0022: `stick_axis()` in input.cpp, used by the Switch and PC windows: one radial dead zone
+  on the stick's distance from centre, rescaled from its edge, direction kept exactly. New
+  `stick_square` binding (CONTROLS > STICK SHAPE, ROUND by default) stretches the circle to the
+  square along the same direction. PC triggers keep their own dead zone. Tests: angle kept at 20
+  and 30 degrees, full strength on diagonals, square corners, the menu row, save and load (render
+  tests 83 cases pass). PC window code syntax-checked against SDL3 headers.
+- Build note: recutting the patch re-applies every patch, which touched every file in the
+  submodule and started a 584-step rebuild. Stopped; untouched files set back to their old time so
+  only the changed input files rebuild (57 steps).
+- US disc support requested by Mark (one NRO for both discs); waiting on his US dump.
+
 ## 2026-11-03: phase 2 begins; test2.1: cutscene code translated, movie measurement
 
 - Mark: tests are now numbered by phase (this is test 2.1, then 2.2, ...). Goal of phase 2: 1.0.

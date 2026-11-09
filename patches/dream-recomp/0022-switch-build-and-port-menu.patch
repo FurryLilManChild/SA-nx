@@ -721,10 +721,10 @@ index 8dfec0a..de9b125 100644
  # A standalone check that the whole graphics stack works on this machine: opens a window and draws
  # a triangle. Not a test (it needs a display); run it by hand.
 diff --git a/render/include/dream/render/input.h b/render/include/dream/render/input.h
-index e9d1aa2..0433ed2 100644
+index e9d1aa2..e9cedca 100644
 --- a/render/include/dream/render/input.h
 +++ b/render/include/dream/render/input.h
-@@ -80,9 +80,9 @@ struct Bindings {
+@@ -80,9 +80,12 @@ struct Bindings {
      // Percent of an axis's travel ignored around the centre. A worn stick steers on its own
      // without one, which reads as a physics bug rather than as a hardware fault.
      int deadzone_percent = 20;
@@ -734,9 +734,38 @@ index e9d1aa2..0433ed2 100644
 +    // Ramp a digital trigger to full over about 150 ms rather than jumping. Off by default: a
 +    // pressed trigger reads fully pressed at once (SA-nx). The CONTROLS screen can turn it on.
 +    bool trigger_ramp = false;
++    // SA-nx: stretch the round stick so full diagonals reach the corners (x and y both full), as on
++    // a square-gated stick. Off by default; CONTROLS > STICK SHAPE.
++    bool stick_square = false;
  
      static Bindings defaults();
      std::string to_text() const;
+@@ -92,4 +95,12 @@ struct Bindings {
+     static Bindings from_text(std::string_view text, std::string* warnings = nullptr);
+ };
+ 
++// SA-nx: one axis of an analogue stick after the dead zone, from that axis and its partner on the
++// same stick (x for y, y for x), both -1..1. The dead zone is radial: it is measured on the
++// stick's distance from the centre, and the rest is rescaled from its edge, so the direction is
++// kept exactly and a full push gives full strength in every direction. A per-axis dead zone
++// bent small steering towards the axes and left full diagonals at about 90%. With `square`,
++// the result is stretched along its own direction until the circle reaches the square's edge.
++float stick_axis(float raw, float partner, float dead, bool square);
++
+ }  // namespace dream::render
+diff --git a/render/include/dream/render/input_menu.h b/render/include/dream/render/input_menu.h
+index 1d48103..2f5a767 100644
+--- a/render/include/dream/render/input_menu.h
++++ b/render/include/dream/render/input_menu.h
+@@ -59,7 +59,7 @@ public:
+ 
+ private:
+     // Rows above the bindings, then one row per control, then the rows below.
+-    enum Row : int { kDeviceRow = 0, kDeadzoneRow, kRampRow, kFirstBinding };
++    enum Row : int { kDeviceRow = 0, kDeadzoneRow, kRampRow, kStickRow, kFirstBinding };
+     int row_count() const { return kFirstBinding + static_cast<int>(kPadControlCount) + 2; }
+     int reset_row() const { return kFirstBinding + static_cast<int>(kPadControlCount); }
+     int close_row() const { return reset_row() + 1; }
 diff --git a/render/include/dream/render/port_menu.h b/render/include/dream/render/port_menu.h
 new file mode 100644
 index 0000000..67fb248
@@ -1292,19 +1321,31 @@ index b2489da..eaeee40 100644
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
 diff --git a/render/src/input.cpp b/render/src/input.cpp
-index 3e9a7c4..ee53f10 100644
+index 3e9a7c4..4b7cf4b 100644
 --- a/render/src/input.cpp
 +++ b/render/src/input.cpp
-@@ -171,7 +171,7 @@ std::string Bindings::to_text() const {
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <cmath>
+ #include <sstream>
+ 
+ namespace dream::render {
+@@ -171,9 +172,10 @@ std::string Bindings::to_text() const {
      std::ostringstream o;
      o << "# dream-recomp input bindings. Rewritten whenever they change in the UI.\n"
        << "# Physical inputs are SDL's own names, so this file survives an SDL upgrade.\n"
 -      << "version = 1\n"
 +      << "version = 2\n"
        << "deadzone = " << deadzone_percent << "\n"
-       << "trigger_ramp = " << (trigger_ramp ? 1 : 0) << "\n";
+-      << "trigger_ramp = " << (trigger_ramp ? 1 : 0) << "\n";
++      << "trigger_ramp = " << (trigger_ramp ? 1 : 0) << "\n"
++      << "stick_square = " << (stick_square ? 1 : 0) << "\n";
      auto section = [&o](const char* name, const DeviceBindings& d) {
-@@ -196,6 +196,9 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+         o << "\n[" << name << "]\n";
+         for (unsigned i = 0; i < kPadControlCount; ++i) {
+@@ -196,6 +198,9 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
              *warnings += s + "\n";
      };
      DeviceBindings* current = nullptr;
@@ -1314,7 +1355,7 @@ index 3e9a7c4..ee53f10 100644
      std::string line;
      std::istringstream in{std::string(text)};
      unsigned lineno = 0;
-@@ -233,8 +236,15 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+@@ -233,8 +238,17 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
                      warn("line " + std::to_string(lineno) + ": deadzone is not a number: " + value);
                  }
              } else if (key == "trigger_ramp") {
@@ -1322,6 +1363,8 @@ index 3e9a7c4..ee53f10 100644
 -            } else if (key != "version") {
 +                if (version >= 2)
 +                    out.trigger_ramp = value != "0";
++            } else if (key == "stick_square") {
++                out.stick_square = value != "0";
 +            } else if (key == "version") {
 +                try {
 +                    version = std::stoi(value);
@@ -1332,6 +1375,60 @@ index 3e9a7c4..ee53f10 100644
                  warn("line " + std::to_string(lineno) + ": unknown setting " + key);
              }
              continue;
+@@ -258,4 +272,19 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+     return out;
+ }
+ 
++float stick_axis(float raw, float partner, float dead, bool square) {
++    const float mag = std::sqrt(raw * raw + partner * partner);
++    if (mag <= dead || mag <= 0.0f)
++        return 0.0f;
++    const float strength = std::min(1.0f, (std::min(mag, 1.0f) - dead) / (1.0f - dead));
++    float out = raw / mag * strength;
++    if (square) {
++        const float other = partner / mag * strength;
++        const float edge = std::max(std::fabs(out), std::fabs(other));
++        if (edge > 0.0f)
++            out *= strength / edge;
++    }
++    return std::clamp(out, -1.0f, 1.0f);
++}
++
+ }  // namespace dream::render
+diff --git a/render/src/input_menu.cpp b/render/src/input_menu.cpp
+index 72cd63b..6a1532d 100644
+--- a/render/src/input_menu.cpp
++++ b/render/src/input_menu.cpp
+@@ -51,6 +51,9 @@ void InputMenu::adjust(int delta, unsigned device_count) {
+     } else if (row_ == kRampRow) {
+         bindings_.trigger_ramp = !bindings_.trigger_ramp;
+         dirty_ = true;
++    } else if (row_ == kStickRow) {
++        bindings_.stick_square = !bindings_.stick_square;
++        dirty_ = true;
+     }
+ }
+ 
+@@ -72,6 +75,11 @@ InputMenu::Action InputMenu::activate() {
+         dirty_ = true;
+         return Action::Save;
+     }
++    if (row_ == kStickRow) {
++        bindings_.stick_square = !bindings_.stick_square;
++        dirty_ = true;
++        return Action::Save;
++    }
+     PadControl c{};
+     if (on_binding(row_, c)) {
+         awaiting_ = true;
+@@ -163,6 +171,7 @@ void InputMenu::draw(u32* rgba, unsigned pitch, unsigned width, unsigned height,
+     row(kDeviceRow, "DEVICE", "< " + device_name + " >");
+     row(kDeadzoneRow, "DEAD ZONE", "< " + std::to_string(bindings_.deadzone_percent) + "% >");
+     row(kRampRow, "TRIGGER RAMP", bindings_.trigger_ramp ? "< ON >" : "< OFF >");
++    row(kStickRow, "STICK SHAPE", bindings_.stick_square ? "< SQUARE >" : "< ROUND >");
+ 
+     y += static_cast<int>(s) * 2;
+     fill_rect(rgba, pitch, width, height, left, y, right - left, static_cast<int>(s), kUiGrey);
 diff --git a/render/src/overlay.cpp b/render/src/overlay.cpp
 index a9f0841..41b3a97 100644
 --- a/render/src/overlay.cpp
@@ -2576,12 +2673,56 @@ index f0298ec..f9aa3e0 100644
      oit_pass_ = VK_NULL_HANDLE;
      oit_set_ = VK_NULL_HANDLE;
      if (oit_set_layout_) {
+diff --git a/render/src/vk/window.cpp b/render/src/vk/window.cpp
+index 0b0f03d..22810c2 100644
+--- a/render/src/vk/window.cpp
++++ b/render/src/vk/window.cpp
+@@ -478,17 +478,28 @@ bool Window::poll() {
+                     if (SDL_GetGamepadButton(g, static_cast<SDL_GamepadButton>(gpad_[i].code)))
+                         digital_on = true;
+                 } else if (gpad_[i].source == BindSource::Axis) {
+-                    const float raw = static_cast<float>(SDL_GetGamepadAxis(
+-                                          g, static_cast<SDL_GamepadAxis>(gpad_[i].code))) /
+-                                      32767.0f;
+-                    // Only the bound half counts, so left and right are separate bindings on one
+-                    // stick.
+-                    const float half = gpad_[i].sign < 0 ? -raw : raw;
+-                    if (half > dead) {
+-                        // Rescaled from the dead zone's edge rather than from zero, or the stick
+-                        // would jump to `dead` the instant it left the centre.
+-                        analogue =
+-                            std::max(analogue, std::min(1.0f, (half - dead) / (1.0f - dead)));
++                    const int code = gpad_[i].code;
++                    auto axis = [&](int a) {
++                        return static_cast<float>(
++                                   SDL_GetGamepadAxis(g, static_cast<SDL_GamepadAxis>(a))) /
++                               32767.0f;
++                    };
++                    float raw = axis(code);
++                    if (code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
++                        code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
++                        // A trigger has no partner: dead zone on its own travel, rescaled from
++                        // the edge so it does not jump to `dead` the instant it moves.
++                        const float half = gpad_[i].sign < 0 ? -raw : raw;
++                        raw = half > dead ? std::min(1.0f, (half - dead) / (1.0f - dead)) : 0.0f;
++                        analogue = std::max(analogue, raw);
++                    } else {
++                        // Sticks: x and y (axes 0-1 and 2-3) share one radial dead zone.
++                        raw = stick_axis(raw, axis(code ^ 1), dead, bindings_.stick_square);
++                        // Only the bound half counts, so left and right are separate bindings
++                        // on one stick.
++                        const float half = gpad_[i].sign < 0 ? -raw : raw;
++                        if (half > 0.0f)
++                            analogue = std::max(analogue, half);
+                     }
+                 }
+             }
 diff --git a/render/src/vk/window_switch.cpp b/render/src/vk/window_switch.cpp
 new file mode 100644
-index 0000000..d6960fc
+index 0000000..0431e48
 --- /dev/null
 +++ b/render/src/vk/window_switch.cpp
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,563 @@
 +// The Switch's window (SA-nx): the same Window as window.cpp, on Horizon instead of SDL3. The
 +// surface is the console's default VI layer (VK_NN_vi_surface, as mesa-switch's NVK expects),
 +// the controls come from libnx's pad API, and "the window was closed" means HOME and Close.
@@ -3001,13 +3142,19 @@ index 0000000..d6960fc
 +                if (buttons & bit)
 +                    digital_on = true;
 +            } else if (gpad_[i].source == BindSource::Axis) {
-+                const float raw = axis_value(gpad_[i].code, buttons);
-+                const float half = gpad_[i].sign < 0 ? -raw : raw;
-+                if (gpad_[i].code == kLeftTrigger || gpad_[i].code == kRightTrigger) {
-+                    if (half > 0.5f)
-+                        digital_on = true;  // a button on this console: ramps like a key
-+                } else if (half > dead) {
-+                    analogue = std::max(analogue, std::min(1.0f, (half - dead) / (1.0f - dead)));
++                const int code = gpad_[i].code;
++                if (code == kLeftTrigger || code == kRightTrigger) {
++                    const float raw = axis_value(code, buttons);
++                    if ((gpad_[i].sign < 0 ? -raw : raw) > 0.5f)
++                        digital_on = true;  // a button on this console
++                } else {
++                    // Sticks: x and y share one radial dead zone (stick_axis in input.cpp).
++                    const float raw = stick_axis(axis_value(code, buttons),
++                                                 axis_value(code ^ 1, buttons), dead,
++                                                 bindings_.stick_square);
++                    const float half = gpad_[i].sign < 0 ? -raw : raw;
++                    if (half > 0.0f)
++                        analogue = std::max(analogue, half);
 +                }
 +            }
 +        }
@@ -3140,10 +3287,18 @@ index 0000000..d6960fc
 +
 +}  // namespace dream::render::vk
 diff --git a/render/tests/test_input.cpp b/render/tests/test_input.cpp
-index b46d2cc..0a17cc1 100644
+index b46d2cc..49e91e1 100644
 --- a/render/tests/test_input.cpp
 +++ b/render/tests/test_input.cpp
-@@ -60,12 +60,12 @@ TEST_CASE("bindings round-trip through the file format") {
+@@ -2,6 +2,7 @@
+ // is the one thing here a user edits by hand, so the round trip and the failure behaviour are
+ // pinned rather than assumed.
+ #include "dream/render/input.h"
++#include <cmath>
+ 
+ #include "doctest.h"
+ 
+@@ -60,12 +61,12 @@ TEST_CASE("bindings round-trip through the file format") {
      a.keyboard[PadControl::A] = Binding{BindSource::Key, "Space", 1};
      a.gamepad[PadControl::StickLeft] = Binding{BindSource::Axis, "rightx", -1};
      a.deadzone_percent = 35;
@@ -3158,7 +3313,7 @@ index b46d2cc..0a17cc1 100644
      for (unsigned i = 0; i < kPadControlCount; ++i) {
          const auto c = static_cast<PadControl>(i);
          CHECK(b.keyboard[c] == a.keyboard[c]);
-@@ -109,3 +109,12 @@ TEST_CASE("a silly dead zone is clamped, not obeyed") {
+@@ -109,3 +110,54 @@ TEST_CASE("a silly dead zone is clamped, not obeyed") {
      CHECK(Bindings::from_text("deadzone = 5000\n").deadzone_percent == 90);
      CHECK(Bindings::from_text("deadzone = -3\n").deadzone_percent == 0);
  }
@@ -3170,6 +3325,88 @@ index b46d2cc..0a17cc1 100644
 +    CHECK(Bindings::from_text("trigger_ramp = 1\n").trigger_ramp == false);
 +    CHECK(Bindings::from_text("version = 2\ntrigger_ramp = 1\n").trigger_ramp == true);
 +    CHECK(Bindings::from_text("version = 2\ntrigger_ramp = 0\n").trigger_ramp == false);
++}
++
++TEST_CASE("stick_axis: radial dead zone keeps the direction and gives full strength") {
++    using dream::render::stick_axis;
++    // Inside the dead zone in any direction: nothing.
++    CHECK(stick_axis(0.15f, 0.1f, 0.2f, false) == 0.0f);
++    // Straight push: rescaled from the dead zone's edge, full at the rim.
++    CHECK(stick_axis(1.0f, 0.0f, 0.2f, false) == doctest::Approx(1.0f));
++    CHECK(stick_axis(0.6f, 0.0f, 0.2f, false) == doctest::Approx(0.5f));
++    CHECK(stick_axis(-0.6f, 0.0f, 0.2f, false) == doctest::Approx(-0.5f));
++    // 20 degrees off straight ahead: the angle survives (a per-axis dead zone made it about 11).
++    const float a = 20.0f * 3.14159265f / 180.0f;
++    const float x = stick_axis(std::sin(a), std::cos(a), 0.2f, false);
++    const float y = stick_axis(std::cos(a), std::sin(a), 0.2f, false);
++    CHECK(std::atan2(x, y) == doctest::Approx(a).epsilon(0.001));
++    CHECK(std::sqrt(x * x + y * y) == doctest::Approx(1.0f));
++    // A full diagonal is full strength (about 0.63 per axis with the per-axis dead zone).
++    const float d = std::sqrt(0.5f);
++    CHECK(stick_axis(d, d, 0.2f, false) == doctest::Approx(d));
++}
++
++TEST_CASE("stick_axis: square stretches the circle to the corners, axes unchanged") {
++    using dream::render::stick_axis;
++    const float d = std::sqrt(0.5f);
++    CHECK(stick_axis(d, d, 0.2f, true) == doctest::Approx(1.0f));
++    CHECK(stick_axis(-d, d, 0.2f, true) == doctest::Approx(-1.0f));
++    CHECK(stick_axis(1.0f, 0.0f, 0.2f, true) == doctest::Approx(1.0f));
++    CHECK(stick_axis(0.0f, 1.0f, 0.2f, true) == doctest::Approx(0.0f));
++    // Direction kept: x/y ratio unchanged by the stretch.
++    const float a = 30.0f * 3.14159265f / 180.0f;
++    const float x = stick_axis(std::sin(a), std::cos(a), 0.2f, true);
++    const float y = stick_axis(std::cos(a), std::sin(a), 0.2f, true);
++    CHECK(x / y == doctest::Approx(std::tan(a)));
++    CHECK(y == doctest::Approx(1.0f));
++}
++
++TEST_CASE("bindings: stick shape is saved and defaults to round") {
++    using dream::render::Bindings;
++    CHECK(Bindings::defaults().stick_square == false);
++    Bindings a = Bindings::defaults();
++    a.stick_square = true;
++    CHECK(Bindings::from_text(a.to_text()).stick_square == true);
++}
+diff --git a/render/tests/test_input_menu.cpp b/render/tests/test_input_menu.cpp
+index e3100ee..8017c1c 100644
+--- a/render/tests/test_input_menu.cpp
++++ b/render/tests/test_input_menu.cpp
+@@ -91,7 +91,7 @@ TEST_CASE("escape leaves the capture first and the screen second") {
+ 
+ TEST_CASE("the device row cycles and the dead zone clamps") {
+     InputMenu m = opened();
+-    m.move(-3);  // from the first binding row up to the device row
++    m.move(-4);  // from the first binding row up to the device row
+     CHECK(m.device() == 0);
+     m.adjust(1, 2);
+     CHECK(m.device() == 1);
+@@ -106,10 +106,10 @@ TEST_CASE("the device row cycles and the dead zone clamps") {
+ 
+ TEST_CASE("editing follows the selected device") {
+     InputMenu m = opened();
+-    m.move(-3);
++    m.move(-4);
+     m.adjust(1, 2);  // gamepad
+     go_to(m, PadControl::A);
+-    m.move(3);  // back down to the first binding row
++    m.move(4);  // back down to the first binding row
+     m.activate();
+     m.apply_capture(Binding{BindSource::Button, "back", 1}, false);
+     CHECK(m.bindings().gamepad[PadControl::A].text() == "button:back");
+@@ -149,3 +149,13 @@ TEST_CASE("drawing clips and does not care about tiny frames") {
+     closed.draw(clean.data(), 64, 64, 48, devices);
+     CHECK(clean == before);
+ }
++
++TEST_CASE("the stick shape row toggles round and square") {
++    InputMenu m = opened();
++    m.move(-1);  // the row above the first binding
++    CHECK_FALSE(m.bindings().stick_square);
++    m.adjust(1, 2);
++    CHECK(m.bindings().stick_square);
++    CHECK(m.activate() == InputMenu::Action::Save);
++    CHECK_FALSE(m.bindings().stick_square);
 +}
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
