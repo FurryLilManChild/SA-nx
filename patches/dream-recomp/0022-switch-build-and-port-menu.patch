@@ -2789,7 +2789,7 @@ index 0b0f03d..22810c2 100644
              }
 diff --git a/render/src/vk/window_switch.cpp b/render/src/vk/window_switch.cpp
 new file mode 100644
-index 0000000..0431e48
+index 0000000..04b27c1
 --- /dev/null
 +++ b/render/src/vk/window_switch.cpp
 @@ -0,0 +1,563 @@
@@ -2862,7 +2862,7 @@ index 0000000..0431e48
 +    HidNpadButton_ZL,       // LeftTrigger
 +    HidNpadButton_ZR,       // RightTrigger
 +    0,                      // Screenshot: the console's own capture button does this
-+    0,                      // Capture
++    HidNpadButton_StickR,   // Capture: SA-nx Test 2.3, steps --ta-tags (right stick click)
 +    0,                      // ToggleFps: in the port menu
 +    0,                      // Menu: Minus, below
 +    HidNpadButton_B,        // Back
@@ -3624,18 +3624,20 @@ index 0000000..86c3828
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..aa29703 100644
+index 824d0b4..48274f1 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
-@@ -8,6 +8,7 @@
+@@ -8,6 +8,9 @@
  // Exit code 0 when the run reached the requested stop (the first TA FIFO write with --stop-on-ta,
  // otherwise the frame or time limit), 1 on a fault, 2 on a setup error.
  #include <algorithm>
++#include <array>
++#include <map>
 +#include <cctype>
  #include <chrono>
  #include <cstdio>
  #include <cstdlib>
-@@ -24,6 +25,29 @@
+@@ -24,6 +27,29 @@
  
  #include "profiler.h"  // SA-nx: --profile
  
@@ -3665,7 +3667,7 @@ index 824d0b4..aa29703 100644
  #include "dream/runtime/aica/aica.h"
  #include "dream/runtime/aica/rtc.h"
  #include "dream/runtime/gdrom/disc.h"
-@@ -34,6 +58,7 @@
+@@ -34,6 +60,7 @@
  #include "dream/runtime/mem/dc_memory.h"
  #include "dream/runtime/pvr/core.h"
  #include "dream/runtime/sh4/abi.h"
@@ -3673,7 +3675,7 @@ index 824d0b4..aa29703 100644
  #include "dream/runtime/sh4/dmac.h"
  #include "dream/runtime/sh4/ops.h"
  #include "dream/runtime/system.h"
-@@ -46,12 +71,16 @@
+@@ -46,12 +73,16 @@
  #include "dream/audio/sink.h"
  #endif
  #ifdef DREAM_WITH_RENDERER
@@ -3690,15 +3692,189 @@ index 824d0b4..aa29703 100644
  #include "dream/render/overlay.h"
  #include "dream/render/vk/offscreen.h"
  #include "dream/render/vk/present.h"
-@@ -123,6 +152,7 @@ void print_guest_backtrace() {
+@@ -121,8 +152,181 @@ void print_guest_backtrace() {
+ // written region can be worked out precisely enough to be safe, --framebuffer-writeback turns it
+ // on and the default leaves video memory alone. Flycast reaches the same conclusion from the other
  // direction: its framebuffer emulation is off unless a title needs it.
++// SA-nx (Test 2.3, --ta-tags): which game code sends each translucent polygon, to find the
++// character drawing for a CHARACTERS translucency mode (characters per pixel, the rest per
++// triangle).
++//
++// A polygon's header reaches the Tile Accelerator either straight from the CPU (a store-queue
++// burst into the FIFO) or by channel 2 DMA out of a RAM buffer the CPU filled earlier with
++// store-queue bursts. Either way the code is identified at the moment it wrote the header: its
++// return address (PR) and the first four return addresses found on the guest stack above it (a
++// word that points just past a jsr/bsr in RAM). Headers that reach the FIFO by DMA from RAM no
++// burst wrote are counted as "unknown".
++//
++// The counts go to the log every 10 seconds and to the end-of-run report. Clicking the right
++// stick hides the next most frequent source (its polygons drawn with blend factors zero and
++// one), with its number shown after the FPS counter, so a video names what each source draws.
++struct TaTagDiag {
++    using Sig = std::array<std::uint32_t, 5>;
++    struct Source {
++        Sig sig{};
++        std::uint64_t total = 0, window = 0;
++        std::uint32_t textures[4]{};
++        unsigned ntex = 0;
++    };
++    dream::sh4::Ctx* ctx = nullptr;
++    const std::uint8_t* ram = nullptr;
++    std::vector<std::uint16_t> chunk_tag = std::vector<std::uint16_t>(1u << 19, 0);  // RAM / 32
++    std::map<Sig, std::uint16_t> ids;  // signature -> id (1-based)
++    std::vector<Source> sources{Source{}};  // [0]: unknown
++    std::uint64_t headers = 0, from_dma = 0, from_cpu = 0;
++    int hidden = 0;          // a source id, 0 for none
++    unsigned hide_step = 0;  // how far down the ranking the right stick has gone
++
++    static bool is_header(std::uint32_t pcw) {
++        const unsigned type = pcw >> 29;
++        return (type == 4 || type == 5) && ((pcw >> 24) & 7u) == 2u;
++    }
++    std::uint32_t ram16(std::uint32_t phys) const {
++        const std::uint32_t o = phys & 0x00FFFFFEu;
++        return static_cast<std::uint32_t>(ram[o]) | (static_cast<std::uint32_t>(ram[o + 1]) << 8);
++    }
++    std::uint32_t ram32(std::uint32_t phys) const {
++        return ram16(phys) | (ram16(phys + 2) << 16);
++    }
++    bool is_return(std::uint32_t v) const {
++        const std::uint32_t phys = v & 0x1FFFFFFFu;
++        if ((v & 1u) || phys < 0x0C010004u || phys >= 0x0D000000u)
++            return false;
++        const std::uint32_t h = ram16(phys - 4);
++        return (h & 0xF0FFu) == 0x400Bu || (h & 0xF000u) == 0xB000u || (h & 0xF0FFu) == 0x0003u;
++    }
++    std::uint16_t current() {
++        Sig sig{};
++        sig[0] = ctx->pr & 0x1FFFFFFFu;
++        unsigned n = 1;
++        const std::uint32_t sp = ctx->r[15] & 0x1FFFFFFCu;
++        if ((sp & 0x1C000000u) == 0x0C000000u)
++            for (std::uint32_t i = 0; i < 64 && n < sig.size(); ++i) {
++                const std::uint32_t v = ram32(sp + 4 * i);
++                if (is_return(v) && (v & 0x1FFFFFFFu) != sig[n - 1])
++                    sig[n++] = v & 0x1FFFFFFFu;
++            }
++        auto it = ids.find(sig);
++        if (it != ids.end())
++            return it->second;
++        if (sources.size() >= 0xFFFF)
++            return 0;
++        const auto id = static_cast<std::uint16_t>(sources.size());
++        Source src;
++        src.sig = sig;
++        sources.push_back(src);
++        ids.emplace(sig, id);
++        return id;
++    }
++    void sq_ram(std::uint32_t dest, const std::uint32_t* words) {
++        const std::uint32_t slot = (dest & 0x00FFFFFFu) >> 5;
++        chunk_tag[slot] = is_header(words[0]) ? current() : 0;
++    }
++    std::uint64_t next_log = 0;
++    void header(std::vector<std::uint32_t>& stream, std::size_t at, std::uint32_t feed_src) {
++        ++headers;
++        if (ctx->cycles >= next_log) {  // every 10 guest seconds
++            if (next_log)
++                log_window(static_cast<double>(ctx->cycles) / 200e6);
++            next_log = ctx->cycles + 2'000'000'000ull;
++        }
++        std::uint16_t id;
++        if (feed_src) {
++            ++from_dma;
++            id = chunk_tag[(feed_src & 0x00FFFFFFu) >> 5];
++        } else {
++            ++from_cpu;
++            id = current();
++        }
++        Source& s = sources[id];
++        ++s.total;
++        ++s.window;
++        const std::uint32_t tcw = stream[at + 3] & 0x001FFFFFu;  // texture address, 8-byte units
++        bool seen = false;
++        for (unsigned i = 0; i < s.ntex; ++i) seen = seen || s.textures[i] == tcw;
++        if (!seen && s.ntex < 4)
++            s.textures[s.ntex++] = tcw;
++        if (hidden && id == hidden)
++            stream[at + 2] = (stream[at + 2] & 0x03FFFFFFu) | (0u << 29) | (1u << 26);
++    }
++    std::vector<std::uint16_t> ranking(bool window) const {
++        std::vector<std::uint16_t> r;
++        for (std::size_t i = 1; i < sources.size(); ++i)
++            if ((window ? sources[i].window : sources[i].total) > 0)
++                r.push_back(static_cast<std::uint16_t>(i));
++        std::sort(r.begin(), r.end(), [&](std::uint16_t a, std::uint16_t b) {
++            return window ? sources[a].window > sources[b].window
++                          : sources[a].total > sources[b].total;
++        });
++        return r;
++    }
++    std::string describe(std::uint16_t id) const {
++        const Source& s = sources[id];
++        char buf[256];
++        std::snprintf(buf, sizeof buf,
++                      "#%u pr %08x stack %08x %08x %08x %08x tex %05x %05x %05x %05x", id, s.sig[0],
++                      s.sig[1], s.sig[2], s.sig[3], s.sig[4], s.ntex > 0 ? s.textures[0] : 0,
++                      s.ntex > 1 ? s.textures[1] : 0, s.ntex > 2 ? s.textures[2] : 0,
++                      s.ntex > 3 ? s.textures[3] : 0);
++        return buf;
++    }
++    // Right stick: hide the next source down the last window's ranking (none after the 12th).
++    void step() {
++        const auto r = ranking(false);
++        hide_step = (hide_step + 1) % 13;
++        hidden = hide_step == 0 || hide_step > r.size() ? 0 : r[hide_step - 1];
++        if (hidden)
++            std::printf("[tags] hiding %s\n", describe(static_cast<std::uint16_t>(hidden)).c_str());
++        else
++            std::printf("[tags] hiding nothing\n");
++        std::fflush(stdout);
++    }
++    void log_window(double guest_s) {
++        const auto r = ranking(true);
++        std::uint64_t sum = sources[0].window;
++        for (auto id : r) sum += sources[id].window;
++        std::printf("[tags] %.0f s: %llu translucent headers, unknown %llu\n", guest_s,
++                    static_cast<unsigned long long>(sum),
++                    static_cast<unsigned long long>(sources[0].window));
++        for (std::size_t i = 0; i < r.size() && i < 10; ++i)
++            std::printf("[tags]   %6llu %s\n", static_cast<unsigned long long>(sources[r[i]].window),
++                        describe(r[i]).c_str());
++        for (auto& s : sources) s.window = 0;
++        std::fflush(stdout);
++    }
++    std::string report() const {
++        std::string out;
++        char buf[160];
++        std::snprintf(buf, sizeof buf,
++                      "translucent polygon sources (--ta-tags): %llu headers, %llu by DMA, %llu "
++                      "from the CPU, %llu unknown, %zu sources\n",
++                      static_cast<unsigned long long>(headers),
++                      static_cast<unsigned long long>(from_dma),
++                      static_cast<unsigned long long>(from_cpu),
++                      static_cast<unsigned long long>(sources[0].total), sources.size() - 1);
++        out += buf;
++        const auto r = ranking(false);
++        for (std::size_t i = 0; i < r.size() && i < 60; ++i) {
++            std::snprintf(buf, sizeof buf, "  %10llu ",
++                          static_cast<unsigned long long>(sources[r[i]].total));
++            out += buf;
++            out += describe(r[i]);
++            out += "\n";
++        }
++        return out;
++    }
++};
++TaTagDiag* g_tags = nullptr;
++
  struct Live {
      Live(dream::mem::DcMemory& memory, const dream::pvr::Core& pvr) : memory_(memory), pvr_(pvr) {}
 +    ~Live() { stop_render_thread(); }  // SA-nx: before what the render thread uses goes away
  
      // `scale` multiplies the resolution the geometry is drawn at. The frame is resampled back to
      // the guest's own framebuffer on the way into video memory, so a higher setting sharpens the
-@@ -133,15 +163,15 @@ struct Live {
+@@ -133,15 +337,15 @@ struct Live {
              error = window.error();
              return false;
          }
@@ -3718,7 +3894,7 @@ index 824d0b4..aa29703 100644
              error = renderer.error();
              return false;
          }
-@@ -159,6 +189,23 @@ struct Live {
+@@ -159,6 +363,23 @@ struct Live {
      // The guest has handed the hardware a display list. Draw it, then put the result where the
      // hardware would have put it.
      void render(const std::vector<std::uint32_t>& stream) {
@@ -3742,7 +3918,7 @@ index 824d0b4..aa29703 100644
          last_stream = stream;  // kept so F11 can write the list that drew what is on screen
          decoder.reset();
          decoder.feed_stream(stream.data(), stream.size());
-@@ -184,10 +231,17 @@ struct Live {
+@@ -184,10 +405,17 @@ struct Live {
          memory_.take_vram_writes([this](std::uint32_t begin, std::uint32_t end) {
              vram_invalidated += renderer.textures().invalidate_range(begin, end);
          });
@@ -3762,7 +3938,7 @@ index 824d0b4..aa29703 100644
              }
              return;
          }
-@@ -195,6 +249,118 @@ struct Live {
+@@ -195,6 +423,118 @@ struct Live {
          ++rendered;
      }
  
@@ -3881,7 +4057,7 @@ index 824d0b4..aa29703 100644
      // True for a buffer the renderer has drawn into at some point. A title alternates between two
      // and does not swap the displayed one on every render, so asking whether the displayed buffer
      // is *the* most recent target is too strict; asking whether it is one of ours is the question
-@@ -224,8 +390,8 @@ struct Live {
+@@ -224,8 +564,8 @@ struct Live {
              targets_.push_back(target.address);
          if (!writeback)
              return;
@@ -3892,7 +4068,7 @@ index 824d0b4..aa29703 100644
                                                 dream::mem::DcMemory::kVramSize))
              return;
          ++written_back;
-@@ -243,9 +409,201 @@ struct Live {
+@@ -243,9 +583,201 @@ struct Live {
  
      // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
      // Returns false when the user has closed the window.
@@ -4095,7 +4271,7 @@ index 824d0b4..aa29703 100644
              return false;
          update_counter(guest_cycles);
          pump_menu();
-@@ -258,8 +616,8 @@ struct Live {
+@@ -258,8 +790,8 @@ struct Live {
          from_renderer = described && fb.enabled && rendered_into(fb.address);
          if (from_renderer) {
              shown = fb;
@@ -4106,7 +4282,7 @@ index 824d0b4..aa29703 100644
              have_frame = true;
          } else if (described && fb.enabled &&
                     dream::render::decode_framebuffer(fb, memory_.vram(),
-@@ -277,12 +635,27 @@ struct Live {
+@@ -277,12 +809,27 @@ struct Live {
              window.recreate_swapchain();
              return true;
          }
@@ -4118,9 +4294,9 @@ index 824d0b4..aa29703 100644
 +        apply_options();
 +        if (from_renderer && gpu_present && !menu.is_open() && !port.is_open()) {
 +            presenter.copy_from(cmd, off_->colour_image(), shown.width, shown.height);
-+            if (show_fps)
++            if (show_fps || g_tags)
 +                draw_counter_tile(shown.width);
-+            if (show_fps && !counter_tile.empty())
++            if ((show_fps || g_tags) && !counter_tile.empty())
 +                presenter.overlay(cmd, counter_tile.data(), counter_x, counter_y, counter_w,
 +                                  counter_h);
 +            finish_present(image, cmd);
@@ -4136,7 +4312,7 @@ index 824d0b4..aa29703 100644
              presenter.upload(cmd, source, shown.width, shown.height,
                               [this](std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
                                   if (show_fps)
-@@ -290,9 +663,18 @@ struct Live {
+@@ -290,9 +837,18 @@ struct Live {
                                   // Last, so the screen sits over the counter rather than under it.
                                   if (menu.is_open())
                                       menu.draw(px, w, w, h, window.devices());
@@ -4155,7 +4331,7 @@ index 824d0b4..aa29703 100644
          VkClearValue clears[2]{};
          clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
          clears[1].depthStencil = {0.0f, 0};
-@@ -318,8 +700,13 @@ struct Live {
+@@ -318,19 +874,55 @@ struct Live {
          if (!window.end_frame(image))
              window.recreate_swapchain();
          ++presented;
@@ -4169,7 +4345,18 @@ index 824d0b4..aa29703 100644
              fps_mark = {};  // start the next average fresh rather than from whenever it last ran
          }
          if (window.pressed(dream::render::vk::Control::Screenshot))
-@@ -330,7 +717,29 @@ struct Live {
+             screenshot();
+-        if (window.pressed(dream::render::vk::Control::Capture))
+-            capture();
++        if (window.pressed(dream::render::vk::Control::Capture)) {
++            if (g_tags)
++                g_tags->step();  // SA-nx Test 2.3: the right stick on the Switch
++#ifndef __SWITCH__
++            else
++                capture();
++#endif
++        }
+         if (screenshot_at && presented == screenshot_at)
              screenshot();
          if (capture_at && presented == capture_at)
              capture();
@@ -4182,6 +4369,9 @@ index 824d0b4..aa29703 100644
 +    void draw_counter_tile(std::uint32_t frame_width) {
 +        char line[64];
 +        std::snprintf(line, sizeof line, "%.1f FPS  %.2fX", fps_shown, speed_shown);
++        if (g_tags)  // SA-nx Test 2.3: the hidden translucent source
++            std::snprintf(line, sizeof line, "%.1f FPS  %.2fX  TAG %d", fps_shown, speed_shown,
++                          g_tags->hidden);
 +        dream::render::TextStyle style;
 +        style.scale = std::max(2u, 2u * (frame_width / kGuestWidth));
 +        style.bg = 0;
@@ -4200,7 +4390,7 @@ index 824d0b4..aa29703 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +782,251 @@ struct Live {
+@@ -373,8 +965,251 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -4452,7 +4642,7 @@ index 824d0b4..aa29703 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +1036,9 @@ struct Live {
+@@ -384,10 +1219,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -4466,7 +4656,7 @@ index 824d0b4..aa29703 100644
              return;
          }
          if (!menu.is_open())
-@@ -501,17 +1152,19 @@ struct Live {
+@@ -501,17 +1335,19 @@ struct Live {
          const double guest_s = static_cast<double>(guest_cycles) / 200e6;
          if (fps_mark == std::chrono::steady_clock::time_point{}) {
              fps_mark = now;
@@ -4489,7 +4679,17 @@ index 824d0b4..aa29703 100644
          fps_guest_at_mark = guest_s;
      }
  
-@@ -560,7 +1213,7 @@ struct Live {
+@@ -520,6 +1356,9 @@ struct Live {
+     void draw_counter(std::uint32_t* px, std::uint32_t w, std::uint32_t h) {
+         char line[64];
+         std::snprintf(line, sizeof line, "%.1f FPS  %.2fX", fps_shown, speed_shown);
++        if (g_tags)  // SA-nx Test 2.3: the hidden translucent source
++            std::snprintf(line, sizeof line, "%.1f FPS  %.2fX  TAG %d", fps_shown, speed_shown,
++                          g_tags->hidden);
+         dream::render::TextStyle style;
+         // One text pixel per two guest pixels at --scale 1, and the same apparent size at every
+         // scale above it, so the counter neither disappears nor swamps the picture.
+@@ -560,7 +1399,7 @@ struct Live {
          if (!f)
              return;
          std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
@@ -4498,7 +4698,7 @@ index 824d0b4..aa29703 100644
          const std::size_t n = static_cast<std::size_t>(shown.width) * shown.height;
          for (std::size_t i = 0; i < n; ++i) {
              const std::uint32_t p = src[i];
-@@ -642,7 +1295,16 @@ struct Live {
+@@ -642,7 +1481,16 @@ struct Live {
  
      dream::render::vk::Window window;
      dream::render::vk::Renderer renderer;
@@ -4516,7 +4716,7 @@ index 824d0b4..aa29703 100644
      dream::render::vk::Presenter presenter;
      dream::render::DisplayList decoder;
      dream::render::vk::FrameGeometry geometry;
-@@ -652,6 +1314,28 @@ struct Live {
+@@ -652,6 +1500,28 @@ struct Live {
      std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
                    decoded_frames = 0, backgrounds = 0;
      std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
@@ -4545,7 +4745,7 @@ index 824d0b4..aa29703 100644
      std::uint32_t target_address = 0;
      std::uint64_t guest_frame = 0;
      std::vector<std::uint32_t> last_stream;
-@@ -660,9 +1344,46 @@ struct Live {
+@@ -660,9 +1530,46 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -4592,7 +4792,87 @@ index 824d0b4..aa29703 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1799,13 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -706,6 +1613,48 @@ struct SerialCapture final : dream::mem::MmioHandler {
+     }
+ };
+ 
++// SA-nx (Test 2.3): the running configuration, for naming the overlay file an untranslated
++// target belonged to (report_text). Set once the disc has picked its configuration.
++const dream::translator::GameConfig* g_report_cfg = nullptr;
++
++// Which overlay files ([[relocations]] with a file) held these 32 bytes at this address: the
++// module or cutscene that was in RAM when the target was reached.
++std::string overlay_holders(std::uint32_t phys, const std::array<std::uint8_t, 32>& bytes) {
++    static std::unordered_map<std::string, std::vector<char>> cache;
++    std::string out;
++    if (!g_report_cfg)
++        return out;
++    for (const auto& r : g_report_cfg->relocations) {
++        if (r.file.empty())
++            continue;
++        const std::uint32_t dest = r.dest & 0x1FFFFFFFu;
++        if (phys < dest || phys >= dest + r.size)
++            continue;
++        const std::filesystem::path path =
++            r.file.is_absolute() ? r.file : g_report_cfg->dir / r.file;
++        auto it = cache.find(path.string());
++        if (it == cache.end()) {
++            std::vector<char> data;
++            if (std::FILE* f = std::fopen(path.string().c_str(), "rb")) {
++                char chunk[65536];
++                std::size_t n;
++                while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0)
++                    data.insert(data.end(), chunk, chunk + n);
++                std::fclose(f);
++            }
++            it = cache.emplace(path.string(), std::move(data)).first;
++        }
++        const std::size_t off = r.source + (phys - dest);
++        if (off + 32 > it->second.size() || std::memcmp(it->second.data() + off, bytes.data(), 32))
++            continue;
++        char buf[160];
++        std::snprintf(buf, sizeof buf, "%s%s+0x%zx", out.empty() ? "" : ", ",
++                      r.file.filename().string().c_str(), off);
++        out += buf;
++    }
++    return out;
++}
++
+ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream::pvr::Core& pvr,
+                         const char* stop, double host_seconds, const std::vector<char>& image,
+                         std::uint32_t image_base, const dream::maple::Bus& maple,
+@@ -932,6 +1881,30 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
+             s += buf;
+         }
+     }
++    // Overlay targets: the file whose bytes were in RAM when the target was reached.
++    for (const auto& rec : sys.untranslated.records()) {
++        const std::uint32_t phys = rec.addr & 0x1FFFFFFFu;
++        const auto it = sys.untranslated_bytes.find(phys);
++        if (it == sys.untranslated_bytes.end())
++            continue;
++        const std::uint32_t link = phys | 0x0C000000u;
++        if (link >= image_base && link < image_base + image.size())
++            continue;  // the main program: the loop above covers it
++        std::string held = overlay_holders(phys, it->second);
++        if (held.empty()) {
++            // The overlay files are not next to the configuration (the Switch reads them from
++            // the disc): the bytes themselves, matched against the files afterwards.
++            held = "bytes";
++            for (std::uint8_t b : it->second) {
++                std::snprintf(buf, sizeof buf, " %02x", b);
++                held += buf;
++            }
++        }
++        std::snprintf(buf, sizeof buf, "  0x%08x: in ", rec.addr);
++        s += buf;
++        s += held;
++        s += "\n";
++    }
+     std::snprintf(buf, sizeof buf, "unmapped memory accesses: %llu\n",
+                   static_cast<unsigned long long>(sys.memory.faults().total()));
+     s += buf;
+@@ -1078,6 +2051,13 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -4606,7 +4886,7 @@ index 824d0b4..aa29703 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1836,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +2088,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -4614,7 +4894,7 @@ index 824d0b4..aa29703 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1181,6 +1910,62 @@ private:
+@@ -1181,6 +2162,62 @@ private:
  };
  }  // namespace
  
@@ -4677,7 +4957,7 @@ index 824d0b4..aa29703 100644
  int main(int argc, char** argv) {
      // SA-nx: trace runs write hundreds of thousands of lines to stderr, which is unbuffered and very
      // slow line by line on Windows. Buffer it; the stdio buffers are flushed when main returns.
-@@ -1233,6 +2018,12 @@ int main(int argc, char** argv) {
+@@ -1233,6 +2270,12 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
@@ -4690,7 +4970,7 @@ index 824d0b4..aa29703 100644
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,10 +2033,22 @@ int main(int argc, char** argv) {
+@@ -1242,10 +2285,23 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -4698,6 +4978,7 @@ index 824d0b4..aa29703 100644
 +    std::string pipeline_cache_file;  // SA-nx: --pipeline-cache FILE (default on the Switch)
 +    std::string idle_skip;            // SA-nx: --idle-skip FUNCTION:CALLER[,CALLER...]
 +    bool quick_exit = false;          // SA-nx: --quick-exit, no end-of-run report
++    bool ta_tags = false;             // SA-nx Test 2.3: --ta-tags (TaTagDiag)
 +    bool render_thread = true;        // SA-nx: --no-render-thread
 +#ifdef __SWITCH__
 +    bool aica_thread = true;  // SA-nx: --aica-thread / --no-aica-thread
@@ -4713,16 +4994,18 @@ index 824d0b4..aa29703 100644
      // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
      // be compared. Any non-zero value will do; the number itself only changes the date a title
      // shows.
-@@ -1274,6 +2077,8 @@ int main(int argc, char** argv) {
+@@ -1274,6 +2330,10 @@ int main(int argc, char** argv) {
      for (int i = 1; i < argc; ++i) {
          if (!std::strcmp(argv[i], "--config") && i + 1 < argc)
              config = argv[++i];
 +        else if (!std::strcmp(argv[i], "--quick-exit"))
 +            quick_exit = true;
++        else if (!std::strcmp(argv[i], "--ta-tags"))
++            ta_tags = true;
          else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
              report = argv[++i];
          else if (!std::strcmp(argv[i], "--stop-on-ta"))
-@@ -1334,10 +2139,15 @@ int main(int argc, char** argv) {
+@@ -1334,10 +2394,15 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -4738,7 +5021,7 @@ index 824d0b4..aa29703 100644
          else if (!std::strcmp(argv[i], "--hide-file") && i + 1 < argc) {
              std::string rest = argv[++i];
              while (!rest.empty()) {
-@@ -1358,6 +2168,24 @@ int main(int argc, char** argv) {
+@@ -1358,6 +2423,24 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -4763,7 +5046,7 @@ index 824d0b4..aa29703 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1387,8 +2215,10 @@ int main(int argc, char** argv) {
+@@ -1387,8 +2470,10 @@ int main(int argc, char** argv) {
              log_from = std::strtoull(spec, nullptr, 0);
              if (const char* colon = std::strchr(spec, ':'))
                  log_count = std::strtoull(colon + 1, nullptr, 0);
@@ -4775,7 +5058,7 @@ index 824d0b4..aa29703 100644
          else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
              usage(argv[0], stdout);
              return 0;
-@@ -1398,6 +2228,9 @@ int main(int argc, char** argv) {
+@@ -1398,6 +2483,9 @@ int main(int argc, char** argv) {
              return 2;
          }
      }
@@ -4785,7 +5068,7 @@ index 824d0b4..aa29703 100644
      if (config.empty()) {
          std::fprintf(stderr, "--config is required\n");
          return 2;
-@@ -1424,7 +2257,26 @@ int main(int argc, char** argv) {
+@@ -1424,7 +2512,26 @@ int main(int argc, char** argv) {
          return 2;
      }
      std::unique_ptr<dream::gdrom::Disc> disc;
@@ -4812,7 +5095,7 @@ index 824d0b4..aa29703 100644
          disc = dream::gdrom::open_disc(*cfg.disc_image, err);
          if (!disc) {
              std::fprintf(stderr, "disc: %s\n", err.c_str());
-@@ -1434,13 +2286,110 @@ int main(int argc, char** argv) {
+@@ -1434,13 +2541,110 @@ int main(int argc, char** argv) {
              disc = std::make_unique<HidingDisc>(std::move(disc), hide_files);
              std::printf("disc: hiding %zu file(s) from the game\n", hide_files.size());
          }
@@ -4924,7 +5207,28 @@ index 824d0b4..aa29703 100644
  
      dream::System sys;
      dream::hle::Bios bios(sys);
-@@ -1682,12 +2631,29 @@ int main(int argc, char** argv) {
+@@ -1476,6 +2680,20 @@ int main(int argc, char** argv) {
+     dream::pvr::Core pvr(sys.sched, sys.holly, sys.spg, sys.memory);
+     sys.memory.map_mmio(dream::pvr::Core::kRegBase, dream::pvr::Core::kRegEnd, &pvr);
+     sys.memory.map_mmio(dream::pvr::Core::kFifoBase, dream::pvr::Core::kFifoEnd, &pvr);
++    // SA-nx Test 2.3: --ta-tags (TaTagDiag).
++    TaTagDiag tag_diag;
++    if (ta_tags) {
++        tag_diag.ctx = &sys.ctx;
++        tag_diag.ram = sys.memory.ram();
++        g_tags = &tag_diag;
++        sys.memory.on_sq_ram = [](std::uint32_t dest, const std::uint32_t* words) {
++            g_tags->sq_ram(dest, words);
++        };
++        pvr.ta.on_translucent_header = [&pvr](std::size_t at) {
++            g_tags->header(pvr.ta.stream, at, pvr.ta_feed_src);
++        };
++        std::printf("[tags] recording translucent polygon sources; the right stick hides one\n");
++    }
+     // The hook fires before the chunk is parsed, so `ta.chunks` is still zero when the stop
+     // throws; the success check below has to read this flag rather than the counter.
+     bool reached_ta = false;
+@@ -1682,12 +2900,29 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -4954,7 +5258,7 @@ index 824d0b4..aa29703 100644
          if (!live->start(
                  scale, validation,
                  cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
-@@ -1698,7 +2664,38 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2933,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -4994,7 +5298,7 @@ index 824d0b4..aa29703 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1712,6 +2709,10 @@ int main(int argc, char** argv) {
+@@ -1712,6 +2978,10 @@ int main(int argc, char** argv) {
          // Wall-clock time the guest was stopped for, which the pacing below owes back. Without it
          // the run would sprint to catch up the moment the binding screen closed.
          auto paused_for = std::chrono::steady_clock::duration::zero();
@@ -5005,7 +5309,7 @@ index 824d0b4..aa29703 100644
          auto previous_vblank = std::move(sys.spg.on_vblank_out);
          sys.spg.on_vblank_out = [&, previous_vblank, started] {
              if (previous_vblank)
-@@ -1721,9 +2722,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2991,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -5017,7 +5321,7 @@ index 824d0b4..aa29703 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2733,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +3002,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -5025,7 +5329,7 @@ index 824d0b4..aa29703 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2746,33 @@ int main(int argc, char** argv) {
+@@ -1744,8 +3015,33 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -5061,7 +5365,7 @@ index 824d0b4..aa29703 100644
          };
      }
  #endif
-@@ -1770,6 +2797,16 @@ int main(int argc, char** argv) {
+@@ -1770,6 +3066,16 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -5078,7 +5382,7 @@ index 824d0b4..aa29703 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2818,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +3087,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -5090,7 +5394,7 @@ index 824d0b4..aa29703 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2830,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +3099,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -5114,7 +5418,7 @@ index 824d0b4..aa29703 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -1803,9 +2860,10 @@ int main(int argc, char** argv) {
+@@ -1803,9 +3129,10 @@ int main(int argc, char** argv) {
          sys.sched.request(rtc_tick, 200'000'000ull);
      });
      sys.sched.request(rtc_tick, 200'000'000ull);
@@ -5127,7 +5431,7 @@ index 824d0b4..aa29703 100644
      // The first access to an address that is not in the memory map is the moment a run started
      // going wrong: everything after it is the guest following garbage. The fault log counts them
      // but records neither when nor from where, so the watchdog catches the transition and reports
-@@ -2036,6 +3094,30 @@ int main(int argc, char** argv) {
+@@ -2036,6 +3363,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -5158,7 +5462,7 @@ index 824d0b4..aa29703 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +3128,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +3397,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -5171,7 +5475,7 @@ index 824d0b4..aa29703 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2076,10 +3164,13 @@ int main(int argc, char** argv) {
+@@ -2076,10 +3433,13 @@ int main(int argc, char** argv) {
  #ifdef DREAM_WITH_AUDIO
      if (sink.is_open()) {
          sink.flush();
@@ -5187,7 +5491,7 @@ index 824d0b4..aa29703 100644
      }
  #endif
      if (hash_file) {
-@@ -2145,7 +3236,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +3505,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -5196,7 +5500,7 @@ index 824d0b4..aa29703 100644
          for (std::size_t i = 0; i < top.size() && i < 12; ++i)
              std::printf(" %08x:%llu", top[i].second, static_cast<unsigned long long>(top[i].first));
          std::printf("\n");
-@@ -2182,10 +3273,16 @@ int main(int argc, char** argv) {
+@@ -2182,10 +3542,19 @@ int main(int argc, char** argv) {
                          static_cast<double>(pcm.size() / 2) / 44100.0);
          }
      }
@@ -5206,16 +5510,28 @@ index 824d0b4..aa29703 100644
 +    // configuration. Building them (every untranslated call target, every relocation candidate,
 +    // the device counters) took about a minute on the Switch after the player quit; a release
 +    // has no use for them.
++    g_report_cfg = &cfg;
 +    const std::string text = quick_exit ? std::string()
 +                                        : report_text(sys, bios, pvr, stop, host_s, bytes,
 +                                                      cfg.link_address, maple, pad_ptr, card_ptr,
 +                                                      aica, g2, sysblock, dmac);
      std::fputs(text.c_str(), stdout);
 -    {
++    if (g_tags && !quick_exit)
++        std::fputs(g_tags->report().c_str(), stdout);
 +    if (!quick_exit) {
          const std::string rel = suggest_relocations(sys, bytes, cfg.link_address, cfg.load_address,
                                                      ipbin, cfg.relocations);
          if (!rel.empty())
+@@ -2272,6 +3641,8 @@ int main(int argc, char** argv) {
+     if (!report.empty()) {
+         std::ofstream o(report);
+         o << text;
++        if (g_tags && !quick_exit)
++            o << g_tags->report();
+     }
+     if (stop_on_ta && !reached_ta && rc == 0)
+         rc = 1;
 diff --git a/runtime/include/dream/runtime/aica/aica.h b/runtime/include/dream/runtime/aica/aica.h
 index 1ac2d5e..15bf7df 100644
 --- a/runtime/include/dream/runtime/aica/aica.h
@@ -5313,6 +5629,30 @@ index ec29bf6..5911673 100644
      void clear(Irq irq);  // for external sources, which the device lowers itself
      bool raised(Irq irq) const noexcept;
  
+diff --git a/runtime/include/dream/runtime/pvr/core.h b/runtime/include/dream/runtime/pvr/core.h
+index 8c7b276..1438c29 100644
+--- a/runtime/include/dream/runtime/pvr/core.h
++++ b/runtime/include/dream/runtime/pvr/core.h
+@@ -47,6 +47,9 @@ public:
+     std::uint64_t chunks = 0, invalid = 0;
+     unsigned current_list = 7;          // 7: none open
+     std::vector<std::uint32_t> stream;  // raw parameter words since the last list init
++    // SA-nx (Test 2.3, --ta-tags): each translucent polygon or sprite header, by the index of its
++    // first word in `stream` (the hook may edit the header there).
++    std::function<void(std::size_t at)> on_translucent_header;
+ 
+     // Sizes from the parameter control word (Flycast TaTypeLut): a 64-byte polygon header is an
+     // intensity-coloured textured polygon with offset colour, or an intensity two-volume polygon;
+@@ -90,6 +93,9 @@ public:
+     const std::uint32_t* reg_block() const noexcept { return regs_.data(); }
+ 
+     Ta ta;
++    // SA-nx (Test 2.3): the RAM address the chunk being fed came from (channel 2 DMA), 0 for the
++    // CPU writing the FIFO itself.
++    std::uint32_t ta_feed_src = 0;
+     std::function<void()> on_first_ta_data;
+     // Called when the guest starts a render, with the parameter stream that render will draw.
+     // The renderer (and the launcher's --dump-ta) hangs off this.
 diff --git a/runtime/include/dream/runtime/pvr/spg.h b/runtime/include/dream/runtime/pvr/spg.h
 index c7a1f38..95ffb88 100644
 --- a/runtime/include/dream/runtime/pvr/spg.h
@@ -5380,7 +5720,7 @@ index 9a7ec21..1a51622 100644
  
  }  // namespace dream::sched
 diff --git a/runtime/include/dream/runtime/sh4/abi.h b/runtime/include/dream/runtime/sh4/abi.h
-index a1db0ca..b3e8639 100644
+index a1db0ca..99e4698 100644
 --- a/runtime/include/dream/runtime/sh4/abi.h
 +++ b/runtime/include/dream/runtime/sh4/abi.h
 @@ -4,6 +4,7 @@
@@ -5391,7 +5731,7 @@ index a1db0ca..b3e8639 100644
  #include <utility>
  #include <vector>
  
-@@ -39,6 +40,16 @@ struct NonLocalReturn {
+@@ -39,6 +40,25 @@ struct NonLocalReturn {
  // generates. Tables from several units are merged.
  void register_functions(const FunctionEntry* entries, std::size_t count) noexcept;
  
@@ -5404,6 +5744,15 @@ index a1db0ca..b3e8639 100644
 +bool select_variant(const std::string& variant) noexcept;
 +// The names registered, sorted; empty for a program built from one version.
 +std::vector<std::string> registered_variants();
++
++// SA-nx: a hand-written native replacement for a translated function (Test 2.3: the movie
++// player's IDCT). Registered by a static initialiser; when a table is registered (or a variant
++// selected), every entry at that address takes `fn` in place of its translation, keeping its
++// signature and its resume function, so an overlay still runs it only while its own bytes are in
++// RAM and an interrupted call still resumes in the translation.
++void register_native_override(std::uint32_t address, GuestFn fn) noexcept;
++// How many table entries the overrides replaced (for the log).
++std::size_t native_overrides_applied() noexcept;
 +
  // Looks the guest address up in the merged table. Returns nullptr when untranslated. Entries with
  // a signature are only returned when `m` is given and the words match memory at `address`.
@@ -5552,6 +5901,30 @@ index 2c8ccb4..dea9fe1 100644
  // FTRC: truncate toward zero with saturation; NaN gives the negative-overflow pattern.
  inline std::uint32_t ftrc(float f) noexcept {
      if (std::isnan(f))
+diff --git a/runtime/include/dream/runtime/system.h b/runtime/include/dream/runtime/system.h
+index cdb4e69..a3f4d71 100644
+--- a/runtime/include/dream/runtime/system.h
++++ b/runtime/include/dream/runtime/system.h
+@@ -11,6 +11,7 @@
+ #include <stdexcept>
+ #include <string>
+ #include <utility>
++#include <unordered_map>
+ #include <vector>
+ 
+ #include "dream/runtime/holly/intc.h"
+@@ -75,6 +76,11 @@ public:
+     // (target, call site) of the first untranslated calls, for the launcher report.
+     std::vector<std::pair<std::uint32_t, std::uint32_t>> untranslated_sites;
+     mem::FaultLog untranslated;  // call targets with no translation (size field = 4, write = 0)
++    // SA-nx (Test 2.3): the 32 bytes at each untranslated target when it was first reached (the
++    // first 512 targets). Overlay code (modules, cutscenes) is gone from RAM by the end of the
++    // run, so the report names the file that held it from these bytes instead.
++    std::unordered_map<std::uint32_t, std::array<std::uint8_t, 32>> untranslated_bytes;
++    void note_untranslated_bytes(::dream::Memory& m, std::uint32_t target);
+     // Dev interpreter (DREAM_DEV_INTERPRETER only; zero otherwise)
+     std::uint64_t interpreter_runs = 0, interpreted_instructions = 0, interpreter_native_calls = 0;
+ 
 diff --git a/runtime/src/aica/aica.cpp b/runtime/src/aica/aica.cpp
 index c8d4401..9e54bc3 100644
 --- a/runtime/src/aica/aica.cpp
@@ -5944,11 +6317,44 @@ index 7ea3f33..8bf8268 100644
  }
  
  void Intc::clear(Irq irq) {
+diff --git a/runtime/src/holly/sysblock.cpp b/runtime/src/holly/sysblock.cpp
+index 3b884c1..35861bf 100644
+--- a/runtime/src/holly/sysblock.cpp
++++ b/runtime/src/holly/sysblock.cpp
+@@ -105,8 +105,10 @@ void SysBlock::ch2_dma() {
+         std::uint32_t words[8];
+         for (std::uint32_t off = 0; off + 32 <= len; off += 32) {
+             for (unsigned k = 0; k < 8; ++k) words[k] = memory_.read32(src + off + 4 * k);
++            pvr_.ta_feed_src = src + off;
+             pvr_.write_burst(pvr::Core::kFifoBase + dst, words);
+         }
++        pvr_.ta_feed_src = 0;
+         ch2_ta_bytes += len;
+         // The YUV converter has its own end-of-transfer interrupt, separate from the channel-2 one
+         // below: hardware raises it when the converter has consumed the macroblocks it was told to
 diff --git a/runtime/src/pvr/core.cpp b/runtime/src/pvr/core.cpp
-index 8300e77..3d5d39d 100644
+index 8300e77..fbafef1 100644
 --- a/runtime/src/pvr/core.cpp
 +++ b/runtime/src/pvr/core.cpp
-@@ -226,6 +226,15 @@ void Core::write_burst(std::uint32_t addr, const std::uint32_t* words) {
+@@ -103,6 +103,8 @@ void Ta::feed(const std::uint32_t words[8]) {
+             }
+             if (current_list < 5)
+                 ++lists[current_list].polygons;
++            if (current_list == 2 && on_translucent_header)
++                on_translucent_header(stream.size() - 8);
+             const bool v64 = vertex_is_64(pcw);
+             if (header_is_64(pcw))
+                 state_ = v64 ? kPlhv64 : kPlhv32;
+@@ -117,6 +119,8 @@ void Ta::feed(const std::uint32_t words[8]) {
+                 ++lists[current_list].sprites;
+                 ++lists[current_list].chunks;
+             }
++            if (current_list == 2 && on_translucent_header)
++                on_translucent_header(stream.size() - 8);
+             state_ = kPlv64;  // sprite vertices are 64 bytes
+             return;
+         case kVertex:
+@@ -226,6 +230,15 @@ void Core::write_burst(std::uint32_t addr, const std::uint32_t* words) {
  // TA_YUV_TEX_BASE into the 64-bit view of texture memory as the texture path above does.
  void Core::yuv_word(std::uint32_t value) {
      ++yuv_words;
@@ -5964,7 +6370,7 @@ index 8300e77..3d5d39d 100644
      for (unsigned b = 0; b < 4; ++b) {
          if (yuv_fill_ >= yuv_mb_.size())
              break;
-@@ -255,14 +264,29 @@ void Core::yuv_macroblock() {
+@@ -255,14 +268,29 @@ void Core::yuv_macroblock() {
          return y[block * 64 + (row & 7u) * 8 + (x & 7u)];
      };
  
@@ -6194,7 +6600,7 @@ index e9c8dcc..d8d8455 100644
          if (now_ < best)
              now_ = best;
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index b900b12..0b271b2 100644
+index b900b12..c019bf3 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
 @@ -1,5 +1,6 @@
@@ -6212,7 +6618,7 @@ index b900b12..0b271b2 100644
  #ifdef DREAM_DEV_INTERPRETER
  #include "dream/runtime/devinterp/replay.h"
  #endif
-@@ -44,23 +46,53 @@ namespace {
+@@ -44,28 +46,72 @@ namespace {
  // address, so an address whose first entry is unsigned has no overlay at all and its answer is a
  // property of the table alone. Those are cached; everything else takes the slow path every time,
  // exactly as before.
@@ -6267,10 +6673,38 @@ index b900b12..0b271b2 100644
      }
  }
  
-@@ -83,6 +115,42 @@ void register_functions(const FunctionEntry* entries, std::size_t count) noexcep
-     });
- }
+ }  // namespace
  
++namespace {
++std::vector<std::pair<std::uint32_t, GuestFn>>& native_overrides() {
++    static std::vector<std::pair<std::uint32_t, GuestFn>> v;  // filled by static initialisers
++    return v;
++}
++std::size_t g_overrides_applied = 0;
++}  // namespace
++
++void register_native_override(std::uint32_t address, GuestFn fn) noexcept {
++    native_overrides().emplace_back(address & 0x1FFFFFFFu, fn);
++}
++
++std::size_t native_overrides_applied() noexcept { return g_overrides_applied; }
++
+ void register_functions(const FunctionEntry* entries, std::size_t count) noexcept {
+     flush_fn_cache();
+     // Keyed by physical address so every RAM alias (P0/P1/P2/P3) of an entry resolves in O(log n).
+@@ -81,6 +127,49 @@ void register_functions(const FunctionEntry* entries, std::size_t count) noexcep
+             return a.address < b.address;
+         return (a.signature != nullptr) > (b.signature != nullptr);
+     });
++    // SA-nx: native replacements (register_native_override).
++    for (const auto& [address, fn] : native_overrides())
++        for (auto& e : t)
++            if (e.address == address && e.fn != fn) {
++                e.fn = fn;
++                ++g_overrides_applied;
++            }
++}
++
 +namespace {
 +struct VariantTables {
 +    std::vector<std::pair<const FunctionEntry*, std::size_t>> tables;
@@ -6305,12 +6739,10 @@ index b900b12..0b271b2 100644
 +    for (const auto& kv : variants())
 +        out.push_back(kv.first);
 +    return out;
-+}
-+
+ }
+ 
  namespace {
- std::uint32_t g_interp_lo = 0, g_interp_hi = 0;
- // Individually hidden functions, in addition to the range. A contiguous range can say "somewhere
-@@ -144,11 +212,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+@@ -144,11 +233,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
      flush_fn_cache();  // same reason as the range above
  }
  
@@ -6388,7 +6820,7 @@ index b900b12..0b271b2 100644
      const auto& t = table();
      if (interpreted(phys))
          return nullptr;
-@@ -161,6 +293,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -161,6 +314,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
              // change while the table and the interpret set stand.
              slot.phys = phys;
              slot.fn = it->fn;
@@ -6397,7 +6829,7 @@ index b900b12..0b271b2 100644
              return it->fn;
          }
          if (!m)
-@@ -168,8 +302,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -168,8 +323,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
          bool same = true;
          for (std::uint32_t i = 0; same && i < it->signature_words; ++i)
              same = m->read16(address + 2 * i) == it->signature[i];
@@ -6412,7 +6844,7 @@ index b900b12..0b271b2 100644
      }
      return nullptr;
  }
-@@ -316,6 +455,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -316,6 +476,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
@@ -6424,7 +6856,7 @@ index b900b12..0b271b2 100644
          fn(c, m);
          return;
 diff --git a/runtime/src/system.cpp b/runtime/src/system.cpp
-index b9813e7..ce729df 100644
+index b9813e7..d4ce57f 100644
 --- a/runtime/src/system.cpp
 +++ b/runtime/src/system.cpp
 @@ -13,6 +13,8 @@
@@ -6436,6 +6868,35 @@ index b9813e7..ce729df 100644
      memory.map_p4(sh4::Intc::kBase, sh4::Intc::kBase + 0x10, &intc);
      memory.map_p4(sh4::Tmu::kBase, sh4::Tmu::kEnd, &tmu);
      memory.map_mmio(holly::Intc::kBase, holly::Intc::kEnd, &holly);
+@@ -152,9 +154,20 @@ void System::on_rte(sh4::Ctx& c, ::dream::Memory& m) {
+     // The emitted `return` after rte() unwinds to enter_exception's call site.
+ }
+ 
++void System::note_untranslated_bytes(::dream::Memory& m, std::uint32_t target) {
++    const std::uint32_t phys = target & 0x1FFFFFFFu;
++    if (untranslated_bytes.size() >= 512 || untranslated_bytes.count(phys))
++        return;
++    std::array<std::uint8_t, 32> b{};
++    for (std::uint32_t i = 0; i < 32; ++i)
++        b[i] = static_cast<std::uint8_t>(m.read8((phys | 0x80000000u) + i));
++    untranslated_bytes.emplace(phys, b);
++}
++
+ void System::on_untranslated(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t target) {
+     // Recorded either way: the log is what the next translate pass reads (ADR 2).
+     untranslated.record(target, 4, false);
++    note_untranslated_bytes(m, target);
+     if (untranslated_sites.size() < 32)
+         untranslated_sites.emplace_back(target, c.pc);
+ #ifdef DREAM_DEV_INTERPRETER
+@@ -177,6 +190,7 @@ void System::on_untranslated(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t targ
+ 
+ void System::on_resume(sh4::Ctx& c, ::dream::Memory& m, std::uint32_t pc) {
+     untranslated.record(pc, 4, false);
++    note_untranslated_bytes(m, pc);
+     if (untranslated_sites.size() < 32)
+         untranslated_sites.emplace_back(pc, c.pc);
+ #ifdef DREAM_DEV_INTERPRETER
 diff --git a/runtime/tests/test_arm7.cpp b/runtime/tests/test_arm7.cpp
 index 0a8ad16..efcbbd0 100644
 --- a/runtime/tests/test_arm7.cpp
@@ -6684,7 +7145,7 @@ index 471e93b..dcd53b1 100644
 +    CHECK(hits_b - b0 == 12);
 +}
 diff --git a/runtime/tests/test_pvr.cpp b/runtime/tests/test_pvr.cpp
-index d6e0738..3575775 100644
+index d6e0738..559dab5 100644
 --- a/runtime/tests/test_pvr.cpp
 +++ b/runtime/tests/test_pvr.cpp
 @@ -1,3 +1,4 @@
@@ -6692,7 +7153,7 @@ index d6e0738..3575775 100644
  #include <vector>
  
  #include "dream/runtime/pvr/core.h"
-@@ -152,3 +153,30 @@ TEST_CASE("pvr: STARTRENDER completes on the clock; texture and frame-buffer pat
+@@ -152,3 +153,56 @@ TEST_CASE("pvr: STARTRENDER completes on the clock; texture and frame-buffer pat
          m.write32(0x10000000u + 4 * i, i == 0 ? Rig::pcw(pvr::kEndOfList, pvr::kOpaque) : 0);
      CHECK(r.core.ta.chunks == before + 1);
  }
@@ -6722,6 +7183,32 @@ index d6e0738..3575775 100644
 +    CHECK(fast.first == slow.first);
 +    CHECK(fast.second == slow.second);
 +    CHECK(std::count(fast.first.begin(), fast.first.end(), 0) < 64);  // it wrote the texture
++}
++
++TEST_CASE("pvr: the translucent header hook sees translucent polygons and sprites only (SA-nx)") {
++    Rig r;
++    std::vector<std::size_t> seen;
++    r.core.ta.on_translucent_header = [&](std::size_t at) { seen.push_back(at); };
++    r.list_init();
++    r.chunk(Rig::pcw(pvr::kPolygonOrModVol, pvr::kOpaque, 0x02));
++    r.chunk(Rig::pcw(pvr::kVertex, 0, 0, true));
++    r.chunk(Rig::pcw(pvr::kEndOfList, pvr::kOpaque));
++    r.chunk(Rig::pcw(pvr::kPolygonOrModVol, pvr::kTranslucent, 0x02));  // chunk 3
++    r.chunk(Rig::pcw(pvr::kVertex, 0, 0, true));
++    r.chunk(Rig::pcw(pvr::kSprite, pvr::kTranslucent, 0x08));  // chunk 5
++    r.chunk(Rig::pcw(pvr::kVertex, 0, 0, true));
++    r.chunk(Rig::pcw(pvr::kVertex, 0, 0, true));
++    r.chunk(Rig::pcw(pvr::kEndOfList, pvr::kTranslucent));
++    REQUIRE(seen.size() == 2);
++    CHECK(seen[0] == 3 * 8);
++    CHECK(seen[1] == 5 * 8);
++    // A burst into RAM reports to on_sq_ram; the FIFO bursts above did not.
++    std::vector<std::uint32_t> rams;
++    r.sys.memory.on_sq_ram = [&](std::uint32_t dest, const std::uint32_t*) { rams.push_back(dest); };
++    r.sys.memory.set_qacr(0, 3u << 2);  // area 3: system RAM
++    r.sys.memory.sq_flush(0xE0000040u);
++    REQUIRE(rams.size() == 1);
++    CHECK((rams[0] & 0x1FFFFFFFu) == 0x0C000040u);
 +}
 diff --git a/runtime/tests/test_system.cpp b/runtime/tests/test_system.cpp
 index 947fb1b..5dfc2e0 100644
@@ -7598,7 +8085,7 @@ index 26c7374..e760420 100644
  }
  
 diff --git a/translator/src/main.cpp b/translator/src/main.cpp
-index 4ef6d21..796ef8e 100644
+index 4ef6d21..ce1fc0c 100644
 --- a/translator/src/main.cpp
 +++ b/translator/src/main.cpp
 @@ -3,7 +3,7 @@
@@ -7644,7 +8131,53 @@ index 4ef6d21..796ef8e 100644
          else if (!std::strcmp(argv[i], "--functions") && i + 1 < argc) {
              std::string err;
              if (!dream::translator::load_functions_json(argv[++i], fns, err)) {
-@@ -463,6 +475,8 @@ int cmd_game(int argc, char** argv) {
+@@ -382,6 +394,20 @@ void write_functions_json(const std::string& path,
+     o << "  ]\n}\n";
+ }
+ 
++// SA-nx: writes `text` to `path` unless the file already holds exactly that.
++void write_if_changed(const std::string& path, const std::string& text) {
++    {
++        std::ifstream in(path, std::ios::binary);
++        if (in) {
++            std::string old((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++            if (old == text)
++                return;
++        }
++    }
++    std::ofstream o(path, std::ios::binary);
++    o << text;
++}
++
+ // Translate one image view (the main binary or a relocated copy) into DIR/<stem>.{cpp,h,json}.
+ int translate_view(const dream::translator::GameConfig& cfg, const dream::translator::Image& img,
+                    const std::vector<std::uint32_t>& seeds, const std::string& stem,
+@@ -414,16 +440,14 @@ int translate_view(const dream::translator::GameConfig& cfg, const dream::transl
+     }
+     const auto res = dream::translator::emit_unit(img, fns, opt);
+     const auto base = out_dir / stem;
+-    {
+-        std::ofstream o(base.string() + ".cpp");
+-        o << res.source;
+-        for (std::size_t i = 0; i < res.extra_sources.size(); ++i) {
+-            std::ofstream op(base.string() + "_part" + std::to_string(i + 1) + ".cpp");
+-            op << res.extra_sources[i];
+-        }
+-        std::ofstream h(base.string() + ".h");
+-        h << res.header;
+-    }
++    // SA-nx: a unit whose text has not changed is left alone, file time and all. The build runs
++    // the translation with restat, so only the units a config change actually touched are
++    // compiled again (a seed in the main program no longer recompiles every module and cutscene).
++    write_if_changed(base.string() + ".cpp", res.source);
++    for (std::size_t i = 0; i < res.extra_sources.size(); ++i)
++        write_if_changed(base.string() + "_part" + std::to_string(i + 1) + ".cpp",
++                         res.extra_sources[i]);
++    write_if_changed(base.string() + ".h", res.header);
+     write_functions_json(base.string() + ".functions.json", fns, r);
+     {
+         std::ofstream rep(base.string() + ".report.txt");
+@@ -463,6 +487,8 @@ int cmd_game(int argc, char** argv) {
              opt.trace = true;
          else if (!std::strcmp(argv[i], "--no-irq"))
              opt.irq_checks = false;
@@ -7653,7 +8186,7 @@ index 4ef6d21..796ef8e 100644
          else if (!std::strcmp(argv[i], "--parts") && i + 1 < argc)
              opt.parts = static_cast<unsigned>(std::max(1, std::atoi(argv[++i])));
          else
-@@ -476,6 +490,8 @@ int cmd_game(int argc, char** argv) {
+@@ -476,6 +502,8 @@ int cmd_game(int argc, char** argv) {
          std::fprintf(stderr, "%s\n", err.c_str());
          return 2;
      }
@@ -7662,7 +8195,7 @@ index 4ef6d21..796ef8e 100644
      dream::translator::Image img;
      if (!load_image(cfg.binary_path.string(), cfg.link_address, img)) {
          std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
-@@ -535,9 +551,11 @@ int cmd_game(int argc, char** argv) {
+@@ -535,9 +563,11 @@ int cmd_game(int argc, char** argv) {
          if (rel.no_fold)
              view_opt.fold_literals = false;
          view_opt.overlay = rel.overlay;

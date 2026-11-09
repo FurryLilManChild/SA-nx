@@ -27,6 +27,19 @@ else()
   set_source_files_properties(${_sanx_full_opt} PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
 endif()
 
+# SA-nx Test 2.3: the movie player's IDCT (0x0CEB1504) run natively, checked against the
+# translation on real calls (native/movie_idct.cpp, native/native_movie.cpp).
+if(TARGET sonicadv_boot)
+  set(_native ${CMAKE_CURRENT_SOURCE_DIR}/native/movie_idct.cpp
+              ${CMAKE_CURRENT_SOURCE_DIR}/native/native_movie.cpp)
+  target_sources(sonicadv_boot PRIVATE ${_native})
+  if(MSVC)
+    set_source_files_properties(${_native} PROPERTIES COMPILE_OPTIONS "/O2")
+  else()
+    set_source_files_properties(${_native} PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
+  endif()
+endif()
+
 # Every guest call, and every jump between translated functions, is a host call. Windows gives the
 # main thread 1 MB of stack; play test 2026-10-29 died with 0xC00000FD (stack overflow) at Emerald
 # Coast's mid-stage load. 256 MB, reserved not committed, so it costs nothing unless used.

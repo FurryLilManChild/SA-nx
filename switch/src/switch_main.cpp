@@ -614,6 +614,9 @@ int main(int argc, char** argv) {
     // counters). A release leaves it out: building it took about a minute after quitting, even
     // when it was not written to a file, so a release also skips building it (--quick-exit).
     g_args.insert(g_args.end(), {"--report", "sonicadv_report.txt"});
+    // Test 2.3: record which game code sends each translucent polygon (the right stick hides
+    // one source at a time), to find the character drawing.
+    g_args.push_back("--ta-tags");
 #else
     g_args.push_back("--quick-exit");
 #endif

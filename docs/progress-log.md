@@ -2,6 +2,38 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-09: Test 2.3 (seeds, translucent polygon sources, native movie IDCT)
+
+- Seeds: the US Tails run (sonicadv_report.txt, 36,423 untranslated calls) reached 35 entries in
+  the main program discovery had missed, most called through 0x8C.. pointers (0x0C07C17A x9466,
+  0x0C0208E0 and 0x0C02090E x4364, 0x0C04F6A0 x3363, 0x0C07CAD0 x139, 0x0C049DA0 x131, ...): each
+  is right after an rts or padding, or a return point after a jsr. Mapped back to PAL with
+  map_variant's Image (US->PAL, each one checked by mapping forward again), added to
+  sonicadv.toml, and the US config regenerated (it keeps the 2,501 PAL-found seeds). The hot module
+  targets in the same run (0x0C91201A x9472, 0x0C904A40 x4364) have the same counts as main
+  program misses and look like return points of calls into them; they could not be tied to one
+  module from the files alone. The report now prints, for each untranslated target outside the
+  main program, the overlay file whose bytes were there when it was first reached (on the PC) or
+  the bytes themselves (on the Switch, where the files are on the disc).
+- Translucent polygon sources (--ta-tags, on in test builds): for every translucent polygon or
+  sprite header the TA receives, the game code that wrote it (PR and the first four return
+  addresses on the guest stack), whether it came straight from the CPU or by channel 2 DMA from a
+  RAM buffer written with store-queue bursts. Top sources to the log every 10 guest seconds and to
+  the report; the right stick hides the next source (blend zero/one), its number after the FPS
+  counter. Unit test: the TA hook fires for translucent polygons and sprites only, and RAM bursts
+  reach on_sq_ram.
+- Movie IDCT (MOVIE.BIN 0x0CEB1504, 33% of the game thread in movies): native version in
+  games/sonicadv/native/movie_idct.cpp, the same arithmetic in the same order (FTRV in double as
+  ops.h, two lanes on GCC), guest memory through one host pointer. Host differential against the
+  generated function: 0 of 300 random calls differ (registers, FPU registers, FPUL, T, cycles, all
+  16 MB of RAM), 2.1-2.6x faster on x86. Installed with a new runtime hook,
+  register_native_override (the table entry keeps its signature and resume function). In the game
+  the first 20,000 calls and one in 64 after are run both ways with the stores journalled and
+  compared; a difference switches it off and restores the translation's result (checked by
+  injecting a fault: caught on the first call, results equal to the translation).
+- dream-translate now leaves an unchanged unit's file alone (the custom command has restat), so a
+  config change recompiles only the units it changed.
+
 ## 2026-11-09: release 0.6.0 (what Test 2.2 played, PAL and US)
 
 - Mark asked for a release of the Test 2.2 build for the US disc and the stick settings, with

@@ -79,7 +79,44 @@ extra = [0x0C02F308, 0x0C02F312, 0x0C02F31C, 0x0C02F326, 0x0C02F32C, 0x0C046210,
          0x0C647AD0,  # Emerald Coast run 2026-10-29: 1
          0x0C647AE2,  # Emerald Coast run 2026-10-29: 1
          0x0C65E0DC,  # Emerald Coast run 2026-10-29: 1
-         0x0C65E3B8]  # Emerald Coast run 2026-10-29: 1
+         0x0C65E3B8,  # Emerald Coast run 2026-10-29: 1
+         # Test 2.3: entries the US Tails run (2026-11-09) reached untranslated, mapped back
+         # to PAL (US address and calls; most were called through 0x8C.. pointers)
+         0x0C0208E0,  # US 0x0C0208E0 x4364
+         0x0C02090E,  # US 0x0C02090E x4364
+         0x0C020AE0,  # US 0x0C020AE0 x1
+         0x0C049214,  # US 0x0C049214 x5
+         0x0C04921A,  # US 0x0C04921A x5
+         0x0C049528,  # US 0x0C049528 x7
+         0x0C049DA0,  # US 0x0C049DA0 x131
+         0x0C049EDA,  # US 0x0C049EDA x29
+         0x0C049F40,  # US 0x0C049F40 x24
+         0x0C049F56,  # US 0x0C049F56 x5
+         0x0C04A168,  # US 0x0C04A168 x6
+         0x0C04A220,  # US 0x0C04A220 x1
+         0x0C04A3B6,  # US 0x0C04A3B6 x3
+         0x0C04A3C6,  # US 0x0C04A3C6 x5
+         0x0C04A3E4,  # US 0x0C04A3E4 x1
+         0x0C04A45A,  # US 0x0C04A45A x6
+         0x0C04B1C0,  # US 0x0C04B1C0 x2
+         0x0C04B2B0,  # US 0x0C04B2B0 x1
+         0x0C04B308,  # US 0x0C04B308 x4
+         0x0C04B39E,  # US 0x0C04B39E x17
+         0x0C04B3B4,  # US 0x0C04B3B4 x21
+         0x0C04B404,  # US 0x0C04B404 x1
+         0x0C04F6A0,  # US 0x0C04F6A0 x3363
+         0x0C0585A6,  # US 0x0C0585A6 x1
+         0x0C05F00C,  # US 0x0C05F00C x1
+         0x0C07BFFA,  # US 0x0C07BFFA x8
+         0x0C07C17A,  # US 0x0C07C17A x9466
+         0x0C07CAD0,  # US 0x0C07CAD0 x139
+         0x0C07D226,  # US 0x0C07D226 x1
+         0x0C090410,  # US 0x0C090410 x12
+         0x0C09042C,  # US 0x0C09042C x2
+         0x0C090686,  # US 0x0C090686 x1
+         0x0C094688,  # US 0x0C094688 x125
+         0x0C0AB530,  # US 0x0C0AB530 x34
+         0x0C0BE720]  # US 0x0C0BE720 x1
 
 # Exception and interrupt stubs the startup code copies below the program (VBR = 0x8C000000).
 # Each 0x34-byte stub saves r0 into its own literal pool before reading EXPEVT/INTEVT, so the

@@ -1,9 +1,13 @@
 diff --git a/runtime/include/dream/runtime/mem/dc_memory.h b/runtime/include/dream/runtime/mem/dc_memory.h
-index da93d0a..15ae621 100644
+index da93d0a..e3f609a 100644
 --- a/runtime/include/dream/runtime/mem/dc_memory.h
 +++ b/runtime/include/dream/runtime/mem/dc_memory.h
-@@ -150,14 +150,14 @@ public:
+@@ -148,16 +148,18 @@ public:
+     // guest's cycle count here, so a timer or drive status read sees the present rather than the
+     // last interrupt poll (Katana's syTmrGetCount busy-waits on TMU0 between polls).
      std::function<void()> on_device_access;
++    // SA-nx (Test 2.3, --ta-tags): every store-queue burst that lands in RAM (dest, its 8 words).
++    std::function<void(std::uint32_t dest, const std::uint32_t* words)> on_sq_ram;
      // Development write watch: stores that touch [watch_lo, watch_hi) call on_watch_write with
      // the guest address and value (the launcher's DREAM_WATCH_WRITE).
 -    std::uint32_t watch_lo = 1, watch_hi = 0;
@@ -19,7 +23,7 @@ index da93d0a..15ae621 100644
      std::uint64_t write_hash = 0, writes_hashed = 0;
      // Once the hashes say which frame diverged, the individual writes in a window around it say
      // which one: [log_from, log_to) are reported with their index, so two runs can be diffed line
-@@ -182,7 +182,7 @@ public:
+@@ -182,7 +184,7 @@ public:
          std::uint64_t old_value, new_value;
          unsigned size;
      };
@@ -28,7 +32,7 @@ index da93d0a..15ae621 100644
      bool journal_saw_device = false;
      std::vector<WriteRecord> journal;
      // Puts back what the journalled stores overwrote, newest first, and clears the journal.
-@@ -238,15 +238,16 @@ public:
+@@ -238,15 +240,16 @@ public:
      void set_qacr(unsigned n, std::uint32_t v) noexcept { qacr_[n & 1] = v & 0x1Cu; }
      std::uint32_t qacr(unsigned n) const noexcept { return qacr_[n & 1]; }
  
@@ -54,7 +58,7 @@ index da93d0a..15ae621 100644
      void sq_write32(std::uint32_t a, std::uint32_t v) override;
      void sq_flush(std::uint32_t a) override;
  
-@@ -277,6 +278,7 @@ private:
+@@ -277,6 +280,7 @@ private:
      bool vram_dirty_any_ = false;
      std::vector<Range> phys_mmio_, p4_mmio_;
      std::uint32_t sq_[2][8]{};
@@ -239,7 +243,7 @@ index 6680b09..1eed387 100644
      }
      void sq_write32(std::uint32_t a, std::uint32_t v) override { sq_[(a >> 2) & 15] = v; }
 diff --git a/runtime/src/mem/dc_memory.cpp b/runtime/src/mem/dc_memory.cpp
-index bcc1279..8486c7e 100644
+index bcc1279..317210b 100644
 --- a/runtime/src/mem/dc_memory.cpp
 +++ b/runtime/src/mem/dc_memory.cpp
 @@ -64,7 +64,12 @@ DcMemory::DcMemory()
@@ -352,6 +356,15 @@ index bcc1279..8486c7e 100644
      if (t.kind == Target::kBytes) {
          if (journaling)
              for (unsigned i = 0; i < 8; ++i) {
+@@ -363,6 +386,8 @@ void DcMemory::sq_flush(std::uint32_t a) {
+             }
+         std::memcpy(t.bytes, words, 32);
+         note_vram_write(t.bytes, 32);
++        if (on_sq_ram)
++            on_sq_ram(dest, words);
+         // A burst into RAM is eight stores as far as anything watching memory is concerned. Until
+         // this was here the hash and the watch saw none of them.
+         if (tracing_writes())
 diff --git a/runtime/tests/test_memory.cpp b/runtime/tests/test_memory.cpp
 index c12552c..604ee9e 100644
 --- a/runtime/tests/test_memory.cpp
