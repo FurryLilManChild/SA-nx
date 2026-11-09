@@ -27,6 +27,7 @@ or, where a single value is required, keep the PAL value with a "# UNMAPPED" not
 """
 import argparse
 import collections
+import json
 import os
 import re
 import sys
@@ -155,7 +156,21 @@ def main() -> int:
     ap.add_argument("us_toml")
     ap.add_argument("--to-root", required=True, help="US extraction, as fs/ modules/ events/")
     ap.add_argument("--report", required=True)
+    ap.add_argument("--pal-gen", help="the PAL translation's gen/ folder: every function the PAL"
+                    " translation found is carried over as a seed (test 2.2 showed the US"
+                    " discovery missing module functions the PAL runs had found)")
+    ap.add_argument("--us-gen", help="the US translation's gen/ folder: seeds it already finds"
+                    " are left out, keeping the config small")
     a = ap.parse_args()
+
+    def entries_of(gen, stem):
+        f = os.path.join(gen, stem + ".functions.json") if gen else None
+        if not f or not os.path.exists(f):
+            return set()
+        return {int(x["entry"], 16) for x in json.load(open(f))["functions"]}
+
+    dest_count = collections.Counter()
+    seeded = 0
 
     pal_dir = os.path.dirname(os.path.abspath(a.pal_toml))
     us_root = os.path.abspath(a.to_root)
@@ -193,6 +208,31 @@ def main() -> int:
             part = part.replace(f'file = "{fm.group(1)}"', f'file = "{us_path(fm.group(1))}"')
         new_lines = []
         size_fix = None
+        # Seeds from the PAL translation for this unit (main program or a file relocation).
+        seeds = []
+        if a.pal_gen and (dm or part.startswith("[functions]")):
+            if dm:
+                d = int(dm.group(1), 16)
+                dest_count[d] += 1
+                n = dest_count[d]
+                pal_stem = f"sonicadv_reloc_{d:08x}" + ("" if n == 1 else f"_{n}")
+                us_stem = f"sonicadv_us_reloc_{d:08x}" + ("" if n == 1 else f"_{n}")
+            else:
+                pal_stem, us_stem = "sonicadv", "sonicadv_us"
+            if fm or not dm:
+                have = entries_of(a.us_gen, us_stem)
+                have_phys = {x & 0x1FFFFFFF for x in have}
+                saved = img.last_shift
+                for e in sorted(entries_of(a.pal_gen, pal_stem)):
+                    nweak = len(img.weak)
+                    r = img.map(e)
+                    if len(img.weak) != nweak:
+                        img.weak.pop()  # only strong matches become seeds
+                        continue
+                    if r is not None and (r & 0x1FFFFFFF) not in have_phys:
+                        seeds.append(r)
+                img.last_shift = saved
+                seeded += len(seeds)
         if fm and dm:
             # The US file's code region: the PAL size grown by however much longer the US file
             # is, within the file (cutscene files and modules move by a few bytes to a few KB).
@@ -288,6 +328,16 @@ def main() -> int:
             else:
                 new_lines.append(new_code)
         block = "\n".join(new_lines)
+        if seeds:
+            seed_text = ", ".join(f"0x{x:08X}" for x in seeds)
+            key = "entries" if dm else "extra"
+            m = re.search(rf"(?m)^{key} = \[", block)
+            note = (f"\n# {len(seeds)} seed(s) carried over from functions the PAL translation"
+                    f" found (tools/map_variant.py --pal-gen)\n")
+            if m:
+                block = block[:m.end()] + seed_text + ",\n    " + block[m.end():]
+            else:
+                block = block.rstrip("\n") + note + f"{key} = [{seed_text}]\n\n"
         if size_fix:
             block = block.replace(size_fix[0], size_fix[1], 1)
         out.append(block)
@@ -305,7 +355,7 @@ def main() -> int:
     with open(a.report, "w") as f:
         hdr = sum(len(img.header) for img in images.values())
         f.write(f"mapped {mapped} ({hdr} from module/cutscene header tables, {len(weak)} weak),"
-                f" unmapped {unmapped}\n")
+                f" unmapped {unmapped}; {seeded} seeds from the PAL translation\n")
         for name, ad, why in weak:
             f.write(f"WEAK {name}: 0x{ad:08X} ({why})\n")
         f.write("\n".join(report) + "\n")
