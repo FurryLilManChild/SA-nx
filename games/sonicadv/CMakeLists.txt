@@ -43,6 +43,10 @@ if(NINTENDO_SWITCH)
   # switch-test28: a cache in front of libgcc's FDE search for C++ exception unwinding
   # (switch_main.cpp, __wrap__Unwind_Find_FDE).
   target_link_options(sonicadv_boot PRIVATE -Wl,--wrap=_Unwind_Find_FDE)
+  # Test 2.2: with the US version the ELF's debug information passed 4 GB and the linker (the
+  # Windows build under Wine on a cloud machine) wrote a broken file. Compressed, it is a fraction
+  # of that, and addr2line still reads it for crash offsets.
+  target_link_options(sonicadv_boot PRIVATE -Wl,--compress-debug-sections=zlib)
   set(SANX_VERSION "0.5.1" CACHE STRING "Version shown in the homebrew menu")
   # A release: no end-of-run report, no profiler, stock clocks on the first run (switch_main.cpp).
   option(SANX_RELEASE "Build the Switch launcher as a release" OFF)
