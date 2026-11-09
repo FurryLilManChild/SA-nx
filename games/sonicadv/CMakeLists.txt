@@ -47,7 +47,7 @@ if(NINTENDO_SWITCH)
   # Windows build under Wine on a cloud machine) wrote a broken file. Compressed, it is a fraction
   # of that, and addr2line still reads it for crash offsets.
   target_link_options(sonicadv_boot PRIVATE -Wl,--compress-debug-sections=zlib)
-  set(SANX_VERSION "0.5.1" CACHE STRING "Version shown in the homebrew menu")
+  set(SANX_VERSION "0.6.0" CACHE STRING "Version shown in the homebrew menu")
   # A release: no end-of-run report, no profiler, stock clocks on the first run (switch_main.cpp).
   option(SANX_RELEASE "Build the Switch launcher as a release" OFF)
   if(SANX_RELEASE)

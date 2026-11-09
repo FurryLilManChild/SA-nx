@@ -2,6 +2,24 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-09: release 0.6.0 (what Test 2.2 played, PAL and US)
+
+- Mark asked for a release of the Test 2.2 build for the US disc and the stick settings, with
+  dead zone 0 and square stick as defaults. Versioned 0.6.0 (new features, not only fixes).
+- Defaults: `Bindings::deadzone_percent` 0 (was 20), `stick_square` true. A version 1 controls
+  file (0.5.x) always wrote `deadzone = 20` as its old default, so its dead zone is ignored like
+  its trigger_ramp; version 2 files (Test 2.1 and 2.2) keep theirs. Tests updated and added; the
+  render tests pass (84 cases, 1638 assertions). Patch 0022 recut.
+- Built from Test 2.2's sources with the US config as tested (90e0971, before the 2,501 seeds of
+  d15a309, so nothing retranslated): 11 of 11 steps, SANX_RELEASE=ON, SANX_VERSION 0.6.0. NRO
+  514,031,647 bytes, sha256 6f43316ba35960cf95903e9fe3282b8a71205170bf17c643109535bb06358664.
+- Zip (NRO, both tomls with SD paths, README.txt, COPYING.txt, disc/PUT_YOUR_DISC_HERE.txt for
+  either disc) 153,884,038 bytes, sha256
+  07863502436de7867829a8758abe7f6fa56a572348f4c41e1792aa6dd972d29f, in `out\release\` with
+  release_notes_0.6.0.md. US track SHA-256s added to the README (hashed on Mark's PC).
+- Next: Test 2.3 (report seeds and the mapper's seeds, the CHARACTERS translucency diagnostic,
+  a native fn_0ceb1504).
+
 ## 2026-11-09: test2.2 built: PAL and US in one NRO
 
 - US disc: Mark's GDI is US v1.005 (MK-51000, 1999-10-05); the (Rev A) CHD beside it is a later

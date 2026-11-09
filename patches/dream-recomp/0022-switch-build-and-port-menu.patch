@@ -776,26 +776,32 @@ index 8dfec0a..de9b125 100644
  # A standalone check that the whole graphics stack works on this machine: opens a window and draws
  # a triangle. Not a test (it needs a display); run it by hand.
 diff --git a/render/include/dream/render/input.h b/render/include/dream/render/input.h
-index e9d1aa2..e9cedca 100644
+index e9d1aa2..97c6d47 100644
 --- a/render/include/dream/render/input.h
 +++ b/render/include/dream/render/input.h
-@@ -80,9 +80,12 @@ struct Bindings {
+@@ -78,11 +78,16 @@ struct Bindings {
+     DeviceBindings keyboard;
+     DeviceBindings gamepad;
      // Percent of an axis's travel ignored around the centre. A worn stick steers on its own
-     // without one, which reads as a physics bug rather than as a hardware fault.
-     int deadzone_percent = 20;
+-    // without one, which reads as a physics bug rather than as a hardware fault.
+-    int deadzone_percent = 20;
 -    // Ramp a digital trigger to full over about 150 ms rather than jumping. A keyboard accelerator
 -    // is otherwise fully down or fully up, which for a driving game is most of why a pad matters.
 -    bool trigger_ramp = true;
++    // without one, which reads as a physics bug rather than as a hardware fault. SA-nx: 0 by
++    // default, the Dreamcast's own feel; CONTROLS > DEAD ZONE raises it for a drifting stick.
++    int deadzone_percent = 0;
 +    // Ramp a digital trigger to full over about 150 ms rather than jumping. Off by default: a
 +    // pressed trigger reads fully pressed at once (SA-nx). The CONTROLS screen can turn it on.
 +    bool trigger_ramp = false;
 +    // SA-nx: stretch the round stick so full diagonals reach the corners (x and y both full), as on
-+    // a square-gated stick. Off by default; CONTROLS > STICK SHAPE.
-+    bool stick_square = false;
++    // a square-gated stick, which the Dreamcast pad's stick reads as. On by default (SA-nx 0.6.0);
++    // CONTROLS > STICK SHAPE.
++    bool stick_square = true;
  
      static Bindings defaults();
      std::string to_text() const;
-@@ -92,4 +95,12 @@ struct Bindings {
+@@ -92,4 +97,12 @@ struct Bindings {
      static Bindings from_text(std::string_view text, std::string* warnings = nullptr);
  };
  
@@ -1376,7 +1382,7 @@ index b2489da..eaeee40 100644
      // third of it unsampled, which is the aliasing this exists to remove. The small bias keeps a
      // 1:1 image on the single-tap path, where any averaging would only blur it -- without it a
 diff --git a/render/src/input.cpp b/render/src/input.cpp
-index 3e9a7c4..4b7cf4b 100644
+index 3e9a7c4..44834e1 100644
 --- a/render/src/input.cpp
 +++ b/render/src/input.cpp
 @@ -2,6 +2,7 @@
@@ -1400,17 +1406,26 @@ index 3e9a7c4..4b7cf4b 100644
      auto section = [&o](const char* name, const DeviceBindings& d) {
          o << "\n[" << name << "]\n";
          for (unsigned i = 0; i < kPadControlCount; ++i) {
-@@ -196,6 +198,9 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+@@ -196,6 +198,10 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
              *warnings += s + "\n";
      };
      DeviceBindings* current = nullptr;
 +    // Version 1 files wrote trigger_ramp = 1 as the old default whenever any control changed, so
-+    // their ramp setting is not a player's choice and is ignored.
++    // their ramp setting is not a player's choice and is ignored. They wrote the old 20% dead zone
++    // the same way, so it is ignored too and the current default (0) applies.
 +    int version = 1;
      std::string line;
      std::istringstream in{std::string(text)};
      unsigned lineno = 0;
-@@ -233,8 +238,17 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+@@ -228,13 +234,24 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+                 // Clamped rather than rejected: a nonsensical number should not cost the whole
+                 // file, and a 100% dead zone would mean a stick that never moves.
+                 try {
+-                    out.deadzone_percent = std::clamp(std::stoi(value), 0, 90);
++                    const int pct = std::clamp(std::stoi(value), 0, 90);
++                    if (version >= 2)
++                        out.deadzone_percent = pct;
+                 } catch (...) {
                      warn("line " + std::to_string(lineno) + ": deadzone is not a number: " + value);
                  }
              } else if (key == "trigger_ramp") {
@@ -1430,7 +1445,7 @@ index 3e9a7c4..4b7cf4b 100644
                  warn("line " + std::to_string(lineno) + ": unknown setting " + key);
              }
              continue;
-@@ -258,4 +272,19 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
+@@ -258,4 +275,19 @@ Bindings Bindings::from_text(std::string_view text, std::string* warnings) {
      return out;
  }
  
@@ -3342,7 +3357,7 @@ index 0000000..0431e48
 +
 +}  // namespace dream::render::vk
 diff --git a/render/tests/test_input.cpp b/render/tests/test_input.cpp
-index b46d2cc..49e91e1 100644
+index b46d2cc..982fee9 100644
 --- a/render/tests/test_input.cpp
 +++ b/render/tests/test_input.cpp
 @@ -2,6 +2,7 @@
@@ -3368,10 +3383,24 @@ index b46d2cc..49e91e1 100644
      for (unsigned i = 0; i < kPadControlCount; ++i) {
          const auto c = static_cast<PadControl>(i);
          CHECK(b.keyboard[c] == a.keyboard[c]);
-@@ -109,3 +110,54 @@ TEST_CASE("a silly dead zone is clamped, not obeyed") {
-     CHECK(Bindings::from_text("deadzone = 5000\n").deadzone_percent == 90);
-     CHECK(Bindings::from_text("deadzone = -3\n").deadzone_percent == 0);
+@@ -90,7 +91,7 @@ TEST_CASE("a damaged file leaves the game playable") {
+     CHECK(b.keyboard[PadControl::A].text() == "key:Space");       // the good line applied
+     CHECK(b.keyboard[PadControl::B].text() == "key:X");           // the bad one kept its default
+     CHECK(b.keyboard[PadControl::Start].text() == "key:Return");  // absent lines keep theirs
+-    CHECK(b.deadzone_percent == 20);
++    CHECK(b.deadzone_percent == 0);
+     CHECK(w.find("banana") != std::string::npos);
+     CHECK(w.find("nonsense") != std::string::npos);
+     CHECK(w.find("notacontrol") != std::string::npos);
+@@ -106,6 +107,67 @@ TEST_CASE("an empty value unbinds deliberately, and survives a round trip") {
  }
+ 
+ TEST_CASE("a silly dead zone is clamped, not obeyed") {
+-    CHECK(Bindings::from_text("deadzone = 5000\n").deadzone_percent == 90);
+-    CHECK(Bindings::from_text("deadzone = -3\n").deadzone_percent == 0);
++    CHECK(Bindings::from_text("version = 2\ndeadzone = 5000\n").deadzone_percent == 90);
++    CHECK(Bindings::from_text("version = 2\ndeadzone = -3\n").deadzone_percent == 0);
++}
 +
 +TEST_CASE("bindings: triggers are full at once unless the player turns the ramp on") {
 +    CHECK(Bindings::defaults().trigger_ramp == false);
@@ -3416,15 +3445,25 @@ index b46d2cc..49e91e1 100644
 +    CHECK(y == doctest::Approx(1.0f));
 +}
 +
-+TEST_CASE("bindings: stick shape is saved and defaults to round") {
++TEST_CASE("bindings: stick shape is saved and defaults to square") {
 +    using dream::render::Bindings;
-+    CHECK(Bindings::defaults().stick_square == false);
++    CHECK(Bindings::defaults().stick_square == true);
 +    Bindings a = Bindings::defaults();
-+    a.stick_square = true;
-+    CHECK(Bindings::from_text(a.to_text()).stick_square == true);
++    a.stick_square = false;
++    CHECK(Bindings::from_text(a.to_text()).stick_square == false);
 +}
++
++TEST_CASE("bindings: a version 1 file's dead zone is the old default and is ignored") {
++    using dream::render::Bindings;
++    CHECK(Bindings::defaults().deadzone_percent == 0);
++    CHECK(Bindings::from_text("deadzone = 20\n").deadzone_percent == 0);
++    CHECK(Bindings::from_text("version = 2\ndeadzone = 25\n").deadzone_percent == 25);
++    Bindings a = Bindings::defaults();
++    a.deadzone_percent = 15;
++    CHECK(Bindings::from_text(a.to_text()).deadzone_percent == 15);
+ }
 diff --git a/render/tests/test_input_menu.cpp b/render/tests/test_input_menu.cpp
-index e3100ee..8017c1c 100644
+index e3100ee..df55130 100644
 --- a/render/tests/test_input_menu.cpp
 +++ b/render/tests/test_input_menu.cpp
 @@ -91,7 +91,7 @@ TEST_CASE("escape leaves the capture first and the screen second") {
@@ -3457,11 +3496,11 @@ index e3100ee..8017c1c 100644
 +TEST_CASE("the stick shape row toggles round and square") {
 +    InputMenu m = opened();
 +    m.move(-1);  // the row above the first binding
-+    CHECK_FALSE(m.bindings().stick_square);
-+    m.adjust(1, 2);
 +    CHECK(m.bindings().stick_square);
-+    CHECK(m.activate() == InputMenu::Action::Save);
++    m.adjust(1, 2);
 +    CHECK_FALSE(m.bindings().stick_square);
++    CHECK(m.activate() == InputMenu::Action::Save);
++    CHECK(m.bindings().stick_square);
 +}
 diff --git a/render/tests/test_port_menu.cpp b/render/tests/test_port_menu.cpp
 new file mode 100644
