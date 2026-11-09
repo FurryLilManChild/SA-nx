@@ -18,6 +18,7 @@
 
 #include "dream/runtime/mem/dc_memory.h"
 #include "dream/runtime/sh4/abi.h"
+#include "dream/runtime/sh4/native_override.h"
 #include "dream/runtime/sh4/ops.h"
 
 namespace dream::gen::sonicadv {

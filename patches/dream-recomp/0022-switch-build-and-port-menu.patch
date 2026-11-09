@@ -5720,7 +5720,7 @@ index 9a7ec21..1a51622 100644
  
  }  // namespace dream::sched
 diff --git a/runtime/include/dream/runtime/sh4/abi.h b/runtime/include/dream/runtime/sh4/abi.h
-index a1db0ca..99e4698 100644
+index a1db0ca..b3e8639 100644
 --- a/runtime/include/dream/runtime/sh4/abi.h
 +++ b/runtime/include/dream/runtime/sh4/abi.h
 @@ -4,6 +4,7 @@
@@ -5731,7 +5731,7 @@ index a1db0ca..99e4698 100644
  #include <utility>
  #include <vector>
  
-@@ -39,6 +40,25 @@ struct NonLocalReturn {
+@@ -39,6 +40,16 @@ struct NonLocalReturn {
  // generates. Tables from several units are merged.
  void register_functions(const FunctionEntry* entries, std::size_t count) noexcept;
  
@@ -5744,15 +5744,6 @@ index a1db0ca..99e4698 100644
 +bool select_variant(const std::string& variant) noexcept;
 +// The names registered, sorted; empty for a program built from one version.
 +std::vector<std::string> registered_variants();
-+
-+// SA-nx: a hand-written native replacement for a translated function (Test 2.3: the movie
-+// player's IDCT). Registered by a static initialiser; when a table is registered (or a variant
-+// selected), every entry at that address takes `fn` in place of its translation, keeping its
-+// signature and its resume function, so an overlay still runs it only while its own bytes are in
-+// RAM and an interrupted call still resumes in the translation.
-+void register_native_override(std::uint32_t address, GuestFn fn) noexcept;
-+// How many table entries the overrides replaced (for the log).
-+std::size_t native_overrides_applied() noexcept;
 +
  // Looks the guest address up in the merged table. Returns nullptr when untranslated. Entries with
  // a signature are only returned when `m` is given and the words match memory at `address`.
@@ -5796,6 +5787,32 @@ index 0000000..768ccbd
 +bool enable_idle_skip(::dream::Memory& m, std::uint32_t function,
 +                      const std::vector<std::uint32_t>& callers, std::string& error);
 +const IdleSkipStats& idle_skip_stats() noexcept;
++
++}  // namespace dream::sh4
+diff --git a/runtime/include/dream/runtime/sh4/native_override.h b/runtime/include/dream/runtime/sh4/native_override.h
+new file mode 100644
+index 0000000..6bfbd18
+--- /dev/null
++++ b/runtime/include/dream/runtime/sh4/native_override.h
+@@ -0,0 +1,20 @@
++#pragma once
++// SA-nx: a hand-written native replacement for a translated function (Test 2.3: the movie
++// player's IDCT). Kept out of abi.h, which every translated unit includes: a change there
++// recompiles the whole game.
++#include <cstddef>
++#include <cstdint>
++
++#include "dream/runtime/sh4/abi.h"
++
++namespace dream::sh4 {
++
++// Registered by a static initialiser; when a table is registered (or a variant selected), every
++// entry at that address takes `fn` in place of its translation, keeping its signature and its
++// resume function, so an overlay still runs it only while its own bytes are in RAM and an
++// interrupted call still resumes in the translation.
++void register_native_override(std::uint32_t address, GuestFn fn) noexcept;
++// How many table entries the overrides replaced (for the log).
++std::size_t native_overrides_applied() noexcept;
 +
 +}  // namespace dream::sh4
 diff --git a/runtime/include/dream/runtime/sh4/ops.h b/runtime/include/dream/runtime/sh4/ops.h
@@ -6600,7 +6617,7 @@ index e9c8dcc..d8d8455 100644
          if (now_ < best)
              now_ = best;
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index b900b12..c019bf3 100644
+index b900b12..6453dbc 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
 @@ -1,5 +1,6 @@
@@ -6610,15 +6627,16 @@ index b900b12..c019bf3 100644
  #include <algorithm>
  #include <cstdio>
  #include <cstdlib>
-@@ -9,6 +10,7 @@
+@@ -9,6 +10,8 @@
  #include <vector>
  
  #include "dream/runtime/sh4/abi.h"
++#include "dream/runtime/sh4/native_override.h"
 +#include "dream/runtime/sh4/idle_skip.h"
  #ifdef DREAM_DEV_INTERPRETER
  #include "dream/runtime/devinterp/replay.h"
  #endif
-@@ -44,28 +46,72 @@ namespace {
+@@ -44,28 +47,72 @@ namespace {
  // address, so an address whose first entry is unsigned has no overlay at all and its answer is a
  // property of the table alone. Those are cached; everything else takes the slow path every time,
  // exactly as before.
@@ -6692,7 +6710,7 @@ index b900b12..c019bf3 100644
  void register_functions(const FunctionEntry* entries, std::size_t count) noexcept {
      flush_fn_cache();
      // Keyed by physical address so every RAM alias (P0/P1/P2/P3) of an entry resolves in O(log n).
-@@ -81,6 +127,49 @@ void register_functions(const FunctionEntry* entries, std::size_t count) noexcep
+@@ -81,6 +128,49 @@ void register_functions(const FunctionEntry* entries, std::size_t count) noexcep
              return a.address < b.address;
          return (a.signature != nullptr) > (b.signature != nullptr);
      });
@@ -6742,7 +6760,7 @@ index b900b12..c019bf3 100644
  }
  
  namespace {
-@@ -144,11 +233,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+@@ -144,11 +234,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
      flush_fn_cache();  // same reason as the range above
  }
  
@@ -6820,7 +6838,7 @@ index b900b12..c019bf3 100644
      const auto& t = table();
      if (interpreted(phys))
          return nullptr;
-@@ -161,6 +314,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -161,6 +315,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
              // change while the table and the interpret set stand.
              slot.phys = phys;
              slot.fn = it->fn;
@@ -6829,7 +6847,7 @@ index b900b12..c019bf3 100644
              return it->fn;
          }
          if (!m)
-@@ -168,8 +323,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -168,8 +324,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
          bool same = true;
          for (std::uint32_t i = 0; same && i < it->signature_words; ++i)
              same = m->read16(address + 2 * i) == it->signature[i];
@@ -6844,7 +6862,7 @@ index b900b12..c019bf3 100644
      }
      return nullptr;
  }
-@@ -316,6 +476,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -316,6 +477,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
