@@ -74,6 +74,10 @@ cp "$BUILD/games/sonicadv/sonicadv_boot.elf" "$REPO/out/sonicadv-switch.elf"  # 
 sed -e 's#^image = ".*/\([^/"]*\.gdi\)"#image = "disc/\1"#' \
     -e 's#^path = "extracted/fs/1ST_READ.BIN"#path = "1ST_READ.BIN"#' \
     "$REPO/games/sonicadv/sonicadv.toml" > "$SD/sonicadv.toml"
+# The US version's config (its boot program is kept as 1ST_READ_US.BIN, taken from the disc).
+sed -e 's#^image = ".*/\([^/"]*\.gdi\)"#image = "disc/\1"#' \
+    -e 's#^path = "extracted_us/1ST_READ.plain.bin"#path = "1ST_READ_US.BIN"#' \
+    "$REPO/games/sonicadv/sonicadv_us.toml" > "$SD/sonicadv_us.toml"
 echo
 echo "staged $SD/sonicadv.nro ($(stat -c %s "$SD/sonicadv.nro") bytes)"
 sha256sum "$SD/sonicadv.nro"

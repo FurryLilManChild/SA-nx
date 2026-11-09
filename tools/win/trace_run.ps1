@@ -14,7 +14,7 @@ $env:DREAM_TRACE_RETURNS_TO = "$To"
 $env:DREAM_TRACE_NONLOCAL = '1'
 foreach ($mode in $Modes) {
     Start-Log "trace-$mode.log" "trace_run $mode cycles $From to $To" | Out-Null
-    $a = @('--config', $GameToml, '--boot-sr', '0x600000F1', '--max-seconds', $Seconds, '--no-audio',
+    $a = @('--config', $GameToml, '--max-seconds', $Seconds, '--no-audio',
            '--press', $press, '--report', (Join-Path $LogDir "trace-$mode-report.txt"))
     if ($mode -eq 'I') { $a += '--interpret' }
     Write-Host "Run $mode ($(if ($mode -eq 'T') { 'translated, about a minute' } else { 'interpreted, several minutes' })) ..."

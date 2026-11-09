@@ -1,6 +1,8 @@
 # Sonic Adventure. Everything is in cmake/DreamAddGame.cmake; this file exists so that adding a game is
 # adding a directory. Add BOOT_TEST once the title boots far enough to be worth asserting on.
-dream_add_game(sonicadv TITLE "Sonic Adventure")
+# The US version (v1.005) is translated into the same launcher; the disc picks one at start
+# (sonicadv_us.toml, generated from sonicadv.toml by tools/map_variant.py).
+dream_add_game(sonicadv TITLE "Sonic Adventure" VARIANTS sonicadv_us)
 
 # SA-nx: units built with the compiler's full optimisation (the rest keep -O1, which keeps the
 # whole game's build to hours). switch-test17: the movie player's main unit (MOVIE.BIN, Sofdec at
@@ -9,13 +11,15 @@ dream_add_game(sonicadv TITLE "Sonic Adventure")
 # and 31 and the Emerald Coast module, 84% of it). -fno-strict-aliasing because translated code
 # reads guest memory through casts that -O2 would otherwise be entitled to reorder.
 set(_sanx_full_opt)
-foreach(_u sonicadv_part1 sonicadv_part2 sonicadv_part11 sonicadv_part27 sonicadv_part29
-           sonicadv_part30 sonicadv_part31 sonicadv_reloc_8ceb0000 sonicadv_reloc_8c900000_34)
-  list(APPEND _sanx_full_opt ${CMAKE_CURRENT_BINARY_DIR}/gen/${_u}.cpp)
-endforeach()
-foreach(_k RANGE 1 7)
-  list(APPEND _sanx_full_opt ${CMAKE_CURRENT_BINARY_DIR}/gen/sonicadv_reloc_8ceb0000_part${_k}.cpp
-                             ${CMAKE_CURRENT_BINARY_DIR}/gen/sonicadv_reloc_8c900000_34_part${_k}.cpp)
+# The same units of the US version (its config keeps the PAL order, so the same names).
+foreach(_g sonicadv sonicadv_us)
+  foreach(_u part1 part2 part11 part27 part29 part30 part31 reloc_8ceb0000 reloc_8c900000_34)
+    list(APPEND _sanx_full_opt ${CMAKE_CURRENT_BINARY_DIR}/gen/${_g}_${_u}.cpp)
+  endforeach()
+  foreach(_k RANGE 1 7)
+    list(APPEND _sanx_full_opt ${CMAKE_CURRENT_BINARY_DIR}/gen/${_g}_reloc_8ceb0000_part${_k}.cpp
+                               ${CMAKE_CURRENT_BINARY_DIR}/gen/${_g}_reloc_8c900000_34_part${_k}.cpp)
+  endforeach()
 endforeach()
 if(MSVC)
   set_source_files_properties(${_sanx_full_opt} PROPERTIES COMPILE_OPTIONS "/O2;/bigobj")

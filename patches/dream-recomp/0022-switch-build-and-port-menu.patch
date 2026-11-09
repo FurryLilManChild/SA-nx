@@ -561,9 +561,41 @@ index 0000000..e55e77a
 +    return failures ? 1 : 0;
 +}
 diff --git a/cmake/DreamAddGame.cmake b/cmake/DreamAddGame.cmake
-index 08a8560..da92cd9 100644
+index 08a8560..12e1142 100644
 --- a/cmake/DreamAddGame.cmake
 +++ b/cmake/DreamAddGame.cmake
+@@ -1,4 +1,4 @@
+-# dream_add_game(<id> [TITLE "Name"] [BOOT_TEST])
++# dream_add_game(<id> [TITLE "Name"] [BOOT_TEST] [VARIANTS <id>...])
+ #
+ # Everything a recompiled title needs: translate its binary at build time, compile the generated
+ # units, and link them with the runtime into a `<id>_boot` launcher.
+@@ -25,12 +25,11 @@ set(DREAM_TRANSLATE_PARTS 1 CACHE STRING
+ set(DREAM_TRANSLATE_EXTRA_FLAGS "" CACHE STRING
+     "Extra dream-translate flags for the game units (--trace, --no-irq); development trees only")
+ 
+-function(dream_add_game id)
+-  cmake_parse_arguments(ARG "BOOT_TEST" "TITLE" "" ${ARGN})
+-  if(NOT ARG_TITLE)
+-    set(ARG_TITLE ${id})
+-  endif()
+-
++# SA-nx: one configuration's translation (the custom command and its list of units), so that one
++# launcher can hold several versions of a game (VARIANTS). Sets <out_units> in the caller; empty
++# when the configuration's binary is absent.
++function(_dream_translation id title out_units)
++  set(ARG_TITLE ${title})
+   set(_dir ${CMAKE_CURRENT_SOURCE_DIR})
+   set(_toml_path ${_dir}/${id}.toml)
+   if(NOT EXISTS ${_toml_path})
+@@ -47,6 +46,7 @@ function(dream_add_game id)
+   endif()
+   set(_bin ${_dir}/${CMAKE_MATCH_1})
+   if(NOT EXISTS ${_bin})
++    set(${out_units} "" PARENT_SCOPE)
+     return()  # nobody's disc here: not an error, just nothing to build
+   endif()
+ 
 @@ -94,9 +94,18 @@ function(dream_add_game id)
      string(REGEX MATCH "file[ \t]*=[ \t]*\"([^\"]+)\"" _fm "${_b}")
      if(CMAKE_MATCH_1)
@@ -586,7 +618,7 @@ index 08a8560..da92cd9 100644
      endif()
    endforeach()
  
-@@ -109,11 +118,21 @@ function(dream_add_game id)
+@@ -109,13 +118,44 @@ function(dream_add_game id)
    endif()
  
    separate_arguments(DREAM_TRANSLATE_EXTRA_FLAGS)
@@ -609,7 +641,30 @@ index 08a8560..da92cd9 100644
 +    DEPENDS ${_translate_dep} ${_toml_path} ${_symbols} ${_bin} ${_extra_deps}
      COMMENT "Translating ${ARG_TITLE}"
      VERBATIM)
++  set(${out_units} ${_units} PARENT_SCOPE)
++endfunction()
++
++function(dream_add_game id)
++  cmake_parse_arguments(ARG "BOOT_TEST" "TITLE" "VARIANTS" ${ARGN})
++  if(NOT ARG_TITLE)
++    set(ARG_TITLE ${id})
++  endif()
++
++  set(_dir ${CMAKE_CURRENT_SOURCE_DIR})
++  set(_toml_path ${_dir}/${id}.toml)
++  _dream_translation(${id} "${ARG_TITLE}" _units)
++  if(NOT _units)
++    return()  # nobody's disc here: not an error, just nothing to build
++  endif()
++  # SA-nx: VARIANTS: other versions of the game (their own <variant>.toml next to this one, with
++  # [game] variant = true), translated into the same launcher; the disc picks one at start.
++  foreach(_v IN LISTS ARG_VARIANTS)
++    _dream_translation(${_v} "${ARG_TITLE} (${_v})" _vunits)
++    list(APPEND _units ${_vunits})
++  endforeach()
  
+   add_executable(${id}_boot ${DREAM_ROOT}/runtime/boot/boot_main.cpp
+     ${DREAM_ROOT}/runtime/boot/profiler.cpp ${_units})  # SA-nx: profiler.cpp (--profile)
 diff --git a/docs/emitter-design.md b/docs/emitter-design.md
 index fa711c7..f6e5b8a 100644
 --- a/docs/emitter-design.md
@@ -3530,7 +3585,7 @@ index 0000000..86c3828
 +    CHECK(px[240 * 640 + 320] != 0x12345678u);
 +}
 diff --git a/runtime/boot/boot_main.cpp b/runtime/boot/boot_main.cpp
-index 824d0b4..c05eabe 100644
+index 824d0b4..aa29703 100644
 --- a/runtime/boot/boot_main.cpp
 +++ b/runtime/boot/boot_main.cpp
 @@ -8,6 +8,7 @@
@@ -4106,7 +4161,7 @@ index 824d0b4..c05eabe 100644
      }
  
      // What the player is pressing, as a Maple controller sees it. The buttons are active low.
-@@ -373,8 +782,249 @@ struct Live {
+@@ -373,8 +782,251 @@ struct Live {
  
      // Its keys are the launcher's fixed ones, never the player's: rebinding the game's buttons can
      // never take away the way back out. Called once per poll, running or paused.
@@ -4155,13 +4210,15 @@ index 824d0b4..c05eabe 100644
 +    // screen but character select, where it read 0. Both must agree, and only outside play. Read
 +    // on the game thread (render_post, render) so the render thread never touches guest RAM.
 +    bool on_character_select() {
-+        const std::uint32_t screen = memory_.read32(0x0C760CF0u),
-+                            flag = memory_.read32(0x0C4C7714u);
++        // Per version ([port] charsel_words); the PAL addresses by default.
++        const std::uint32_t screen = memory_.read32(charsel_screen_addr),
++                            flag = memory_.read32(charsel_flag_addr);
 +        if (screen != seen_screen_ || flag != seen_flag_) {
 +            seen_screen_ = screen;
 +            seen_flag_ = flag;
-+            std::printf("screen words: 0x8C760CF0=%u 0x8C4C7714=%u (%llu renders)\n", screen, flag,
-+                        static_cast<unsigned long long>(rendered));
++            std::printf("screen words: 0x%08X=%u 0x%08X=%u (%llu renders)\n",
++                        charsel_screen_addr | 0x80000000u, screen, charsel_flag_addr | 0x80000000u,
++                        flag, static_cast<unsigned long long>(rendered));
 +        }
 +        return screen == 5 && flag == 0;
 +    }
@@ -4356,7 +4413,7 @@ index 824d0b4..c05eabe 100644
          // Escape does two things a keystroke apart: leave the screen, then end the run. The key has
          // to be let go before it means the second one. Without this, closing the screen with escape
          // re-arms quit under a finger that is still down, and one key repeat ends the run -- which
-@@ -384,10 +1034,9 @@ struct Live {
+@@ -384,10 +1036,9 @@ struct Live {
              window.set_escape_quits(true);
          }
          if (window.pressed(Control::Menu)) {
@@ -4370,7 +4427,7 @@ index 824d0b4..c05eabe 100644
              return;
          }
          if (!menu.is_open())
-@@ -501,17 +1150,19 @@ struct Live {
+@@ -501,17 +1152,19 @@ struct Live {
          const double guest_s = static_cast<double>(guest_cycles) / 200e6;
          if (fps_mark == std::chrono::steady_clock::time_point{}) {
              fps_mark = now;
@@ -4393,7 +4450,7 @@ index 824d0b4..c05eabe 100644
          fps_guest_at_mark = guest_s;
      }
  
-@@ -560,7 +1211,7 @@ struct Live {
+@@ -560,7 +1213,7 @@ struct Live {
          if (!f)
              return;
          std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
@@ -4402,7 +4459,7 @@ index 824d0b4..c05eabe 100644
          const std::size_t n = static_cast<std::size_t>(shown.width) * shown.height;
          for (std::size_t i = 0; i < n; ++i) {
              const std::uint32_t p = src[i];
-@@ -642,7 +1293,16 @@ struct Live {
+@@ -642,7 +1295,16 @@ struct Live {
  
      dream::render::vk::Window window;
      dream::render::vk::Renderer renderer;
@@ -4420,7 +4477,7 @@ index 824d0b4..c05eabe 100644
      dream::render::vk::Presenter presenter;
      dream::render::DisplayList decoder;
      dream::render::vk::FrameGeometry geometry;
-@@ -652,6 +1312,26 @@ struct Live {
+@@ -652,6 +1314,28 @@ struct Live {
      std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
                    decoded_frames = 0, backgrounds = 0;
      std::uint64_t vram_invalidated = 0;  // SA-nx: textures dropped because the guest rewrote them
@@ -4438,6 +4495,8 @@ index 824d0b4..c05eabe 100644
 +    bool skipped_last_present_ = false;
 +    bool job_in_game_ = true, job_charsel_ = false;
 +    std::uint32_t seen_screen_ = ~0u, seen_flag_ = ~0u;
++    // SA-nx: the two words on_character_select reads ([port] charsel_words); PAL by default.
++    std::uint32_t charsel_screen_addr = 0x0C760CF0u, charsel_flag_addr = 0x0C4C7714u;
 +    int menu_logged_ = -1, logged_translucency_ = -1;
 +    std::uint64_t presents_skipped = 0, perf_skipped_at = 0, pacing_rebased = 0;  // SA-nx: refreshes left on the last finished frame
 +    static constexpr std::size_t kJobRegWords = 0x200 / 4;  // the background plane's registers
@@ -4447,7 +4506,7 @@ index 824d0b4..c05eabe 100644
      std::uint32_t target_address = 0;
      std::uint64_t guest_frame = 0;
      std::vector<std::uint32_t> last_stream;
-@@ -660,9 +1340,46 @@ struct Live {
+@@ -660,9 +1344,46 @@ struct Live {
      // looks (frames actually presented per second of wall clock) and whether it is keeping up
      // (guest time elapsed per second of wall clock, where 1.00x is the console's own pace).
      bool show_fps = false;
@@ -4494,7 +4553,7 @@ index 824d0b4..c05eabe 100644
      // Where a change is written back. Empty means this run only: --bindings was pointed nowhere
      // usable, or SDL could not name a settings directory on this host.
      std::string bindings_path;
-@@ -1078,6 +1795,13 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1078,6 +1799,13 @@ void usage(const char* argv0, std::FILE* out) {
          "  --window               open a window and play; implies sound\n"
          "  --scale N              draw at N times the guest's 640x480 (1 to 4, default 1)\n"
          "  --fps                  start with the on-screen frame-rate counter showing\n"
@@ -4508,7 +4567,7 @@ index 824d0b4..c05eabe 100644
          "  --present-mode M       vsync (default), mailbox or immediate. The default paces the\n"
          "                         whole run to the panel, so --unthrottled with a window measures\n"
          "                         the refresh rate rather than the emulator.\n"
-@@ -1108,6 +1832,7 @@ void usage(const char* argv0, std::FILE* out) {
+@@ -1108,6 +1836,7 @@ void usage(const char* argv0, std::FILE* out) {
          "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
          "  --hide-file NAME[,..] the game cannot open these disc files (e.g. an intro movie)\n"
          "  --profile FILE        sample where the game thread spends its time; report at exit\n"
@@ -4516,7 +4575,7 @@ index 824d0b4..c05eabe 100644
          "  --boot-sr VALUE        the SR the game starts with (default 0x400000F1)\n"
          "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
          "                         up down left right), to get past screens that wait for input\n"
-@@ -1181,6 +1906,62 @@ private:
+@@ -1181,6 +1910,62 @@ private:
  };
  }  // namespace
  
@@ -4579,15 +4638,20 @@ index 824d0b4..c05eabe 100644
  int main(int argc, char** argv) {
      // SA-nx: trace runs write hundreds of thousands of lines to stderr, which is unbuffered and very
      // slow line by line on Windows. Buffer it; the stdio buffers are flushed when main returns.
-@@ -1233,6 +2014,7 @@ int main(int argc, char** argv) {
+@@ -1233,6 +2018,12 @@ int main(int argc, char** argv) {
      // down left right.
      std::string presses;
      std::vector<std::string> hide_files;  // --hide-file NAME[,NAME]
++    // SA-nx: --alt-config FILE (repeatable): other versions of the game in this program. The disc's
++    // product number picks the configuration whose [game] product matches.
++    std::vector<std::string> alt_configs;
++    std::string charsel_arg;  // SA-nx: --charsel-words SCREEN_ADDR,FLAG_ADDR
++    bool boot_sr_given = false;
 +    std::string options_file;             // SA-nx: --options FILE (the port menu)
      std::string profile_path;  // SA-nx: --profile FILE
      std::uint32_t boot_sr = 0x400000F1u;  // --boot-sr VALUE
      // --window: open a window and play. Without it the run is headless exactly as before.
-@@ -1242,10 +2024,22 @@ int main(int argc, char** argv) {
+@@ -1242,10 +2033,22 @@ int main(int argc, char** argv) {
      // --fps: start with the on-screen counter showing. F10 toggles it either way; this only
      // decides where it starts, so a run nobody is sitting at still records the figure.
      bool start_with_fps = false;
@@ -4610,7 +4674,7 @@ index 824d0b4..c05eabe 100644
      // --rtc-seed N: a fixed console clock, so two runs of the same build do the same thing and can
      // be compared. Any non-zero value will do; the number itself only changes the date a title
      // shows.
-@@ -1274,6 +2068,8 @@ int main(int argc, char** argv) {
+@@ -1274,6 +2077,8 @@ int main(int argc, char** argv) {
      for (int i = 1; i < argc; ++i) {
          if (!std::strcmp(argv[i], "--config") && i + 1 < argc)
              config = argv[++i];
@@ -4619,7 +4683,7 @@ index 824d0b4..c05eabe 100644
          else if (!std::strcmp(argv[i], "--report") && i + 1 < argc)
              report = argv[++i];
          else if (!std::strcmp(argv[i], "--stop-on-ta"))
-@@ -1334,6 +2130,8 @@ int main(int argc, char** argv) {
+@@ -1334,10 +2139,15 @@ int main(int argc, char** argv) {
              dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
          else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
              presses = argv[++i];
@@ -4628,7 +4692,14 @@ index 824d0b4..c05eabe 100644
          else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc)
              profile_path = argv[++i];
          else if (!std::strcmp(argv[i], "--boot-sr") && i + 1 < argc)
-@@ -1358,6 +2156,20 @@ int main(int argc, char** argv) {
++        {
+             boot_sr = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
++            boot_sr_given = true;
++        }
+         else if (!std::strcmp(argv[i], "--hide-file") && i + 1 < argc) {
+             std::string rest = argv[++i];
+             while (!rest.empty()) {
+@@ -1358,6 +2168,24 @@ int main(int argc, char** argv) {
              writeback = true;
          else if (!std::strcmp(argv[i], "--fps"))
              start_with_fps = true;
@@ -4638,6 +4709,10 @@ index 824d0b4..c05eabe 100644
 +            pipeline_cache_file = argv[++i];
 +        else if (!std::strcmp(argv[i], "--idle-skip") && i + 1 < argc)
 +            idle_skip = argv[++i];
++        else if (!std::strcmp(argv[i], "--alt-config") && i + 1 < argc)
++            alt_configs.push_back(argv[++i]);
++        else if (!std::strcmp(argv[i], "--charsel-words") && i + 1 < argc)
++            charsel_arg = argv[++i];
 +        else if (!std::strcmp(argv[i], "--play-modules") && i + 1 < argc)
 +            play_modules_arg = argv[++i];
 +        else if (!std::strcmp(argv[i], "--no-render-thread"))
@@ -4649,7 +4724,7 @@ index 824d0b4..c05eabe 100644
          else if (!std::strcmp(argv[i], "--suggest-config") && i + 1 < argc)
              suggest_config = argv[++i];
          else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc)
-@@ -1387,8 +2199,10 @@ int main(int argc, char** argv) {
+@@ -1387,8 +2215,10 @@ int main(int argc, char** argv) {
              log_from = std::strtoull(spec, nullptr, 0);
              if (const char* colon = std::strchr(spec, ':'))
                  log_count = std::strtoull(colon + 1, nullptr, 0);
@@ -4661,7 +4736,7 @@ index 824d0b4..c05eabe 100644
          else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
              usage(argv[0], stdout);
              return 0;
-@@ -1398,6 +2212,9 @@ int main(int argc, char** argv) {
+@@ -1398,6 +2228,9 @@ int main(int argc, char** argv) {
              return 2;
          }
      }
@@ -4671,9 +4746,11 @@ index 824d0b4..c05eabe 100644
      if (config.empty()) {
          std::fprintf(stderr, "--config is required\n");
          return 2;
-@@ -1425,6 +2242,24 @@ int main(int argc, char** argv) {
+@@ -1424,7 +2257,26 @@ int main(int argc, char** argv) {
+         return 2;
      }
      std::unique_ptr<dream::gdrom::Disc> disc;
++    std::string disc_product, disc_version, disc_boot_name;
      if (cfg.disc_image) {
 +        // SA-nx (release 0.5.0): a dump named differently from the configuration is still found
 +        // when it is the only GDI or CHD in that folder, so players need not rename theirs.
@@ -4696,21 +4773,100 @@ index 824d0b4..c05eabe 100644
          disc = dream::gdrom::open_disc(*cfg.disc_image, err);
          if (!disc) {
              std::fprintf(stderr, "disc: %s\n", err.c_str());
-@@ -1435,12 +2270,31 @@ int main(int argc, char** argv) {
+@@ -1434,13 +2286,110 @@ int main(int argc, char** argv) {
+             disc = std::make_unique<HidingDisc>(std::move(disc), hide_files);
              std::printf("disc: hiding %zu file(s) from the game\n", hide_files.size());
          }
-     }
++        // SA-nx: which version of the game is in the drive. IP.BIN is the first sector of the
++        // game area: product number at 0x40, boot file name at 0x60.
++        std::uint8_t ip[2048];
++        if (const auto* hd = disc->hd_track(); hd && disc->read_user(hd->lba, ip)) {
++            auto field = [&](int at, int n) {
++                std::string s(reinterpret_cast<const char*>(ip) + at, static_cast<std::size_t>(n));
++                while (!s.empty() && (s.back() == ' ' || s.back() == '\0'))
++                    s.pop_back();
++                return s;
++            };
++            disc_product = field(0x40, 10);
++            disc_version = field(0x4A, 6);
++            disc_boot_name = field(0x60, 16);
++            std::printf("disc: %s %s, boot file %s\n", disc_product.c_str(), disc_version.c_str(),
++                        disc_boot_name.c_str());
++        }
++        auto matches = [&](const dream::translator::GameConfig& g) {
++            return g.product == disc_product && (g.version.empty() || g.version == disc_version);
++        };
++        if (!disc_product.empty() && !cfg.product.empty() && !matches(cfg)) {
++            bool switched = false;
++            for (const auto& alt : alt_configs) {
++                dream::translator::GameConfig other;
++                std::string why;
++                if (!dream::translator::load_game_config(alt, other, why)) {
++                    std::fprintf(stderr, "alt config %s: %s\n", alt.c_str(), why.c_str());
++                    continue;
++                }
++                if (matches(other)) {
++                    std::printf("disc: %s is not %s; using %s (%s)\n", disc_product.c_str(),
++                                cfg.product.c_str(), alt.c_str(), other.region.c_str());
++                    other.disc_image = cfg.disc_image;  // the disc already open
++                    cfg = std::move(other);
++                    switched = true;
++                    break;
++                }
++            }
++            if (!switched) {
++                // A version this program was not built for runs different code at the same
++                // addresses: refuse rather than crash somewhere later.
++                std::string known = cfg.product + " " + cfg.version;
++                for (const auto& alt : alt_configs) {
++                    dream::translator::GameConfig other;
++                    std::string why;
++                    if (dream::translator::load_game_config(alt, other, why))
++                        known += ", " + other.product + " " + other.version;
++                }
++                std::fprintf(stderr,
++                             "disc: %s %s is a version this build does not support (it supports"
++                             " %s)\n",
++                             disc_product.c_str(), disc_version.c_str(), known.c_str());
++                return 3;
++            }
++        }
++    }
++    // SA-nx: a program holding several versions makes the chosen one's translations live.
++    if (const auto names = dream::sh4::registered_variants(); !names.empty()) {
++        if (!dream::sh4::select_variant(cfg.id)) {
++            std::string list;
++            for (const auto& n : names) list += (list.empty() ? "" : ", ") + n;
++            std::fprintf(stderr, "no translation of %s in this program (it has %s)\n",
++                         cfg.id.c_str(), list.c_str());
++            return 2;
++        }
++        std::printf("translation: %s\n", cfg.id.c_str());
++    }
++    // Version settings from the configuration unless given on the command line.
++    if (idle_skip.empty())
++        idle_skip = cfg.port_idle_skip;
++    if (play_modules_arg.empty())
++        play_modules_arg = cfg.port_play_modules;
++    if (charsel_arg.empty())
++        charsel_arg = cfg.port_charsel;
++    if (!boot_sr_given && cfg.port_boot_sr)
++        boot_sr = cfg.port_boot_sr;
 +    // SA-nx (release 0.5.0): the boot program comes off the disc the first time, so a player only
 +    // copies the disc image. Found through the disc's ISO 9660 file system, whose extents on a
 +    // GD-ROM are disc LBAs (dcdisc iso9660.py), and written next to the configuration.
 +    if (disc && !std::filesystem::exists(cfg.binary_path)) {
 +        std::string why;
-+        if (extract_boot_file(*disc, cfg.binary_path.filename().string(), cfg.binary_path, why))
++        // The disc's own boot file name (IP.BIN), so a version's copy can have its own name next
++        // to the configuration (1ST_READ_US.BIN) and still be found on the disc.
++        const std::string on_disc =
++            disc_boot_name.empty() ? cfg.binary_path.filename().string() : disc_boot_name;
++        if (extract_boot_file(*disc, on_disc, cfg.binary_path, why))
 +            std::printf("boot program: %s written from the disc\n", cfg.binary_path.string().c_str());
 +        else
 +            std::fprintf(stderr, "boot program: cannot take %s from the disc: %s\n",
 +                         cfg.binary_path.string().c_str(), why.c_str());
-+    }
+     }
      std::ifstream in(cfg.binary_path, std::ios::binary);
      if (!in) {
          std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
@@ -4729,7 +4885,7 @@ index 824d0b4..c05eabe 100644
  
      dream::System sys;
      dream::hle::Bios bios(sys);
-@@ -1682,12 +2536,23 @@ int main(int argc, char** argv) {
+@@ -1682,12 +2631,29 @@ int main(int argc, char** argv) {
          live = std::make_unique<Live>(sys.memory, pvr);
          live->writeback = writeback;
          live->show_fps = start_with_fps;
@@ -4744,6 +4900,12 @@ index 824d0b4..c05eabe 100644
 +        // SA-nx: the port menu's resolution applies in play from the first render (pick_target),
 +        // unless --scale fixed one size for the whole run.
 +        live->dynamic_scale = !scale_given;
++        if (const auto comma = charsel_arg.find(','); comma != std::string::npos) {
++            live->charsel_screen_addr = static_cast<std::uint32_t>(
++                std::strtoul(charsel_arg.substr(0, comma).c_str(), nullptr, 0)) & 0x1FFFFFFFu;
++            live->charsel_flag_addr = static_cast<std::uint32_t>(
++                std::strtoul(charsel_arg.substr(comma + 1).c_str(), nullptr, 0)) & 0x1FFFFFFFu;
++        }
 +        for (std::size_t at = 0; at < play_modules_arg.size();) {
 +            const auto comma = play_modules_arg.find(',', at);
 +            live->play_modules.push_back(static_cast<std::uint32_t>(
@@ -4753,7 +4915,7 @@ index 824d0b4..c05eabe 100644
          if (!live->start(
                  scale, validation,
                  cfg.title.empty() ? std::string("Dream Recomp") : cfg.title + " - Dream Recomp")) {
-@@ -1698,7 +2563,38 @@ int main(int argc, char** argv) {
+@@ -1698,7 +2664,38 @@ int main(int argc, char** argv) {
          live->bindings_path =
              bindings_file_set ? bindings_file : dream::render::vk::default_bindings_path();
          live->load_bindings();
@@ -4793,7 +4955,7 @@ index 824d0b4..c05eabe 100644
          auto previous_render = std::move(pvr.on_render);
          pvr.on_render = [&live, previous_render](const std::vector<std::uint32_t>& stream) {
              if (previous_render)
-@@ -1712,6 +2608,10 @@ int main(int argc, char** argv) {
+@@ -1712,6 +2709,10 @@ int main(int argc, char** argv) {
          // Wall-clock time the guest was stopped for, which the pacing below owes back. Without it
          // the run would sprint to catch up the moment the binding screen closed.
          auto paused_for = std::chrono::steady_clock::duration::zero();
@@ -4804,7 +4966,7 @@ index 824d0b4..c05eabe 100644
          auto previous_vblank = std::move(sys.spg.on_vblank_out);
          sys.spg.on_vblank_out = [&, previous_vblank, started] {
              if (previous_vblank)
-@@ -1721,9 +2621,9 @@ int main(int argc, char** argv) {
+@@ -1721,9 +2722,9 @@ int main(int argc, char** argv) {
              // The binding screen stops the guest rather than drawing over a running one: nobody
              // rebinds a control mid-corner, and a control being captured cannot also be played.
              // The window keeps presenting, so the screen still draws and still answers the player.
@@ -4816,7 +4978,7 @@ index 824d0b4..c05eabe 100644
                      if (!live->present(sys.spg.frames(), sys.ctx.cycles))
                          throw StopRun{"the window was closed"};
                      // Enough to keep the screen responsive without spinning a core on a still
-@@ -1732,6 +2632,7 @@ int main(int argc, char** argv) {
+@@ -1732,6 +2733,7 @@ int main(int argc, char** argv) {
                      std::this_thread::sleep_for(std::chrono::milliseconds(8));
                  }
                  paused_for += std::chrono::steady_clock::now() - paused_at;
@@ -4824,7 +4986,7 @@ index 824d0b4..c05eabe 100644
              }
              // Scripted presses win while they are held, so --press still works with a window open.
              if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
-@@ -1744,8 +2645,33 @@ int main(int argc, char** argv) {
+@@ -1744,8 +2746,33 @@ int main(int argc, char** argv) {
                  started + paused_for +
                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(guest);
              const auto now = std::chrono::steady_clock::now();
@@ -4860,7 +5022,7 @@ index 824d0b4..c05eabe 100644
          };
      }
  #endif
-@@ -1770,6 +2696,16 @@ int main(int argc, char** argv) {
+@@ -1770,6 +2797,16 @@ int main(int argc, char** argv) {
          else
              std::fprintf(stderr, "audio: %s\n", sink.error().c_str());
      }
@@ -4877,7 +5039,7 @@ index 824d0b4..c05eabe 100644
  #else
      // Asking for sound from a build that cannot make any should say so, but it is not worth
      // refusing the run over: --window implies audio, and a build without SDL3 should still show a
-@@ -1781,7 +2717,10 @@ int main(int argc, char** argv) {
+@@ -1781,7 +2818,10 @@ int main(int argc, char** argv) {
      (void)no_audio;
  #endif
      aica.on_sample = [&](std::int16_t l, std::int16_t r) {
@@ -4889,7 +5051,7 @@ index 824d0b4..c05eabe 100644
  #ifdef DREAM_WITH_AUDIO
          sink.push(l, r);
  #endif
-@@ -1790,6 +2729,23 @@ int main(int argc, char** argv) {
+@@ -1790,6 +2830,23 @@ int main(int argc, char** argv) {
              pcm.push_back(r);
          }
      };
@@ -4913,7 +5075,7 @@ index 824d0b4..c05eabe 100644
      // The console's clock. Seeded from the host clock so a title shows the right date, but that
      // makes two runs of the same build diverge, and a run that cannot be repeated cannot be
      // compared against another. --rtc-seed fixes it.
-@@ -1803,9 +2759,10 @@ int main(int argc, char** argv) {
+@@ -1803,9 +2860,10 @@ int main(int argc, char** argv) {
          sys.sched.request(rtc_tick, 200'000'000ull);
      });
      sys.sched.request(rtc_tick, 200'000'000ull);
@@ -4926,7 +5088,7 @@ index 824d0b4..c05eabe 100644
      // The first access to an address that is not in the memory map is the moment a run started
      // going wrong: everything after it is the guest following garbage. The fault log counts them
      // but records neither when nor from where, so the watchdog catches the transition and reports
-@@ -2036,6 +2993,30 @@ int main(int argc, char** argv) {
+@@ -2036,6 +3094,30 @@ int main(int argc, char** argv) {
          {
              (void)interpret_all;
              (void)entry;
@@ -4957,7 +5119,7 @@ index 824d0b4..c05eabe 100644
              dream::sh4::run_guest(sys.ctx, sys.memory, cfg.entry);
          }
      } catch (const StopRun& s) {
-@@ -2046,6 +3027,12 @@ int main(int argc, char** argv) {
+@@ -2046,6 +3128,12 @@ int main(int argc, char** argv) {
                       static_cast<void*>(dream::sh4::hooks()), static_cast<void*>(&sys));
          rc = 1;
      }
@@ -4970,7 +5132,7 @@ index 824d0b4..c05eabe 100644
      const double host_s =
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
      if (!profile_path.empty())
-@@ -2076,10 +3063,13 @@ int main(int argc, char** argv) {
+@@ -2076,10 +3164,13 @@ int main(int argc, char** argv) {
  #ifdef DREAM_WITH_AUDIO
      if (sink.is_open()) {
          sink.flush();
@@ -4986,7 +5148,7 @@ index 824d0b4..c05eabe 100644
      }
  #endif
      if (hash_file) {
-@@ -2145,7 +3135,7 @@ int main(int argc, char** argv) {
+@@ -2145,7 +3236,7 @@ int main(int argc, char** argv) {
          std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
          for (const auto& [pc, n] : arm_pcs) top.push_back({n, pc});
          std::sort(top.rbegin(), top.rend());
@@ -4995,7 +5157,7 @@ index 824d0b4..c05eabe 100644
          for (std::size_t i = 0; i < top.size() && i < 12; ++i)
              std::printf(" %08x:%llu", top[i].second, static_cast<unsigned long long>(top[i].first));
          std::printf("\n");
-@@ -2182,10 +3172,16 @@ int main(int argc, char** argv) {
+@@ -2182,10 +3273,16 @@ int main(int argc, char** argv) {
                          static_cast<double>(pcm.size() / 2) / 44100.0);
          }
      }
@@ -5178,6 +5340,35 @@ index 9a7ec21..1a51622 100644
  };
  
  }  // namespace dream::sched
+diff --git a/runtime/include/dream/runtime/sh4/abi.h b/runtime/include/dream/runtime/sh4/abi.h
+index a1db0ca..b3e8639 100644
+--- a/runtime/include/dream/runtime/sh4/abi.h
++++ b/runtime/include/dream/runtime/sh4/abi.h
+@@ -4,6 +4,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <string>
+ #include <utility>
+ #include <vector>
+ 
+@@ -39,6 +40,16 @@ struct NonLocalReturn {
+ // generates. Tables from several units are merged.
+ void register_functions(const FunctionEntry* entries, std::size_t count) noexcept;
+ 
++// SA-nx: one program can hold several versions of a game (Sonic Adventure PAL and US: the same
++// code at different addresses). A version's units register here under its name and stay out of
++// the live table until select_variant names it; then its tables join the live one and every other
++// version's are dropped. Returns false when nothing was registered under that name.
++void register_variant_functions(const char* variant, const FunctionEntry* entries,
++                                std::size_t count) noexcept;
++bool select_variant(const std::string& variant) noexcept;
++// The names registered, sorted; empty for a program built from one version.
++std::vector<std::string> registered_variants();
++
+ // Looks the guest address up in the merged table. Returns nullptr when untranslated. Entries with
+ // a signature are only returned when `m` is given and the words match memory at `address`.
+ GuestFn find_function(std::uint32_t address, ::dream::Memory* m = nullptr) noexcept;
 diff --git a/runtime/include/dream/runtime/sh4/idle_skip.h b/runtime/include/dream/runtime/sh4/idle_skip.h
 new file mode 100644
 index 0000000..768ccbd
@@ -5964,10 +6155,17 @@ index e9c8dcc..d8d8455 100644
          if (now_ < best)
              now_ = best;
 diff --git a/runtime/src/sh4/abi_bare.cpp b/runtime/src/sh4/abi_bare.cpp
-index b900b12..cd4d6ef 100644
+index b900b12..0b271b2 100644
 --- a/runtime/src/sh4/abi_bare.cpp
 +++ b/runtime/src/sh4/abi_bare.cpp
-@@ -9,6 +9,7 @@
+@@ -1,5 +1,6 @@
+ // Harness implementation of the emitted-code ABI: a function table, direct calls, and hard
+ // failures for anything that needs the real runtime (exceptions, interrupts, untranslated code).
++#include <map>
+ #include <algorithm>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -9,6 +10,7 @@
  #include <vector>
  
  #include "dream/runtime/sh4/abi.h"
@@ -5975,7 +6173,7 @@ index b900b12..cd4d6ef 100644
  #ifdef DREAM_DEV_INTERPRETER
  #include "dream/runtime/devinterp/replay.h"
  #endif
-@@ -44,23 +45,53 @@ namespace {
+@@ -44,23 +46,53 @@ namespace {
  // address, so an address whose first entry is unsigned has no overlay at all and its answer is a
  // property of the table alone. Those are cached; everything else takes the slow path every time,
  // exactly as before.
@@ -6030,7 +6228,50 @@ index b900b12..cd4d6ef 100644
      }
  }
  
-@@ -144,11 +175,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
+@@ -83,6 +115,42 @@ void register_functions(const FunctionEntry* entries, std::size_t count) noexcep
+     });
+ }
+ 
++namespace {
++struct VariantTables {
++    std::vector<std::pair<const FunctionEntry*, std::size_t>> tables;
++};
++std::map<std::string, VariantTables>& variants() {
++    static std::map<std::string, VariantTables> v;  // filled by static initialisers
++    return v;
++}
++}  // namespace
++
++void register_variant_functions(const char* variant, const FunctionEntry* entries,
++                                std::size_t count) noexcept {
++    variants()[variant].tables.emplace_back(entries, count);
++}
++
++bool select_variant(const std::string& variant) noexcept {
++    auto& v = variants();
++    const auto it = v.find(variant);
++    if (it == v.end())
++        return false;
++    // Register the whole version in one go: register_functions sorts after each table.
++    std::vector<FunctionEntry> all;
++    for (const auto& [entries, count] : it->second.tables)
++        all.insert(all.end(), entries, entries + count);
++    register_functions(all.data(), all.size());
++    v.clear();  // the other versions are never wanted in this run
++    return true;
++}
++
++std::vector<std::string> registered_variants() {
++    std::vector<std::string> out;
++    for (const auto& kv : variants())
++        out.push_back(kv.first);
++    return out;
++}
++
+ namespace {
+ std::uint32_t g_interp_lo = 0, g_interp_hi = 0;
+ // Individually hidden functions, in addition to the range. A contiguous range can say "somewhere
+@@ -144,11 +212,75 @@ void set_interpret_functions(const std::vector<std::pair<std::uint32_t, std::uin
      flush_fn_cache();  // same reason as the range above
  }
  
@@ -6108,7 +6349,7 @@ index b900b12..cd4d6ef 100644
      const auto& t = table();
      if (interpreted(phys))
          return nullptr;
-@@ -161,6 +256,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -161,6 +293,8 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
              // change while the table and the interpret set stand.
              slot.phys = phys;
              slot.fn = it->fn;
@@ -6117,7 +6358,7 @@ index b900b12..cd4d6ef 100644
              return it->fn;
          }
          if (!m)
-@@ -168,8 +265,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
+@@ -168,8 +302,13 @@ GuestFn find_function(std::uint32_t address, ::dream::Memory* m) noexcept {
          bool same = true;
          for (std::uint32_t i = 0; same && i < it->signature_words; ++i)
              same = m->read16(address + 2 * i) == it->signature[i];
@@ -6132,7 +6373,7 @@ index b900b12..cd4d6ef 100644
      }
      return nullptr;
  }
-@@ -316,6 +418,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
+@@ -316,6 +455,10 @@ void run_guest(Ctx& c, ::dream::Memory& m, GuestFn entry) {
  }
  
  void call_indirect(Ctx& c, ::dream::Memory& m, std::uint32_t target) {
@@ -6582,7 +6823,7 @@ index 947fb1b..5dfc2e0 100644
 +    CHECK(s.now() == 2000u);
 +}
 diff --git a/tests/sh4/CMakeLists.txt b/tests/sh4/CMakeLists.txt
-index ab43c15..750e02c 100644
+index ab43c15..e7afe4b 100644
 --- a/tests/sh4/CMakeLists.txt
 +++ b/tests/sh4/CMakeLists.txt
 @@ -18,6 +18,12 @@ foreach(entry IN LISTS DREAM_SH4_PROGRAMS)
@@ -6607,6 +6848,25 @@ index ab43c15..750e02c 100644
      DEPENDS dream-translate ${bin} ${CMAKE_CURRENT_SOURCE_DIR}/programs/programs.cmake
      COMMENT "Translating ${name}"
      VERBATIM)
+@@ -41,11 +47,16 @@ foreach(entry IN LISTS DREAM_SH4_PROGRAMS)
+   # own name (ENTRY:END:name), so one C unit can host many harness entries.
+   list(GET spec_list 0 first_spec)
+   string(REGEX REPLACE "^[^:]*:[^:]*:" "" entry_fn "${first_spec}")
+-  string(APPEND _program_table "    {\"${name}\", &dream::gen::${entry_fn}},\n")
++  # SA-nx: a --variant unit lives in dream::gen::<variant> (its tests name it themselves).
++  set(_ns dream::gen)
++  if(extra_flags MATCHES "--variant;([A-Za-z0-9_]+)")
++    set(_ns dream::gen::${CMAKE_MATCH_1})
++  endif()
++  string(APPEND _program_table "    {\"${name}\", &${_ns}::${entry_fn}},\n")
+   foreach(s IN LISTS spec_list)
+     string(REGEX REPLACE "^[^:]*:[^:]*:" "" fn "${s}")
+     if(NOT fn STREQUAL s AND NOT fn STREQUAL name)
+-      string(APPEND _program_table "    {\"${fn}\", &dream::gen::${fn}},\n")
++      string(APPEND _program_table "    {\"${fn}\", &${_ns}::${fn}},\n")
+     endif()
+   endforeach()
+ endforeach()
 diff --git a/tests/sh4/programs/p14_bank.bin b/tests/sh4/programs/p14_bank.bin
 new file mode 100644
 index 0000000000000000000000000000000000000000..4c58169e9f66fc39d1d698fcec1f3e5a42a66f90
@@ -6650,7 +6910,7 @@ index 0000000..8fb33d5
 +	rts			! 000b
 +	nop			! 0009
 diff --git a/tests/sh4/programs/programs.cmake b/tests/sh4/programs/programs.cmake
-index bdb126a..33e26b0 100644
+index bdb126a..e7e5eb8 100644
 --- a/tests/sh4/programs/programs.cmake
 +++ b/tests/sh4/programs/programs.cmake
 @@ -1,5 +1,5 @@
@@ -6660,7 +6920,7 @@ index bdb126a..33e26b0 100644
  # Regenerate the .bin files with tools/docker/run.sh and the commands in tests/sh4/README.md.
  set(DREAM_SH4_PROGRAMS
    "p1_sum|p1_sum.bin|0x8c010000|0x8c010000:0x8c010014:sum"
-@@ -18,6 +18,13 @@ set(DREAM_SH4_PROGRAMS
+@@ -18,6 +18,16 @@ set(DREAM_SH4_PROGRAMS
    "p12_selfcmp|p12_selfcmp.bin|0x8c010000|0x8c010000:0x8c01005c:selfcmp"
    # Own base: position independent, kept out of the shared function table like p10.
    "p13_tailpr|p13_tailpr.bin|0x8c040000|0x8c040000:0x8c04000a:tailpr_main 0x8c04000a:0x8c04000e:tailpr_inner 0x8c04000e:0x8c040014:tailpr_tail 0x8c040014:0x8c040020:tailpr_main2 0x8c040024:0x8c040032:tailpr_main3 0x8c040034:0x8c04003e:tailpr_jret"
@@ -6671,6 +6931,9 @@ index bdb126a..33e26b0 100644
 +  # (678 bytes) signed over its whole extent.
 +  "p4_dispatch|p4_calls.bin|0x8c060000|0x8c060000:0x8c060022:calls_d 0x8c060022:0x8c060026:inc_d 0x8c060026:0x8c06002c:dbl_d|--overlay --full-signature --dispatch-calls"
 +  "c1_fullsig|../cprogs/c1_idioms.bin|0x8c070000|0x8c070280:0x8c070526:fib_full|--overlay --full-signature"
++  # SA-nx: one program holding two versions of a game: p4 registered as version "vtest", live only
++  # once select_variant names it.
++  "p4_variant|p4_calls.bin|0x8c080000|0x8c080000:0x8c080022:calls_v 0x8c080022:0x8c080026:inc_v 0x8c080026:0x8c08002c:dbl_v|--variant vtest"
    # GCC-compiled C unit (tests/sh4/cprogs, `make specs` prints this line)
    "c1_idioms|../cprogs/c1_idioms.bin|0x8c010000|0x8c010000:0x8c010024:div_mod 0x8c010028:0x8c010072:udiv_mix 0x8c010080:0x8c0100e4:dense_switch 0x8c0100e8:0x8c010100:mul64 0x8c010100:0x8c010132:sub64 0x8c010134:0x8c010178:pack_bytes 0x8c010180:0x8c0101d6:vec_transform 0x8c0101d8:0x8c010222:sort_words 0x8c010224:0x8c010246:dot3 0x8c010248:0x8c01026a:clamp_scale 0x8c010270:0x8c01027c:float_to_fixed 0x8c010280:0x8c010526:fib 0x8c01052c:0x8c010552:str_len 0x8c010554:0x8c010574:mem_copy 0x8c010578:0x8c0106b8:udivsi3_i4i 0x8c01059e:0x8c0105d4:udivsi3_i4i_059e 0x8c0105cc:0x8c0105d4:udivsi3_i4i_05cc 0x8c0105d4:0x8c010648:udivsi3_i4i_05d4 0x8c010648:0x8c010796:sdivsi3_i4i 0x8c010674:0x8c0106b8:sdivsi3_i4i_0674 0x8c01069a:0x8c0106b8:sdivsi3_i4i_069a"
  )
@@ -6723,10 +6986,10 @@ index c9028a3..8ca88c5 100644
      modes.push_back(Mode::Interpreted);
      modes.push_back(Mode::Hybrid);
 diff --git a/tests/sh4/test_programs.cpp b/tests/sh4/test_programs.cpp
-index 4cee63e..2b47ff1 100644
+index 4cee63e..5c7b9de 100644
 --- a/tests/sh4/test_programs.cpp
 +++ b/tests/sh4/test_programs.cpp
-@@ -302,3 +302,74 @@ TEST_CASE("p7_fpuedge: FPU edge cases match the interpreter's captured state") {
+@@ -302,3 +302,93 @@ TEST_CASE("p7_fpuedge: FPU edge cases match the interpreter's captured state") {
      }
      CHECK(c.fpscr == 0x00040001u);
  }
@@ -6801,11 +7064,30 @@ index 4cee63e..2b47ff1 100644
 +    m.write16(0x8C070524, static_cast<std::uint16_t>(m.read16(0x8C070524) ^ 0x0100u));
 +    CHECK(dream::sh4::find_function(0x8C070280u, &m) == nullptr);
 +}
++
++TEST_CASE("p4_variant: a version's functions are live only after select_variant") {
++    // SA-nx: the PAL and US Sonic Adventure translations in one program.
++    dream::BareMemory m;
++    load_image(m, "p4_calls.bin", 0x8C080000);
++    CHECK(dream::sh4::find_function(0x8C080000u, &m) == nullptr);
++    const auto names = dream::sh4::registered_variants();
++    REQUIRE(names.size() == 1);
++    CHECK(names[0] == "vtest");
++    CHECK_FALSE(dream::sh4::select_variant("other"));
++    REQUIRE(dream::sh4::select_variant("vtest"));
++    CHECK(dream::sh4::find_function(0x8C080000u, &m) == &dream::gen::vtest::calls_v);
++    CHECK(dream::sh4::registered_variants().empty());
++    Ctx c = fresh();
++    c.next_event = ~std::uint64_t{0};
++    c.r[4] = 7;
++    dream::gen::vtest::calls_v(c, m);
++    CHECK(c.r[0] == ((7u + 1) * 2) + 100 + 5);
++}
 diff --git a/translator/include/dream/translator/config/game_config.h b/translator/include/dream/translator/config/game_config.h
-index 2c5ed17..66401f8 100644
+index 2c5ed17..21f8b4d 100644
 --- a/translator/include/dream/translator/config/game_config.h
 +++ b/translator/include/dream/translator/config/game_config.h
-@@ -23,6 +23,13 @@ struct Relocation {
+@@ -23,12 +23,29 @@ struct Relocation {
      // SA-nx: a code file the program loads from disc at run time, instead of a copy out of the
      // main binary. `source` is then a byte offset into this file (resolved against the config).
      std::filesystem::path file;
@@ -6819,11 +7101,27 @@ index 2c5ed17..66401f8 100644
  };
  
  struct GameConfig {
+     std::filesystem::path dir;  // directory of the config file; relative paths resolve against it
+ 
+     std::string id, title, region, product;
++    // SA-nx: [game] variant = true: this config is one version of a game sharing a program with
++    // others; its units register under `id` (EmitOptions::variant) and the launcher picks one.
++    bool variant = false;
++    std::string version;  // SA-nx: [game] version, as IP.BIN gives it ("V1.005"); empty = any
++    // SA-nx: [port] settings that belong to one version of the game (addresses differ between the
++    // PAL and US builds). The launcher's own options of the same name take precedence.
++    std::string port_idle_skip;     // idle_skip = "FUNCTION:CALLER,CALLER"
++    std::string port_play_modules;  // play_modules = "W,W,..." first words of gameplay modules
++    std::string port_charsel;       // charsel_words = "SCREEN_ADDR,FLAG_ADDR"
++    std::uint32_t port_boot_sr = 0; // boot_sr; 0 = unset
+     std::string sha1_1st_read, chd_sha1;
+     std::optional<std::filesystem::path>
+         disc_image;  // [disc] image, resolved; the GDI/CHD to mount
 diff --git a/translator/include/dream/translator/emit.h b/translator/include/dream/translator/emit.h
-index e47a463..c6ff163 100644
+index e47a463..17294f0 100644
 --- a/translator/include/dream/translator/emit.h
 +++ b/translator/include/dream/translator/emit.h
-@@ -48,7 +48,19 @@ struct EmitOptions {
+@@ -48,7 +48,24 @@ struct EmitOptions {
      // it costs a constructor and destructor per call even when no harness is installed.
      bool replay_hooks = false;
      bool irq_checks = true;  // interrupt polls at entry and back-edges (ADR 7)
@@ -6840,14 +7138,32 @@ index e47a463..c6ff163 100644
 +    // unit's callee even when another file, identical in the caller but not in the callee, is
 +    // the one in RAM.
 +    bool dispatch_calls = false;
++    // SA-nx: one program holding several versions of a game (Sonic Adventure PAL and US). The
++    // unit's functions go in namespace dream::gen::<variant> and register with
++    // register_variant_functions, so the boot code can make one version's table the live one
++    // (select_variant). Empty: dream::gen and register_functions, as before.
++    std::string variant;
      // Split the unit's function bodies over this many translation units (SA-nx). A 6.7 MB binary
      // emits about 160 MB of C++, which no compiler handles well as one file. Part 0 also holds the
      // registration table; the other parts land in EmitResult::extra_sources.
 diff --git a/translator/src/config/game_config.cpp b/translator/src/config/game_config.cpp
-index 295ca6f..8ce740f 100644
+index 295ca6f..d864242 100644
 --- a/translator/src/config/game_config.cpp
 +++ b/translator/src/config/game_config.cpp
-@@ -147,6 +147,14 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+@@ -96,6 +96,12 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
+         !get_str(t["disc"]["sha1_1st_read"], "disc.sha1_1st_read", c.sha1_1st_read, error, false) ||
+         !get_str(t["disc"]["chd_sha1"], "disc.chd_sha1", c.chd_sha1, error, false))
+         return false;
++    c.variant = t["game"]["variant"].value_or(false);
++    c.version = t["game"]["version"].value_or(std::string{});
++    c.port_idle_skip = t["port"]["idle_skip"].value_or(std::string{});
++    c.port_play_modules = t["port"]["play_modules"].value_or(std::string{});
++    c.port_charsel = t["port"]["charsel_words"].value_or(std::string{});
++    c.port_boot_sr = static_cast<std::uint32_t>(t["port"]["boot_sr"].value_or(std::int64_t{0}));
+     std::string disc_image;
+     if (!get_str(t["disc"]["image"], "disc.image", disc_image, error, false))
+         return false;
+@@ -147,6 +153,14 @@ bool finish(const toml::table& t, const std::filesystem::path& dir, GameConfig&
                  return false;
              r.no_fold = rv["no_fold"].value_or(false);
              r.overlay = rv["overlay"].value_or(false);
@@ -6863,7 +7179,7 @@ index 295ca6f..8ce740f 100644
              if (!get_str(rv["file"], "relocations.file", file, error, false))
                  return false;
 diff --git a/translator/src/emit/emit.cpp b/translator/src/emit/emit.cpp
-index 26c7374..927cf6e 100644
+index 26c7374..e760420 100644
 --- a/translator/src/emit/emit.cpp
 +++ b/translator/src/emit/emit.cpp
 @@ -39,7 +39,109 @@ std::string label(std::uint32_t a) {
@@ -7204,8 +7520,46 @@ index 26c7374..927cf6e 100644
              for (std::uint32_t a = f.entry; a < stop; a += 2) src << hexu(image.read16(a)) << ", ";
              src << "};\n";
          }
+@@ -1916,12 +2038,34 @@ EmitResult emit_unit(const Image& image, const std::vector<FunctionSpec>& functi
+             src << ", nullptr, 0";
+         src << ", " << hexu(f.end) << ", &" << f.name << "__resume},\n";
+     }
+-    src << "};\nstruct Registrar {\n    Registrar() { register_functions(kTable, sizeof kTable / "
+-           "sizeof kTable[0]); }\n} registrar;\n"
+-        << "}  // namespace\n}  // namespace dream::gen\n";
++    if (options.variant.empty())
++        src << "};\nstruct Registrar {\n    Registrar() { register_functions(kTable, sizeof kTable / "
++               "sizeof kTable[0]); }\n} registrar;\n";
++    else
++        src << "};\nstruct Registrar {\n    Registrar() { register_variant_functions(\""
++            << options.variant << "\", kTable, sizeof kTable / sizeof kTable[0]); }\n} registrar;\n";
++    src << "}  // namespace\n}  // namespace dream::gen\n";
+     hdr << "}  // namespace dream::gen\n";
+     result.source = src.str();
+     result.header = hdr.str();
++    if (!options.variant.empty()) {
++        // Each version's functions in their own namespace: both versions have a function at
++        // most addresses, under the same generated names.
++        const std::string ns = "dream::gen::" + options.variant;
++        auto rename = [&](std::string& s) {
++            for (const char* from : {"namespace dream::gen {", "}  // namespace dream::gen\n"}) {
++                const std::string f(from);
++                std::string t = f;
++                t.replace(t.find("dream::gen"), 10, ns);
++                for (std::size_t at = s.find(f); at != std::string::npos; at = s.find(f, at + t.size()))
++                    s.replace(at, f.size(), t);
++            }
++        };
++        rename(result.source);
++        rename(result.header);
++        for (auto& x : result.extra_sources)
++            rename(x);
++    }
+     return result;
+ }
+ 
 diff --git a/translator/src/main.cpp b/translator/src/main.cpp
-index 4ef6d21..0364552 100644
+index 4ef6d21..796ef8e 100644
 --- a/translator/src/main.cpp
 +++ b/translator/src/main.cpp
 @@ -3,7 +3,7 @@
@@ -7217,14 +7571,15 @@ index 4ef6d21..0364552 100644
  #include <algorithm>
  #include <cstdio>
  #include <cstdlib>
-@@ -34,12 +34,13 @@ int usage(int code) {
+@@ -34,12 +34,14 @@ int usage(int code) {
                   "functions.json] [--no-pointers] [--no-sweep]\n"
                   "  dream-translate emit --image FILE --base ADDR --function ENTRY:END[:name]... "
                   "--out FILE.cpp\n"
 -                 "                       [--header FILE.h] [--no-fold] [--trace] [--no-irq] "
 +                 "                       [--header FILE.h] [--no-fold] [--trace] [--no-irq] [--no-local-regs] "
                   "[--symbols FILE.tsv]\n"
-+                 "                       [--overlay] [--full-signature] [--dispatch-calls]\n"
++                 "                       [--overlay] [--full-signature] [--dispatch-calls]"
++                 " [--variant NAME]\n"
                   "  dream-translate symbols --ghidra functions.json --out symbols.tsv "
                   "[--keep-conflicts]\n"
                   "  dream-translate game --config games/ID/ID.toml --out-dir DIR [--no-fold] "
@@ -7233,7 +7588,7 @@ index 4ef6d21..0364552 100644
                   dream::translator::version().data());
      return code;
  }
-@@ -170,6 +171,14 @@ int cmd_emit(int argc, char** argv) {
+@@ -170,6 +172,16 @@ int cmd_emit(int argc, char** argv) {
              opt.trace = true;
          else if (!std::strcmp(argv[i], "--no-irq"))
              opt.irq_checks = false;
@@ -7245,10 +7600,12 @@ index 4ef6d21..0364552 100644
 +            opt.full_signature = true;
 +        else if (!std::strcmp(argv[i], "--dispatch-calls"))
 +            opt.dispatch_calls = true;
++        else if (!std::strcmp(argv[i], "--variant") && i + 1 < argc)
++            opt.variant = argv[++i];
          else if (!std::strcmp(argv[i], "--functions") && i + 1 < argc) {
              std::string err;
              if (!dream::translator::load_functions_json(argv[++i], fns, err)) {
-@@ -463,6 +472,8 @@ int cmd_game(int argc, char** argv) {
+@@ -463,6 +475,8 @@ int cmd_game(int argc, char** argv) {
              opt.trace = true;
          else if (!std::strcmp(argv[i], "--no-irq"))
              opt.irq_checks = false;
@@ -7257,7 +7614,16 @@ index 4ef6d21..0364552 100644
          else if (!std::strcmp(argv[i], "--parts") && i + 1 < argc)
              opt.parts = static_cast<unsigned>(std::max(1, std::atoi(argv[++i])));
          else
-@@ -535,9 +546,11 @@ int cmd_game(int argc, char** argv) {
+@@ -476,6 +490,8 @@ int cmd_game(int argc, char** argv) {
+         std::fprintf(stderr, "%s\n", err.c_str());
+         return 2;
+     }
++    if (cfg.variant)
++        opt.variant = cfg.id;  // every unit of this config, the main one and each relocation
+     dream::translator::Image img;
+     if (!load_image(cfg.binary_path.string(), cfg.link_address, img)) {
+         std::fprintf(stderr, "cannot read %s\n", cfg.binary_path.string().c_str());
+@@ -535,9 +551,11 @@ int cmd_game(int argc, char** argv) {
          if (rel.no_fold)
              view_opt.fold_literals = false;
          view_opt.overlay = rel.overlay;

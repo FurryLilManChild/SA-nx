@@ -604,22 +604,16 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    g_args = {"sonicadv", "--config", "sonicadv.toml", "--window", "--boot-sr", "0x600000F1",
-              "--vmu", "save/vmu_A1.bin", "--options", "sonicadv_options.txt",
-              // The game's wait loop: 0x8C641F98 and 0x8C641FD8 call the empty function at
-              // 0x8C64162C until an interrupt changes a flag (switch-test12 profile: 10.8% of the
-              // game thread at full speed). The clock jumps to the next event instead.
-              "--idle-skip", "0x0C64162C:0x0C641FA0,0x0C641FE0",
-              // The first word of every gameplay module (stages, fields, bosses, Chao garden,
-              // minigames), so the in-game resolution applies only in play (switch-test18).
-              "--play-modules",
-              "0x2FD62FE6,0x432BD307,0x432BD357,0x4F222FE6,0x55484F22,0x6032D30F,0x60505548,"
-              "0x63505548,0x6432D317,0x6E432FE6,0x7FFC4F22,0xD35F7FE8,0xD507D308"};
+    // The boot SR, idle skip, gameplay modules and character select words are per version and
+    // live in each configuration's [port] table (test 2.3): the disc picks PAL (sonicadv.toml) or
+    // US (sonicadv_us.toml).
+    g_args = {"sonicadv", "--config", "sonicadv.toml", "--alt-config", "sonicadv_us.toml",
+              "--window", "--vmu", "save/vmu_A1.bin", "--options", "sonicadv_options.txt"};
 #ifndef SANX_RELEASE
     // Development builds write the end-of-run report (untranslated call targets, device
     // counters). A release leaves it out: building it took about a minute after quitting, even
     // when it was not written to a file, so a release also skips building it (--quick-exit).
-    g_args.insert(g_args.begin() + 7, {"--report", "sonicadv_report.txt"});
+    g_args.insert(g_args.end(), {"--report", "sonicadv_report.txt"});
 #else
     g_args.push_back("--quick-exit");
 #endif
@@ -676,6 +670,10 @@ int main(int argc, char** argv) {
     threadClose(&game);
 
     std::printf("[switch] the launcher returned %d\n", g_rc);
+    if (g_rc == 3)
+        message_screen("Sonic Adventure (SA-nx)\n\nThis version of the disc is not supported.\n"
+                       "SA-nx runs the PAL v1.003 and US v1.005 discs.\n\n"
+                       "The disc's product number and version are in sonicadv.err.log.");
     clk_restore();
     g_flusher_stop = true;
     threadWaitForExit(&g_flusher);

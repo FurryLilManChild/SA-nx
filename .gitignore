@@ -1,6 +1,7 @@
 # Game data is never committed: the disc, anything extracted from it, saves, captures.
 assets/
 games/*/extracted/
+games/*/extracted_us/
 games/*/disc/
 games/*/dump/
 games/*/cache/

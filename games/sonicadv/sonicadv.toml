@@ -7,9 +7,26 @@ id = "sonicadv"
 title = "Sonic Adventure"
 region = "Europe"
 product = "MK-5100050"
+# One program holds this and the US version (sonicadv_us.toml); the disc's product number picks.
+variant = true
 
 [disc]
 image = "../../assets/Sonic Adventure v1.003 (1999)(Sega)(PAL)(M5)[!].gdi"
+
+# Settings that belong to this version of the game (the US build has them at other addresses;
+# tools/map_variant.py carries them over). The launcher's own options of the same name win.
+[port]
+# The game starts with SR.RB set (SARecomp's captured boot state; patch 0008).
+boot_sr = 0x600000F1
+# The game's wait loop: 0x8C641F98 and 0x8C641FD8 call the empty function at 0x8C64162C until an
+# interrupt changes a flag (switch-test12 profile: 10.8% of the game thread at full speed).
+idle_skip = "0x0C64162C:0x0C641FA0,0x0C641FE0"
+# The first word of every gameplay module (stages, fields, bosses, Chao garden, minigames), so the
+# in-game resolution applies only in play (switch-test18). Not addresses: instruction words.
+play_modules = "0x2FD62FE6,0x432BD307,0x432BD357,0x4F222FE6,0x55484F22,0x6032D30F,0x60505548,0x63505548,0x6432D317,0x6E432FE6,0x7FFC4F22,0xD35F7FE8,0xD507D308"
+# Character select (switch-test27): a per-screen number (5 there) and a flag in the boot
+# program's data (0 there, 16 elsewhere).
+charsel_words = "0x0C760CF0,0x0C4C7714"
 
 [binary]
 path = "extracted/fs/1ST_READ.BIN"

@@ -9,6 +9,7 @@ $DepsDir = Join-Path $Root '.deps'
 $Sdl3Dir = Join-Path $DepsDir 'SDL3-3.4.16'
 $GameId  = 'sonicadv'
 $GameToml = Join-Path $Root "games\$GameId\$GameId.toml"
+$GameTomlUs = Join-Path $Root "games\$GameId\${GameId}_us.toml"  # the US version (v1.005)
 $GameExe = Join-Path $BuildDir "games\$GameId\${GameId}_boot.exe"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 # The game's memory card (VMU) lives here between runs (out\ is never committed).

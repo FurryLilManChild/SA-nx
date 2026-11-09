@@ -3,16 +3,18 @@
 # The intro movie is hidden from the game unless -KeepIntro.
 # Log: out\logs\play.log (plus out\logs\play-report.txt and suggested.toml when it exits)
 # out\logs\profile.txt: where the game thread spent its time (sampled about 1,000 times a second).
-param([switch]$KeepIntro)
+param([switch]$KeepIntro, [switch]$Us)
 . "$PSScriptRoot\common.ps1"
 if (-not (Test-Path $GameExe)) { throw 'Not built yet. Run tools\win\build_pc.ps1 first.' }
 Start-Log 'play.log' 'play' | Out-Null
 $a = @('--config', $GameToml, '--window',
        '--report', (Join-Path $LogDir 'play-report.txt'),
        '--suggest-config', (Join-Path $LogDir 'suggested.toml'))
-# Sonic Adventure's renderer runs on CPU register bank 1 (SR.RB = 1); starting on bank 0 made
-# it lose model pointers (black Station Square, wrong character-select models).
-$a += @('--boot-sr', '0x600000F1')
+# The boot SR and the other per-version settings are in each config's [port] table. -Us runs the
+# US disc (sonicadv_us.toml names it); either way the other config is offered too, and the disc's
+# product number picks.
+if ($Us) { $a[1] = $GameTomlUs; $a += @('--alt-config', $GameToml) }
+else { $a += @('--alt-config', $GameTomlUs) }
 # Memory card: created blank on first run, kept between runs (out\saves\vmu_A1.bin).
 $a += @('--vmu', $VmuFile)
 if (-not $KeepIntro) { $a += @('--hide-file', 'SA1_600.SFD') }

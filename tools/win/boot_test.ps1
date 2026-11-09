@@ -5,7 +5,7 @@
 #   out\logs\suggested.toml    code the run reached that is not translated yet (Claude merges it)
 #   powershell -ExecutionPolicy Bypass -File tools\win\boot_test.ps1 [-Seconds 120] [-Headless] [-KeepIntro]
 # The intro movie (SA1_600.SFD) is hidden from the game unless -KeepIntro, so boots skip it.
-param([int]$Seconds = 120, [switch]$Headless, [switch]$KeepIntro)
+param([int]$Seconds = 120, [switch]$Headless, [switch]$KeepIntro, [switch]$Us)
 . "$PSScriptRoot\common.ps1"
 if (-not (Test-Path $GameExe)) { throw 'Not built yet. Run tools\win\build_pc.ps1 first.' }
 Start-Log 'boot.log' "boot_test $Seconds s" | Out-Null
@@ -14,9 +14,11 @@ $a = @('--config', $GameToml, '--max-seconds', $Seconds,
        '--report', (Join-Path $LogDir 'boot-report.txt'),
        '--suggest-config', (Join-Path $LogDir 'suggested.toml'),
        '--dump', '0x8C900000:0x200')  # what is loaded at 0x8C900000 when the run stops
-# Sonic Adventure's renderer runs on CPU register bank 1 (SR.RB = 1); starting on bank 0 made
-# it lose model pointers (black Station Square, wrong character-select models).
-$a += @('--boot-sr', '0x600000F1')
+# The boot SR and the other per-version settings are in each config's [port] table. -Us runs the
+# US disc (sonicadv_us.toml names it); either way the other config is offered too, and the disc's
+# product number picks.
+if ($Us) { $a[1] = $GameTomlUs; $a += @('--alt-config', $GameToml) }
+else { $a += @('--alt-config', $GameTomlUs) }
 # Memory card: created blank on first run, kept between runs (out\saves\vmu_A1.bin).
 $a += @('--vmu', $VmuFile)
 if (-not $KeepIntro) { $a += @('--hide-file', 'SA1_600.SFD') }
