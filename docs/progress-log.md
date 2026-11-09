@@ -2,6 +2,29 @@
 
 Newest first. One entry per session: what broke, the cause, the fix, with evidence.
 
+## 2026-11-09: test2.2 built: PAL and US in one NRO
+
+- US disc: Mark's GDI is US v1.005 (MK-51000, 1999-10-05); the (Rev A) CHD beside it is a later
+  revision, not supported yet (the launcher refuses it with a message). Extracted on his PC; the
+  main program is the PAL code shifted (mostly +192 bytes), every module and cutscene file the same
+  code by its own small shifts. tools/map_variant.py carried the config over: 321 addresses, none
+  unmapped, 4 weak (6 to 26 bytes equal), 219 from module/cutscene header tables. The US character
+  select word in zeroed data (0x8C760DB0) is a guess by the program's end shift (+192): check the
+  "screen words" log line on character select.
+- dream-recomp (patch 0022): variant units ([game] variant = true) in dream::gen::<id>,
+  register_variant_functions / select_variant; boot reads IP.BIN (product, version, boot file)
+  and picks between --config and --alt-config; [port] boot_sr, idle_skip, play_modules,
+  charsel_words; an unsupported version returns 3 and the Switch shows why. dream_add_game
+  VARIANTS. Test: p4 as version "vtest" is live only after select_variant (emitter 17 cases).
+- Build: 1,111 steps, two restarts at the 2-hour limit. Linking then failed three ways: the ELF
+  passed 4 GB with debug information and devkitPro's linker under Wine wrote it with an empty
+  header (also when compressed to 512 MB); fixed by linking generated units from copies without
+  debug information (switch/link_rsp.sh, devkitPro objcopy; llvm-objcopy's copies broke
+  relocations). Then three US objects (sonicadv_us, _part29, _part30) were broken by the time-limit
+  kills (undefined .LANCHOR0): deleted and rebuilt. NRO 514,043,935 bytes, sha256
+  65827c8e625574788687be0ab4b950fff6b255c27934b5026705ae017eb81f4e, verified on Mark's PC with
+  sonicadv.toml and sonicadv_us.toml; ELF kept as test2.2.elf.
+
 ## 2026-11-08: test2.2: radial stick dead zone, optional square stick
 
 - A player claimed the Dreamcast stick's range is square. Not confirmed by any source found. Either
